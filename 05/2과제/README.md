@@ -1,19 +1,19 @@
-# 05 2과제
+﻿# 05 2怨쇱젣
 
-## 모듈 구성
+## 紐⑤뱢 援ъ꽦
 
-| 모듈 | 경로 | 리전 | 내용 |
+| 紐⑤뱢 | 寃쎈줈 | 由ъ쟾 | ?댁슜 |
 |---|---|---|---|
-| 1 | `module-1/infra/` | us-east-1 | CDN (S3 + Lambda + CloudFront) |
+| 1 | `module1/infra/` | us-east-1 | CDN (S3 + Lambda + CloudFront) |
 | 2 | `module-2/` | ap-southeast-1 | Kafka + Flink + NLB |
-| 3 | `module-3/infra/` | ap-northeast-2 | FastAPI + CW Agent + EventBridge |
+| 3 | `module3/infra/` | ap-northeast-2 | FastAPI + CW Agent + EventBridge |
 | 4 | `module-4/` | eu-central-1 | Keycloak + OIDC + IAM |
 
 ---
 
-## 실행 순서
+## ?ㅽ뻾 ?쒖꽌
 
-### 사전 준비 (CloudShell)
+### ?ъ쟾 以鍮?(CloudShell)
 
 ```bash
 cd ~
@@ -25,17 +25,15 @@ git clone https://github.com/hnmly/2026-terraform.git
 ### Module 1: CDN
 
 ```bash
-cd ~/2026-terraform/05/2과제/module-1/infra
+cd ~/2026-terraform/05/2怨쇱젣/module1/infra
 
-# Pillow 패키지 빌드 (terraform apply 전 필수)
+# Pillow ?⑦궎吏 鍮뚮뱶 (terraform apply ???꾩닔)
 bash build.sh
 
 terraform init
-terraform apply -var pin=<비번호>
-# ⏱ ~5분
-
-# apply 완료 후 배포파일 S3 업로드
-aws s3 cp <이미지파일> s3://gj2026-cdn-bucket-<비번호>/images/ --region us-east-1
+terraform apply -var pin=<鍮꾨쾲??
+# ??~5遺?
+# apply ?꾨즺 ??諛고룷?뚯씪 S3 ?낅줈??aws s3 cp <?대?吏?뚯씪> s3://gj2026-cdn-bucket-<鍮꾨쾲??/images/ --region us-east-1
 ```
 
 ---
@@ -43,12 +41,11 @@ aws s3 cp <이미지파일> s3://gj2026-cdn-bucket-<비번호>/images/ --region 
 ### Module 2: Real-time data analytics
 
 ```bash
-cd ~/2026-terraform/05/2과제/module-2
+cd ~/2026-terraform/05/2怨쇱젣/module-2
 
 terraform init
 terraform apply
-# ⏱ ~5분
-# EC2 userdata에서 Kafka 자동 설치 + 토픽 생성 (약 3분 더 소요)
+# ??~5遺?# EC2 userdata?먯꽌 Kafka ?먮룞 ?ㅼ튂 + ?좏뵿 ?앹꽦 (??3遺????뚯슂)
 ```
 
 ---
@@ -56,12 +53,11 @@ terraform apply
 ### Module 3: Cloud event handling
 
 ```bash
-cd ~/2026-terraform/05/2과제/module-3/infra
+cd ~/2026-terraform/05/2怨쇱젣/module3/infra
 
 terraform init
-terraform apply -var alarm_email=<이메일주소>
-# ⏱ ~3분
-# alarm_email: SNS 이메일 알림 수신 주소 (채점항목 3-8)
+terraform apply -var alarm_email=<?대찓?쇱＜??
+# ??~3遺?# alarm_email: SNS ?대찓???뚮┝ ?섏떊 二쇱냼 (梨꾩젏??ぉ 3-8)
 ```
 
 ---
@@ -69,83 +65,82 @@ terraform apply -var alarm_email=<이메일주소>
 ### Module 4: Keycloak
 
 ```bash
-cd ~/2026-terraform/05/2과제/module-4
+cd ~/2026-terraform/05/2怨쇱젣/module-4
 
 terraform init
 terraform apply
-# ⏱ ~10분
-# EC2 기동 → Keycloak 시작 대기(3분) → OIDC Provider + IAM Role 자동 생성
+# ??~10遺?# EC2 湲곕룞 ??Keycloak ?쒖옉 ?湲?3遺? ??OIDC Provider + IAM Role ?먮룞 ?앹꽦
 ```
 
-> apply 완료 후 출력된 `keycloak_public_ip` 확인
-> Keycloak 관리자 콘솔: `https://<IP>/admin` (admin / admin1234!)
+> apply ?꾨즺 ??異쒕젰??`keycloak_public_ip` ?뺤씤
+> Keycloak 愿由ъ옄 肄섏넄: `https://<IP>/admin` (admin / admin1234!)
 
 ---
 
-## 주의사항
+## 二쇱쓽?ы빆
 
-- **Module 1**: `bash build.sh` 먼저 실행하지 않으면 terraform apply 실패
-- **Module 3**: `alarm_email` 생략 가능 (SNS 구독 없이 알람만 생성)
-- **Module 4**: EC2 재시작 시 Public IP 바뀌면 `terraform apply` 재실행 필요
-- **Lambda Runtime**: PDF 명세는 `python3.14`이나 현재 `python3.12`로 설정 → AWS 지원 시 각 `main.tf`의 `runtime` 값 변경
-
+- **Module 1**: `bash build.sh` 癒쇱? ?ㅽ뻾?섏? ?딆쑝硫?terraform apply ?ㅽ뙣
+- **Module 3**: `alarm_email` ?앸왂 媛??(SNS 援щ룆 ?놁씠 ?뚮엺留??앹꽦)
+- **Module 4**: EC2 ?ъ떆????Public IP 諛붾뚮㈃ `terraform apply` ?ъ떎???꾩슂
+- **Lambda Runtime**: PDF 紐낆꽭??`python3.14`?대굹 ?꾩옱 `python3.12`濡??ㅼ젙 ??AWS 吏????媛?`main.tf`??`runtime` 媛?蹂寃?
 ---
 
-## 변경 가능 항목 수정 위치
+## 蹂寃?媛????ぉ ?섏젙 ?꾩튂
 
 ### Module 1
 
-| 변경 항목 | 파일 | 수정 위치 |
+| 蹂寃???ぉ | ?뚯씪 | ?섏젙 ?꾩튂 |
 |---|---|---|
-| S3 버킷 이름 | `module-1/infra/main.tf` | `locals.bucket_name` |
-| Lambda 함수 이름 (`gj2026-cdn-rotate`) | `module-1/infra/main.tf` | `aws_lambda_function.rotate.function_name` |
-| Lambda@Edge 이름 (`gj2026-cdn-request/response`) | `module-1/infra/main.tf` | `aws_lambda_function.request/response.function_name` |
-| CloudFront Behavior 경로 (`/images`) | `module-1/infra/main.tf` | `ordered_cache_behavior.path_pattern` |
-| 캐시 쿼리 파라미터 (`image`, `rotate`) | `module-1/infra/main.tf` | `aws_cloudfront_cache_policy.cdn` → `query_strings.items` |
-| 이미지 prefix (`images/`) | `module-1/infra/lambda/rotate.py` | `key = f"images/{image}"` |
-| 회전 방향 (시계→반시계) | `module-1/infra/lambda/rotate.py` | `img.rotate(-rotate` → `img.rotate(rotate` |
-| Lambda Runtime | `module-1/infra/main.tf` | `runtime` (3곳) |
+| S3 踰꾪궥 ?대쫫 | `module1/infra/main.tf` | `locals.bucket_name` |
+| Lambda ?⑥닔 ?대쫫 (`gj2026-cdn-rotate`) | `module1/infra/main.tf` | `aws_lambda_function.rotate.function_name` |
+| Lambda@Edge ?대쫫 (`gj2026-cdn-request/response`) | `module1/infra/main.tf` | `aws_lambda_function.request/response.function_name` |
+| CloudFront Behavior 寃쎈줈 (`/images`) | `module1/infra/main.tf` | `ordered_cache_behavior.path_pattern` |
+| 罹먯떆 荑쇰━ ?뚮씪誘명꽣 (`image`, `rotate`) | `module1/infra/main.tf` | `aws_cloudfront_cache_policy.cdn` ??`query_strings.items` |
+| ?대?吏 prefix (`images/`) | `module1/infra/lambda/rotate.py` | `key = f"images/{image}"` |
+| ?뚯쟾 諛⑺뼢 (?쒓퀎?믩컲?쒓퀎) | `module1/infra/lambda/rotate.py` | `img.rotate(-rotate` ??`img.rotate(rotate` |
+| Lambda Runtime | `module1/infra/main.tf` | `runtime` (3怨? |
 
 ### Module 2
 
-| 변경 항목 | 파일 | 수정 위치 |
+| 蹂寃???ぉ | ?뚯씪 | ?섏젙 ?꾩튂 |
 |---|---|---|
-| EC2 이름 (`gj2026-data-ec2`) | `module-2/main.tf` | `aws_instance.kafka` → `tags.Name` |
-| NLB 이름 (`gj2026-data-nlb`) | `module-2/main.tf` | `aws_lb.data.name` |
-| Kafka 내부 포트 (`9092`) | `module-2/main.tf` | SG ingress + userdata `INTERNAL://0.0.0.0:9092` |
-| Kafka 외부 포트 (`9094`) | `module-2/main.tf` | SG ingress + TG port + Listener port + userdata `EXTERNAL://0.0.0.0:9094` |
-| 토픽 이름/파티션 수 | `module-2/main.tf` | userdata의 `kafka-topics.sh --create` 명령 |
-| Glue DB 이름 (`real_time_analytics`) | `module-2/main.tf` | `aws_glue_catalog_database.analytics.name` |
+| EC2 ?대쫫 (`gj2026-data-ec2`) | `module-2/main.tf` | `aws_instance.kafka` ??`tags.Name` |
+| NLB ?대쫫 (`gj2026-data-nlb`) | `module-2/main.tf` | `aws_lb.data.name` |
+| Kafka ?대? ?ы듃 (`9092`) | `module-2/main.tf` | SG ingress + userdata `INTERNAL://0.0.0.0:9092` |
+| Kafka ?몃? ?ы듃 (`9094`) | `module-2/main.tf` | SG ingress + TG port + Listener port + userdata `EXTERNAL://0.0.0.0:9094` |
+| ?좏뵿 ?대쫫/?뚰떚????| `module-2/main.tf` | userdata??`kafka-topics.sh --create` 紐낅졊 |
+| Glue DB ?대쫫 (`real_time_analytics`) | `module-2/main.tf` | `aws_glue_catalog_database.analytics.name` |
 
 ### Module 3
 
-| 변경 항목 | 파일 | 수정 위치 |
+| 蹂寃???ぉ | ?뚯씪 | ?섏젙 ?꾩튂 |
 |---|---|---|
-| EC2 이름 (`gj2026-event-ec2`) | `module-3/infra/main.tf` | `aws_instance.event` → `tags.Name` |
-| 서비스 이름 (`gj2026-app`) | `module-3/infra/main.tf` | userdata의 서비스 파일명 + `systemctl` 명령 전체 |
-| FastAPI 포트 (`8080`) | `module-3/infra/main.tf` | userdata의 `port=8080` + SG ingress |
-| 앱 응답 메시지 (`WorldSkills 2026`) | `module-3/infra/main.tf` | userdata의 `app.py` 내 `"message"` 값 |
-| SSM Parameter 경로 (`/gj2026/event/app-py`) | `module-3/infra/main.tf` | `aws_ssm_parameter.app_py.name` + IAM policy |
-| 메트릭 이름 (`app_process_count`) | `module-3/infra/main.tf` | userdata의 `put-app-metric.sh` + `aws_cloudwatch_metric_alarm.app.metric_name` |
-| 알람 이름 (`gj2026-event-app-alarm`) | `module-3/infra/main.tf` | `aws_cloudwatch_metric_alarm.app.alarm_name` + EventBridge `event_pattern` |
-| 앱 로그 그룹 (`/gj2026/event/app-logs`) | `module-3/infra/main.tf` | `aws_cloudwatch_log_group.app_logs.name` + userdata CW Agent 설정 |
-| 복구 로그 그룹 (`/gj2026/event/recovery`) | `module-3/infra/main.tf` + `lambda/recovery.py` | `aws_cloudwatch_log_group.recovery.name` + `LOG_GROUP` 변수 |
-| EventBridge Rule 이름 (`gj2026-event-trigger-alarm`) | `module-3/infra/main.tf` | `aws_cloudwatch_event_rule.alarm_trigger.name` |
-| Updater Lambda 이름 (`gj2026-event-updater`) | `module-3/infra/main.tf` | `aws_lambda_function.updater.function_name` + userdata `ExecStartPost` |
-| Recovery Lambda 이름 (`gj2026-event-recovery`) | `module-3/infra/main.tf` | `aws_lambda_function.recovery.function_name` |
-| Lambda Runtime | `module-3/infra/main.tf` | `runtime` (2곳) |
+| EC2 ?대쫫 (`gj2026-event-ec2`) | `module3/infra/main.tf` | `aws_instance.event` ??`tags.Name` |
+| ?쒕퉬???대쫫 (`gj2026-app`) | `module3/infra/main.tf` | userdata???쒕퉬???뚯씪紐?+ `systemctl` 紐낅졊 ?꾩껜 |
+| FastAPI ?ы듃 (`8080`) | `module3/infra/main.tf` | userdata??`port=8080` + SG ingress |
+| ???묐떟 硫붿떆吏 (`WorldSkills 2026`) | `module3/infra/main.tf` | userdata??`app.py` ??`"message"` 媛?|
+| SSM Parameter 寃쎈줈 (`/gj2026/event/app-py`) | `module3/infra/main.tf` | `aws_ssm_parameter.app_py.name` + IAM policy |
+| 硫뷀듃由??대쫫 (`app_process_count`) | `module3/infra/main.tf` | userdata??`put-app-metric.sh` + `aws_cloudwatch_metric_alarm.app.metric_name` |
+| ?뚮엺 ?대쫫 (`gj2026-event-app-alarm`) | `module3/infra/main.tf` | `aws_cloudwatch_metric_alarm.app.alarm_name` + EventBridge `event_pattern` |
+| ??濡쒓렇 洹몃９ (`/gj2026/event/app-logs`) | `module3/infra/main.tf` | `aws_cloudwatch_log_group.app_logs.name` + userdata CW Agent ?ㅼ젙 |
+| 蹂듦뎄 濡쒓렇 洹몃９ (`/gj2026/event/recovery`) | `module3/infra/main.tf` + `lambda/recovery.py` | `aws_cloudwatch_log_group.recovery.name` + `LOG_GROUP` 蹂??|
+| EventBridge Rule ?대쫫 (`gj2026-event-trigger-alarm`) | `module3/infra/main.tf` | `aws_cloudwatch_event_rule.alarm_trigger.name` |
+| Updater Lambda ?대쫫 (`gj2026-event-updater`) | `module3/infra/main.tf` | `aws_lambda_function.updater.function_name` + userdata `ExecStartPost` |
+| Recovery Lambda ?대쫫 (`gj2026-event-recovery`) | `module3/infra/main.tf` | `aws_lambda_function.recovery.function_name` |
+| Lambda Runtime | `module3/infra/main.tf` | `runtime` (2怨? |
 
 ### Module 4
 
-| 변경 항목 | 파일 | 수정 위치 |
+| 蹂寃???ぉ | ?뚯씪 | ?섏젙 ?꾩튂 |
 |---|---|---|
-| EC2 이름 (`gj2026-keycloak-ec2`) | `module-4/main.tf` | `aws_instance.keycloak` → `tags.Name` |
-| Realm 이름 (`team`) | `module-4/main.tf` | userdata setup script의 모든 `/realms/team` + `null_resource.oidc_provider` |
-| Client 이름 (`gj2026-keycloak-dev/sec`) | `module-4/main.tf` | userdata의 `for CLIENT in` 배열 + `null_resource.iam_roles` |
-| Client Scope 이름 (`gj2026-keycloak-claims`) | `module-4/main.tf` | userdata의 `SCOPE_PAYLOAD.name` |
-| Group 이름 (`dev-team`, `sec-team`) | `module-4/main.tf` | userdata의 `for g in dev-team sec-team` |
-| 사용자/비밀번호 | `module-4/main.tf` | userdata의 `create_user` 호출 |
-| Dev/Sec Role 이름 | `module-4/main.tf` | `null_resource.iam_roles` → `create_role` 호출 |
-| Dev/Sec Policy 이름 | `module-4/main.tf` | `aws_iam_policy.dev/sec.name` |
-| 팀 태그 키 (`team`) | `module-4/main.tf` | `aws_iam_policy.dev/sec` → `Condition.StringEquals["ec2:ResourceTag/team"]` |
-| admin 비밀번호 (`admin1234!`) | `module-4/main.tf` | `variable.keycloak_admin_password.default` |
+| EC2 ?대쫫 (`gj2026-keycloak-ec2`) | `module-4/main.tf` | `aws_instance.keycloak` ??`tags.Name` |
+| Realm ?대쫫 (`team`) | `module-4/main.tf` | userdata setup script??紐⑤뱺 `/realms/team` + `null_resource.oidc_provider` |
+| Client ?대쫫 (`gj2026-keycloak-dev/sec`) | `module-4/main.tf` | userdata??`for CLIENT in` 諛곗뿴 + `null_resource.iam_roles` |
+| Client Scope ?대쫫 (`gj2026-keycloak-claims`) | `module-4/main.tf` | userdata??`SCOPE_PAYLOAD.name` |
+| Group ?대쫫 (`dev-team`, `sec-team`) | `module-4/main.tf` | userdata??`for g in dev-team sec-team` |
+| ?ъ슜??鍮꾨?踰덊샇 | `module-4/main.tf` | userdata??`create_user` ?몄텧 |
+| Dev/Sec Role ?대쫫 | `module-4/main.tf` | `null_resource.iam_roles` ??`create_role` ?몄텧 |
+| Dev/Sec Policy ?대쫫 | `module-4/main.tf` | `aws_iam_policy.dev/sec.name` |
+| ? ?쒓렇 ??(`team`) | `module-4/main.tf` | `aws_iam_policy.dev/sec` ??`Condition.StringEquals["ec2:ResourceTag/team"]` |
+| admin 鍮꾨?踰덊샇 (`admin1234!`) | `module-4/main.tf` | `variable.keycloak_admin_password.default` |
+

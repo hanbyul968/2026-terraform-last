@@ -5,9 +5,9 @@
 | 모듈 | 경로 | 리전 | 내용 |
 |---|---|---|---|
 | 1 | `module-1/infra/` | us-east-1 | CDN (S3 + Lambda + CloudFront) |
-| 2 | `data/` | ap-southeast-1 | Kafka + Flink + NLB |
+| 2 | `module-2/` | ap-southeast-1 | Kafka + Flink + NLB |
 | 3 | `module-3/infra/` | ap-northeast-2 | FastAPI + CW Agent + EventBridge |
-| 4 | `keycloak/` | eu-central-1 | Keycloak + OIDC + IAM |
+| 4 | `module-4/` | eu-central-1 | Keycloak + OIDC + IAM |
 
 ---
 
@@ -43,7 +43,7 @@ aws s3 cp <이미지파일> s3://gj2026-cdn-bucket-<비번호>/images/ --region 
 ### Module 2: Real-time data analytics
 
 ```bash
-cd ~/2026-terraform/05/2과제/data
+cd ~/2026-terraform/05/2과제/module-2
 
 terraform init
 terraform apply
@@ -69,7 +69,7 @@ terraform apply -var alarm_email=<이메일주소>
 ### Module 4: Keycloak
 
 ```bash
-cd ~/2026-terraform/05/2과제/keycloak
+cd ~/2026-terraform/05/2과제/module-4
 
 terraform init
 terraform apply
@@ -110,12 +110,12 @@ terraform apply
 
 | 변경 항목 | 파일 | 수정 위치 |
 |---|---|---|
-| EC2 이름 (`gj2026-data-ec2`) | `data/main.tf` | `aws_instance.kafka` → `tags.Name` |
-| NLB 이름 (`gj2026-data-nlb`) | `data/main.tf` | `aws_lb.data.name` |
-| Kafka 내부 포트 (`9092`) | `data/main.tf` | SG ingress + userdata `INTERNAL://0.0.0.0:9092` |
-| Kafka 외부 포트 (`9094`) | `data/main.tf` | SG ingress + TG port + Listener port + userdata `EXTERNAL://0.0.0.0:9094` |
-| 토픽 이름/파티션 수 | `data/main.tf` | userdata의 `kafka-topics.sh --create` 명령 |
-| Glue DB 이름 (`real_time_analytics`) | `data/main.tf` | `aws_glue_catalog_database.analytics.name` |
+| EC2 이름 (`gj2026-data-ec2`) | `module-2/main.tf` | `aws_instance.kafka` → `tags.Name` |
+| NLB 이름 (`gj2026-data-nlb`) | `module-2/main.tf` | `aws_lb.data.name` |
+| Kafka 내부 포트 (`9092`) | `module-2/main.tf` | SG ingress + userdata `INTERNAL://0.0.0.0:9092` |
+| Kafka 외부 포트 (`9094`) | `module-2/main.tf` | SG ingress + TG port + Listener port + userdata `EXTERNAL://0.0.0.0:9094` |
+| 토픽 이름/파티션 수 | `module-2/main.tf` | userdata의 `kafka-topics.sh --create` 명령 |
+| Glue DB 이름 (`real_time_analytics`) | `module-2/main.tf` | `aws_glue_catalog_database.analytics.name` |
 
 ### Module 3
 
@@ -139,13 +139,13 @@ terraform apply
 
 | 변경 항목 | 파일 | 수정 위치 |
 |---|---|---|
-| EC2 이름 (`gj2026-keycloak-ec2`) | `keycloak/main.tf` | `aws_instance.keycloak` → `tags.Name` |
-| Realm 이름 (`team`) | `keycloak/main.tf` | userdata setup script의 모든 `/realms/team` + `null_resource.oidc_provider` |
-| Client 이름 (`gj2026-keycloak-dev/sec`) | `keycloak/main.tf` | userdata의 `for CLIENT in` 배열 + `null_resource.iam_roles` |
-| Client Scope 이름 (`gj2026-keycloak-claims`) | `keycloak/main.tf` | userdata의 `SCOPE_PAYLOAD.name` |
-| Group 이름 (`dev-team`, `sec-team`) | `keycloak/main.tf` | userdata의 `for g in dev-team sec-team` |
-| 사용자/비밀번호 | `keycloak/main.tf` | userdata의 `create_user` 호출 |
-| Dev/Sec Role 이름 | `keycloak/main.tf` | `null_resource.iam_roles` → `create_role` 호출 |
-| Dev/Sec Policy 이름 | `keycloak/main.tf` | `aws_iam_policy.dev/sec.name` |
-| 팀 태그 키 (`team`) | `keycloak/main.tf` | `aws_iam_policy.dev/sec` → `Condition.StringEquals["ec2:ResourceTag/team"]` |
-| admin 비밀번호 (`admin1234!`) | `keycloak/main.tf` | `variable.keycloak_admin_password.default` |
+| EC2 이름 (`gj2026-keycloak-ec2`) | `module-4/main.tf` | `aws_instance.keycloak` → `tags.Name` |
+| Realm 이름 (`team`) | `module-4/main.tf` | userdata setup script의 모든 `/realms/team` + `null_resource.oidc_provider` |
+| Client 이름 (`gj2026-keycloak-dev/sec`) | `module-4/main.tf` | userdata의 `for CLIENT in` 배열 + `null_resource.iam_roles` |
+| Client Scope 이름 (`gj2026-keycloak-claims`) | `module-4/main.tf` | userdata의 `SCOPE_PAYLOAD.name` |
+| Group 이름 (`dev-team`, `sec-team`) | `module-4/main.tf` | userdata의 `for g in dev-team sec-team` |
+| 사용자/비밀번호 | `module-4/main.tf` | userdata의 `create_user` 호출 |
+| Dev/Sec Role 이름 | `module-4/main.tf` | `null_resource.iam_roles` → `create_role` 호출 |
+| Dev/Sec Policy 이름 | `module-4/main.tf` | `aws_iam_policy.dev/sec.name` |
+| 팀 태그 키 (`team`) | `module-4/main.tf` | `aws_iam_policy.dev/sec` → `Condition.StringEquals["ec2:ResourceTag/team"]` |
+| admin 비밀번호 (`admin1234!`) | `module-4/main.tf` | `variable.keycloak_admin_password.default` |

@@ -1,157 +1,107 @@
 package main
 
 import (
-	"database/sql"
-	"fmt"
-	"log"
-	"math/rand"
+	"encoding/json"
 	"net/http"
-	"os"
-	"time"
-
-	"github.com/gin-gonic/gin"
-	_ "github.com/go-sql-driver/mysql"
+	"strconv"
+	"strings"
+	"sync"
 )
 
-var db *sql.DB
-
 type User struct {
-	ID       string `json:"id"`
-	Username string `json:"username"`
-	Email    string `json:"email"`
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+	Age  int    `json:"age"`
 }
 
-type CreateUserReq struct {
-	RequestID string `json:"requestid"`
-	UUID      string `json:"uuid"`
-	Username  string `json:"username"`
-	Email     string `json:"email"`
-}
-
-func env(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
-}
-
-// jitter introduces variable per-request latency: a small base jitter on
-// every call plus a rare (~1/20) larger spike, so the latency profile is
-// uneven under load rather than flat.
-func jitter() {
-	d := time.Duration(rand.Intn(8)) * time.Millisecond
-	if rand.Intn(20) == 0 {
-		d += time.Duration(50+rand.Intn(70)) * time.Millisecond
-	}
-	time.Sleep(d)
-}
-
-func initDB() {
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true&timeout=5s&interpolateParams=true",
-		env("MYSQL_USER", "app"),
-		env("MYSQL_PASSWORD", ""),
-		env("MYSQL_HOST", "localhost"),
-		env("MYSQL_PORT", "3306"),
-		env("MYSQL_DBNAME", "dev"),
-	)
-	var err error
-	db, err = sql.Open("mysql", dsn)
-	if err != nil {
-		log.Fatalf("db open: %v", err)
-	}
-	db.SetMaxOpenConns(50)
-	db.SetMaxIdleConns(25)
-	db.SetConnMaxLifetime(5 * time.Minute)
-
-	for i := 0; i < 30; i++ {
-		if err = db.Ping(); err == nil {
-			break
-		}
-		log.Printf("waiting for db: %v", err)
-		time.Sleep(2 * time.Second)
-	}
-	if err != nil {
-		log.Fatalf("db ping: %v", err)
-	}
-}
+var (
+	users  = map[int]User{}
+	lastID = 0
+	mu     sync.Mutex
+)
 
 func main() {
-	initDB()
-	defer db.Close()
 
-	gin.SetMode(gin.ReleaseMode)
-	r := gin.New()
-	r.Use(gin.LoggerWithConfig(gin.LoggerConfig{
-		Formatter: func(p gin.LogFormatterParams) string {
-			return fmt.Sprintf(`{"ts":"%s","method":"%s","path":"%s","status":%d,"dur_ms":%d,"client_ip":"%s"}`+"\n",
-				p.TimeStamp.UTC().Format(time.RFC3339Nano),
-				p.Method, p.Path, p.StatusCode,
-				p.Latency.Milliseconds(), p.ClientIP)
-		},
-		Output: os.Stdout,
-	}))
-	r.Use(gin.Recovery())
+	http.HandleFunc("/v1/users", usersHandler)
+	http.HandleFunc("/v1/users/", userHandler)
 
-	r.GET("/healthcheck", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"ok": true})
-	})
+	println("Server started :8080")
+	http.ListenAndServe(":8080", nil)
+}
 
-	r.POST("/v1/user", createUser)
-	r.GET("/v1/user", getUser)
+func usersHandler(w http.ResponseWriter, r *http.Request) {
 
-	addr := ":" + env("PORT", "8080")
-	log.Printf(`{"ts":"%s","msg":"listening %s"}`, time.Now().UTC().Format(time.RFC3339Nano), addr)
-	if err := r.Run(addr); err != nil {
-		log.Fatal(err)
+	switch r.Method {
+
+	case http.MethodGet:
+		list := []User{}
+
+		mu.Lock()
+		for _, u := range users {
+			list = append(list, u)
+		}
+		mu.Unlock()
+
+		json.NewEncoder(w).Encode(list)
+
+	case http.MethodPost:
+		var req struct {
+			Name string `json:"name"`
+			Age  int    `json:"age"`
+		}
+
+		json.NewDecoder(r.Body).Decode(&req)
+
+		mu.Lock()
+		lastID++
+		user := User{
+			ID:   lastID,
+			Name: req.Name,
+			Age:  req.Age,
+		}
+		users[user.ID] = user
+		mu.Unlock()
+
+		json.NewEncoder(w).Encode(user)
+
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
 }
 
-func createUser(c *gin.Context) {
-	var req CreateUserReq
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"err": "bad json"})
-		return
-	}
-	if req.Username == "" || req.Email == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"err": "username and email required"})
-		return
-	}
+func userHandler(w http.ResponseWriter, r *http.Request) {
 
-	jitter()
-	id := fmt.Sprintf("%s-%d", req.Username, time.Now().UnixNano())
-	_, err := db.ExecContext(c.Request.Context(),
-		"INSERT INTO user (id, username, email) VALUES (?, ?, ?)",
-		id, req.Username, req.Email)
+	idStr := strings.TrimPrefix(r.URL.Path, "/v1/users/")
+	id, err := strconv.Atoi(idStr)
 	if err != nil {
-		log.Printf(`{"ts":"%s","err":"insert user: %v"}`, time.Now().UTC().Format(time.RFC3339Nano), err)
-		c.JSON(http.StatusInternalServerError, gin.H{"err": "db"})
+		http.Error(w, "invalid id", 400)
 		return
 	}
 
-	c.JSON(http.StatusCreated, User{ID: id, Username: req.Username, Email: req.Email})
-}
+	switch r.Method {
 
-func getUser(c *gin.Context) {
-	email := c.Query("email")
-	if email == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"err": "email required"})
-		return
-	}
+	case http.MethodGet:
 
-	jitter()
-	var u User
-	err := db.QueryRowContext(c.Request.Context(),
-		"SELECT id, username, email FROM user WHERE email = ?", email).
-		Scan(&u.ID, &u.Username, &u.Email)
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"err": "not found"})
-		return
-	}
-	if err != nil {
-		log.Printf(`{"ts":"%s","err":"query user: %v"}`, time.Now().UTC().Format(time.RFC3339Nano), err)
-		c.JSON(http.StatusInternalServerError, gin.H{"err": "db"})
-		return
-	}
+		mu.Lock()
+		user, ok := users[id]
+		mu.Unlock()
 
-	c.JSON(http.StatusOK, u)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+
+		json.NewEncoder(w).Encode(user)
+
+	case http.MethodDelete:
+
+		mu.Lock()
+		delete(users, id)
+		mu.Unlock()
+
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
 }

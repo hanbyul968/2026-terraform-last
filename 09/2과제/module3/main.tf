@@ -4,6 +4,10 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+    time = {
+      source  = "hashicorp/time"
+      version = "~> 0.9"
+    }
   }
 }
 
@@ -484,6 +488,21 @@ resource "aws_iam_role_policy" "lambda" {
   })
 }
 
+# VPC Lambda는 ENI 생성 권한이 생성 시점에 필요 → 관리형 정책 부착
+resource "aws_iam_role_policy_attachment" "lambda_vpc" {
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+  role       = aws_iam_role.lambda.name
+}
+
+# IAM 정책 전파 지연(eventual consistency) 대기 → Lambda 생성 시 ENI 권한 확실히 적용
+resource "time_sleep" "wait_iam" {
+  depends_on = [
+    aws_iam_role_policy.lambda,
+    aws_iam_role_policy_attachment.lambda_vpc,
+  ]
+  create_duration = "30s"
+}
+
 # Lambda Function
 data "archive_file" "lambda" {
   type        = "zip"
@@ -512,6 +531,8 @@ resource "aws_lambda_function" "consumer" {
       AWS_REGION_NAME     = "ap-northeast-3"
     }
   }
+
+  depends_on = [time_sleep.wait_iam]
 }
 
 # MSK Event Source Mapping

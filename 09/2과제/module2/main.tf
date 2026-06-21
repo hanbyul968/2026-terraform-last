@@ -344,143 +344,29 @@ resource "aws_iam_role_policy" "alb_controller_extra" {
   })
 }
 
-# ALB Security Group
-resource "aws_security_group" "alb" {
-  name   = "wsc2026-logging-alb-sg"
-  vpc_id = aws_vpc.main.id
+# ALB는 Ingress(logging-ingress) + AWS Load Balancer Controller가 생성한다.
+# (terraform에서 ALB/TG/리스너를 만들면 같은 이름으로 중복 생성되어 DuplicateLoadBalancerName 충돌)
+# → 실제 ALB 생성·파드 IP 타깃 등록·경로 라우팅은 k8s Ingress가 담당. README 5단계 참고.
 
-  ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-}
-
-# ALB (internet-facing, public subnets A + C)
-resource "aws_lb" "main" {
-  name               = "wsc2026-logging-alb"
-  internal           = false
-  load_balancer_type = "application"
-  security_groups    = [aws_security_group.alb.id]
-  subnets            = [aws_subnet.public_a.id, aws_subnet.public_c.id]
-}
-
-# Target Groups
-resource "aws_lb_target_group" "nginx" {
-  name        = "wsc2026-logging-nginx-tg"
-  port        = 80
-  protocol    = "HTTP"
-  vpc_id      = aws_vpc.main.id
-  target_type = "ip"
-
-  health_check {
-    path = "/"
-    port = "80"
-  }
-
-  stickiness {
-    type    = "lb_cookie"
-    enabled = false
-  }
-
-  load_balancing_cross_zone_enabled = "true"
-}
-
-resource "aws_lb_target_group" "grafana" {
-  name        = "wsc2026-logging-grafana-tg"
-  port        = 80
-  protocol    = "HTTP"
-  vpc_id      = aws_vpc.main.id
-  target_type = "ip"
-
-  health_check {
-    path = "/api/health"
-    port = "3000"
-  }
-
-  stickiness {
-    type    = "lb_cookie"
-    enabled = false
-  }
-
-  load_balancing_cross_zone_enabled = "true"
-}
-
-# ALB Listener: default → 404, /logging → grafana, / → nginx
-resource "aws_lb_listener" "main" {
-  load_balancer_arn = aws_lb.main.arn
-  port              = 80
-  protocol          = "HTTP"
-
-  default_action {
-    type = "fixed-response"
-    fixed_response {
-      content_type = "text/plain"
-      message_body = "404 Not Found"
-      status_code  = "404"
-    }
-  }
-}
-
-resource "aws_lb_listener_rule" "logging" {
-  listener_arn = aws_lb_listener.main.arn
-  priority     = 10
-
-  action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.grafana.arn
-  }
-
-  condition {
-    path_pattern {
-      values = ["/logging", "/logging/*"]
-    }
-  }
-}
-
-resource "aws_lb_listener_rule" "root" {
-  listener_arn = aws_lb_listener.main.arn
-  priority     = 20
-
-  action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.nginx.arn
-  }
-
-  condition {
-    path_pattern {
-      values = ["/", "/*"]
-    }
-  }
-}
-
-resource "aws_security_group_rule" "cluster_from_alb" {
+# CloudShell/bastion(VPC 내부) → EKS API 접근 허용 (private cluster 채점용)
+resource "aws_security_group_rule" "cluster_from_cloudshell" {
   type                     = "ingress"
   from_port                = 0
-  to_port                  = 65535
-  protocol                 = "tcp"
-  source_security_group_id = aws_security_group.alb.id
+  to_port                  = 0
+  protocol                 = "-1"
+  source_security_group_id = aws_security_group.cloudshell.id
   security_group_id        = aws_eks_cluster.main.vpc_config[0].cluster_security_group_id
+  description              = "Allow CloudShell/bastion SG to EKS"
 }
 
-output "alb_dns" {
-  value = aws_lb.main.dns_name
-}
-
-output "grafana_tg_arn" {
-  value = aws_lb_target_group.grafana.arn
-}
-
-output "nginx_tg_arn" {
-  value = aws_lb_target_group.nginx.arn
+resource "aws_security_group_rule" "cluster_from_vpc" {
+  type              = "ingress"
+  from_port         = 443
+  to_port           = 443
+  protocol          = "tcp"
+  cidr_blocks       = [aws_vpc.main.cidr_block]
+  security_group_id = aws_eks_cluster.main.vpc_config[0].cluster_security_group_id
+  description       = "Allow VPC internal to EKS API 443"
 }
 
 output "cluster_name" {

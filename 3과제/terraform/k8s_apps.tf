@@ -19,7 +19,7 @@ resource "kubernetes_deployment" "user" {
     labels    = { app = "user" }
   }
   spec {
-    replicas = 3
+    replicas = 2
     selector { match_labels = { app = "user" } }
     strategy {
       type = "RollingUpdate"
@@ -46,6 +46,9 @@ resource "kubernetes_deployment" "user" {
           port { container_port = 8080 }
           env_from {
             secret_ref { name = kubernetes_secret.db.metadata[0].name }
+          }
+          env_from {
+            config_map_ref { name = kubernetes_config_map.s3.metadata[0].name }
           }
           resources {
             # no cpu limit: CFS throttling wrecks tail latency; memory limit only
@@ -98,7 +101,7 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "user" {
     namespace = kubernetes_namespace.app.metadata[0].name
   }
   spec {
-    min_replicas = 3
+    min_replicas = 2
     max_replicas = 10
     scale_target_ref {
       api_version = "apps/v1"
@@ -162,7 +165,7 @@ resource "kubernetes_deployment" "product" {
     labels    = { app = "product" }
   }
   spec {
-    replicas = 3
+    replicas = 2
     selector { match_labels = { app = "product" } }
     strategy {
       type = "RollingUpdate"
@@ -244,7 +247,7 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "product" {
     namespace = kubernetes_namespace.app.metadata[0].name
   }
   spec {
-    min_replicas = 3
+    min_replicas = 2
     max_replicas = 10
     scale_target_ref {
       api_version = "apps/v1"

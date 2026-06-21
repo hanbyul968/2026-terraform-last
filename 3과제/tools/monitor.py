@@ -19,12 +19,15 @@ from urllib.parse import urlparse, parse_qs
 
 APPS = ("user", "product", "stress")
 SLO_MS = {"user": 200, "product": 200, "stress": 1000}
-CFG = {"ns": "app", "waf_group": "aws-waf-logs-wsi2026", "waf_region": "ap-northeast-2"}
+CFG = {"ns": "app", "waf_group": "aws-waf-logs-wsi2026", "waf_region": "us-east-1"}
 
 
-def run(cmd):
+def run(cmd, timeout=25):
+    # timeout: 단일 kubectl/aws 호출이 멈춰도 대시보드 전체가 무한 "불러오는 중"이
+    # 되지 않도록. 초과하면 빈 결과로 처리(해당 카드만 0/빈칸).
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace").stdout or ""
+        return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=timeout).stdout or ""
     except Exception:
         return ""
 
@@ -45,6 +48,35 @@ def pctl(v, q):
 
 def cls(st):
     return "2" if 200 <= st < 300 else "4" if 400 <= st < 500 else "5" if st >= 500 else "x"
+
+
+def status_reason(st, path):
+    """4xx/5xx 가 왜 났는지 사람이 읽을 설명 (휴리스틱)."""
+    if 200 <= st < 300:
+        return ""
+    if st == 400:
+        return "잘못된 요청 — 본문/필드 누락 또는 Content-Type 오류"
+    if st == 404:
+        if not (path.startswith("/v1/") or path == "/healthcheck"):
+            return "미정의 경로 (제공 API 아님)"
+        return "데이터 없음 — 해당 id/email 미존재 또는 미적재"
+    if st == 405:
+        return "허용되지 않은 메서드"
+    if st == 413:
+        return "본문이 너무 큼"
+    if st == 429:
+        return "요청 과다(rate limit)"
+    if st == 403:
+        return "차단됨 — 비정상/직접 접근(WAF) 또는 권한 없음"
+    if st == 503:
+        return "정상 타깃 없음 — 헬시 Pod 없음 / readiness 실패"
+    if st == 502:
+        return "게이트웨이 오류 — 앱 비정상 종료/연결 끊김"
+    if st == 504:
+        return "타임아웃 — 앱 지연 또는 DB 지연"
+    if 500 <= st < 600:
+        return "서버 오류 — 앱 예외 또는 DB 쿼리 실패 (앱 로그 확인)"
+    return ""
 
 
 # ----------------------- 앱 액세스 로그 -----------------------
@@ -84,7 +116,10 @@ def parse_rec(line):
             "method": str(g("method", "verb") or ""),
             "dur": dur,
             "ip": str(g("client_ip", "ip", "remote_addr", "remoteIp", "x_forwarded_for") or "?"),
-            "ts": str(g("ts", "time", "timestamp", "@timestamp") or "")}
+            "ts": str(g("ts", "time", "timestamp", "@timestamp") or ""),
+            "requestid": str(g("requestid", "request_id") or ""),
+            "uuid": str(g("uuid") or ""),
+            "raw": line[:600]}
 
 
 def collect_app(app, since):
@@ -111,7 +146,9 @@ def app_detail(app, since):
         rows = [{"ts": (r["ts"][11:23] if len(r["ts"]) >= 19 else r["ts"]),
                  "m": r["method"], "path": r["path"], "st": r["status"],
                  "dur": round(r["dur"]) if isinstance(r["dur"], (int, float)) else "-",
-                 "ip": r["ip"]} for r in ur if cls(r["status"]) == k]
+                 "ip": r["ip"], "why": status_reason(r["status"], r["path"]),
+                 "requestid": r.get("requestid", ""), "uuid": r.get("uuid", ""),
+                 "raw": r.get("raw", "")} for r in ur if cls(r["status"]) == k]
         return rows[-n:][::-1]
 
     return {"app": app, "total": total, "hc": len(recs) - total,
@@ -192,6 +229,22 @@ def nodes_detail():
     return out
 
 
+def deploy_cpu():
+    """앱별 현재 requests.cpu (예: '200m') — 계산 탭의 과투자 판정용."""
+    out = {}
+    for it in kjson(["get", "deploy", "-n", CFG["ns"]]).get("items", []):
+        name = it["metadata"]["name"]
+        try:
+            for c in it["spec"]["template"]["spec"]["containers"]:
+                req = (c.get("resources", {}).get("requests", {}) or {}).get("cpu")
+                if req:
+                    out[name] = req
+                    break
+        except Exception:
+            pass
+    return out
+
+
 def hpa_detail():
     ns = CFG["ns"]
     out = []
@@ -220,6 +273,40 @@ def _g(e, *k):
     return x if x not in ({}, None) else "?"
 
 
+RULE_KO = {
+    "RequireOriginVerify": "직접 접근 차단 — CloudFront 우회(origin-verify 헤더 없음)",
+    "BadUserAgent": "악성 User-Agent (sqlmap/스캐너/attack)",
+    "SpoofedForwardedFor": "X-Forwarded-For 위조(루프백/사설 IP)",
+    "OversizedJunkHeader": "비정상 헤더(X-Junk)",
+    "AWSManagedRulesCommonRuleSet": "비정상 입력(공통 규칙: 잘못된 헤더/경로/페이로드)",
+    "AWSManagedRulesKnownBadInputsRuleSet": "알려진 악성 입력 패턴",
+    "AWSManagedRulesSQLiRuleSet": "SQL 인젝션 의심",
+}
+
+
+def _waf_reason(e):
+    """차단 사유를 사람이 읽을 한글로."""
+    trid = e.get("terminatingRuleId", "") or ""
+    if trid and trid != "Default_Action":
+        return RULE_KO.get(trid, trid)
+    # 매니지드 룰 그룹이 막은 경우: 그룹명(한글) + 실제 매칭된 세부 룰 id
+    for g in e.get("ruleGroupList") or []:
+        tr = g.get("terminatingRule") or {}
+        gid = (g.get("ruleGroupId", "") or "").split("#")[-1]
+        if tr.get("ruleId"):
+            base = RULE_KO.get(gid, gid)
+            return base + " (" + tr["ruleId"] + ")"
+    return e.get("terminatingRuleType", "") or "?"
+
+
+def _hdr(e, name):
+    """요청 헤더 값 1개 추출 (대소문자 무시)."""
+    for hd in (e.get("httpRequest", {}) or {}).get("headers", []) or []:
+        if hd.get("name", "").lower() == name:
+            return hd.get("value", "")
+    return ""
+
+
 def waf_detail(minutes):
     grp = CFG["waf_group"]
     region = CFG["waf_region"]
@@ -236,8 +323,10 @@ def waf_detail(minutes):
     ev = []
     tok = None
     for _ in range(20):
+        # BLOCK 만 필터 → 부하 중 허용 로그(수십만)에 묻혀 최신이 안 잡히던 지연 해결.
         cmd = ["aws", "logs", "filter-log-events", "--log-group-name", grp, "--region", region,
-               "--start-time", str(start), "--limit", "10000", "--output", "json"]
+               "--start-time", str(start), "--limit", "10000", "--output", "json",
+               "--filter-pattern", '{ $.action = "BLOCK" }']
         if tok:
             cmd += ["--next-token", tok]
         out = run(cmd)
@@ -255,14 +344,30 @@ def waf_detail(minutes):
         tok = data.get("nextToken")
         if not tok:
             break
+    # WAF 로그엔 허용(ALLOW) 요청도 들어옴 → 실제 차단(BLOCK)만 집계/표시.
+    blocked = [e for e in ev if e.get("action") == "BLOCK"]
+    blocked.sort(key=lambda e: e.get("timestamp", 0))  # 최신이 뒤로 (전송 순서 보장 X)
+    def _full_url(e):
+        h = e.get("httpRequest", {}) or {}
+        host = _hdr(e, "host")
+        uri = h.get("uri", "") or ""
+        args = h.get("args", "") or ""
+        return ("https://" + host if host else "") + uri + (("?" + args) if args else "")
+
     recent = [{"ts": datetime.fromtimestamp(e.get("timestamp", 0) / 1000, timezone.utc).astimezone().strftime("%H:%M:%S"),
                "ip": _g(e, "httpRequest", "clientIp"), "m": _g(e, "httpRequest", "httpMethod"),
-               "uri": _g(e, "httpRequest", "uri"), "rule": e.get("terminatingRuleId", "?")} for e in ev[-60:]][::-1]
-    return {"enabled": True, "total": len(ev),
-            "by_rule": Counter(e.get("terminatingRuleId", "?") for e in ev).most_common(10),
-            "by_ip": Counter(_g(e, "httpRequest", "clientIp") for e in ev).most_common(10),
-            "by_uri": Counter(_g(e, "httpRequest", "uri") for e in ev).most_common(10),
-            "by_method": Counter(_g(e, "httpRequest", "httpMethod") for e in ev).most_common(),
+               "uri": _g(e, "httpRequest", "uri"),
+               "args": (e.get("httpRequest", {}) or {}).get("args", ""),
+               "url": _full_url(e),
+               "country": _g(e, "httpRequest", "country"),
+               "reason": _waf_reason(e),
+               "ua": _hdr(e, "user-agent"), "xff": _hdr(e, "x-forwarded-for")} for e in blocked[-80:]][::-1]
+    return {"enabled": True, "total": len(blocked),
+            "by_reason": Counter(_waf_reason(e) for e in blocked).most_common(10),
+            "by_rule": Counter(e.get("terminatingRuleId", "?") for e in blocked).most_common(10),
+            "by_ip": Counter(_g(e, "httpRequest", "clientIp") for e in blocked).most_common(10),
+            "by_uri": Counter(_g(e, "httpRequest", "uri") for e in blocked).most_common(10),
+            "by_method": Counter(_g(e, "httpRequest", "httpMethod") for e in blocked).most_common(),
             "recent": recent}
 # ----------------------- 진단(원인·해결) -----------------------
 POD_REASONS = {
@@ -330,6 +435,9 @@ def diagnose(apps, pods, waf):
 
 def build_data(since, waf_minutes):
     apps = [app_detail(a, since) for a in APPS]
+    dc = deploy_cpu()
+    for a in apps:
+        a["cpu_req"] = dc.get(a["app"], "")
     pods = pods_detail()
     nodes = nodes_detail()
     hpa = hpa_detail()
@@ -553,7 +661,7 @@ def main():
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--namespace", default="app")
     ap.add_argument("--waf-log-group", default="aws-waf-logs-wsi2026")
-    ap.add_argument("--waf-region", default="ap-northeast-2")
+    ap.add_argument("--waf-region", default="us-east-1")
     ap.add_argument("--since", default="15m", help="조회 기간 (예: 5m, 15m, 1h)")
     ap.add_argument("--once", action="store_true", help="웹서버 대신 터미널에 1회 출력 (CloudShell용)")
     ap.add_argument("--watch", type=int, default=0, metavar="SEC", help="N초마다 터미널 갱신 (CloudShell용)")

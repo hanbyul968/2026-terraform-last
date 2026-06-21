@@ -17,14 +17,28 @@ terraform version
 
 ### Module 1 — EKS Scaling (ap-northeast-2)
 
-**1. terraform apply**
+> ⚠️ **폴더 2개로 분리됨.** `module1/` = AWS 인프라+클러스터, `module1/k8s/` = KEDA/Karpenter/매니페스트.
+> 클러스터 생성과 helm 배포를 같은 폴더에서 하면 endpoint 미정으로 `cluster unreachable` 에러가 나므로 분리함.
+> **반드시 `module1` 먼저(ACTIVE까지) → 그 다음 `module1/k8s`.** 각 폴더는 그냥 `terraform apply` (`-target` 불필요).
+
+**1. 클러스터 생성** (약 15~20분)
 ```bash
 cd module1
 terraform init
 terraform apply -auto-approve
+
+# ACTIVE 떠야 다음 단계
+aws eks describe-cluster --name wsi-eks --region ap-northeast-2 --query "cluster.status" --output text
 ```
 
-**2. bastion 접속** (콘솔 → EC2 → Session Manager 또는 SSH)
+**2. k8s 레이어 배포** (KEDA, Karpenter, 매니페스트)
+```bash
+cd k8s
+terraform init
+terraform apply -auto-approve
+```
+
+**3. (선택) bastion 접속해서 상태 확인** (콘솔 → EC2 → Session Manager 또는 SSH)
 ```bash
 # output에서 IP 확인
 terraform output bastion_public_ip
@@ -46,8 +60,9 @@ aws eks update-kubeconfig --name wsi-eks --region ap-northeast-2
 kubectl get nodes
 ```
 
-**4. 배포 상태 확인**
+**4. 배포 상태 확인** (bastion 안에서)
 ```bash
+aws eks update-kubeconfig --name wsi-eks --region ap-northeast-2
 kubectl get all -n wsi-app
 kubectl get scaledobject -n wsi-app
 kubectl get nodepool
@@ -163,12 +178,11 @@ aws elbv2 describe-load-balancers --names wsc2026-logging-alb \
 **1. terraform apply**
 ```bash
 cd module3
-
-# 비번호 설정 (본인 비번호로 변경)
-echo 'competitor_number = "01"' > terraform.tfvars
-
 terraform init
 terraform apply -auto-approve
+#   var.competitor_number 를 물어봄 → 본인 비번호 입력 (예: 01)
+# 또는 바로 넘기기:
+# terraform apply -auto-approve -var="competitor_number=01"
 ```
 
 **2. wsc-app-ec2에 접속** (콘솔 → EC2 → Session Manager)
@@ -242,7 +256,10 @@ curl -G -d "admission_year=2026" --data-urlencode "student_name=홍길동" \
 
 ---
 
-## Module 1 — EKS Scaling (`module1/main.tf`)
+## Module 1 — EKS Scaling
+
+> 파일 2곳: AWS 리소스 = `module1/main.tf`, k8s 리소스(helm/kubectl) = `module1/k8s/main.tf`.
+> 아래 표에서 `kubectl_manifest.*`, `helm_release.*` 는 **`module1/k8s/main.tf`** 에 있음. 나머지는 `module1/main.tf`.
 
 | 바뀌는 값 | 수정 위치 |
 |---|---|
@@ -365,18 +382,22 @@ kafka_2.13-3.5.1/bin/kafka-topics.sh --create --bootstrap-server $BOOTSTRAP \
 
 ---
 
-## terraform.tfvars 예시 (module3)
+## module3 비번호 입력
 
-module3 디렉토리에 `terraform.tfvars` 파일을 생성하면 `apply` 시 자동 적용됩니다:
+`competitor_number` 에 기본값이 없으므로 `terraform apply` 시 자동으로 물어봅니다:
 
-```hcl
-competitor_number = "01"
+```
+var.competitor_number
+  Enter a value: 01      ← 본인 비번호
 ```
 
-또는 apply 시 직접 전달:
+물어보는 게 싫으면 직접 전달:
 ```bash
 terraform apply -var="competitor_number=01"
 ```
+
+> PowerShell에서 `echo ... > terraform.tfvars` 는 UTF-16으로 저장되어 깨지므로 쓰지 말 것.
+> 굳이 파일로 만들려면: `Set-Content -Path terraform.tfvars -Value 'competitor_number = "01"' -Encoding utf8`
 
 ---
 

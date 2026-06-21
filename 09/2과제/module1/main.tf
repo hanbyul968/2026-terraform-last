@@ -4,14 +4,6 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
-    helm = {
-      source  = "hashicorp/helm"
-      version = "~> 2.0"
-    }
-    kubectl = {
-      source  = "gavinbunney/kubectl"
-      version = "~> 1.14"
-    }
   }
 }
 
@@ -541,95 +533,6 @@ resource "aws_eks_access_policy_association" "bastion_admin" {
   depends_on = [aws_eks_access_entry.bastion]
 }
 
-data "aws_eks_cluster_auth" "main" {
-  name = aws_eks_cluster.main.name
-}
-
-# Helm/kubectl providers
-provider "helm" {
-  kubernetes {
-    host                   = aws_eks_cluster.main.endpoint
-    cluster_ca_certificate = base64decode(aws_eks_cluster.main.certificate_authority[0].data)
-    token                  = data.aws_eks_cluster_auth.main.token
-  }
-}
-
-provider "kubectl" {
-  host                   = aws_eks_cluster.main.endpoint
-  cluster_ca_certificate = base64decode(aws_eks_cluster.main.certificate_authority[0].data)
-  token                  = data.aws_eks_cluster_auth.main.token
-  load_config_file       = false
-}
-
-# KEDA Helm Release
-resource "helm_release" "keda" {
-  name             = "keda"
-  repository       = "https://kedacore.github.io/charts"
-  chart            = "keda"
-  namespace        = "keda"
-  create_namespace = true
-  timeout          = 600
-
-  set {
-    name  = "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
-    value = aws_iam_role.keda_irsa.arn
-  }
-
-  set {
-    name  = "tolerations[0].key"
-    value = "dedicated"
-  }
-  set {
-    name  = "tolerations[0].value"
-    value = "addon"
-  }
-  set {
-    name  = "tolerations[0].effect"
-    value = "NoSchedule"
-  }
-
-  depends_on = [aws_eks_node_group.system]
-}
-
-# Karpenter Helm Release
-resource "helm_release" "karpenter" {
-  name             = "karpenter"
-  repository       = "oci://public.ecr.aws/karpenter"
-  chart            = "karpenter"
-  namespace        = "kube-system"
-  timeout          = 600
-
-  set {
-    name  = "settings.clusterName"
-    value = aws_eks_cluster.main.name
-  }
-
-  set {
-    name  = "settings.clusterEndpoint"
-    value = aws_eks_cluster.main.endpoint
-  }
-
-  set {
-    name  = "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
-    value = aws_iam_role.karpenter_irsa.arn
-  }
-
-  set {
-    name  = "tolerations[0].key"
-    value = "dedicated"
-  }
-  set {
-    name  = "tolerations[0].value"
-    value = "addon"
-  }
-  set {
-    name  = "tolerations[0].effect"
-    value = "NoSchedule"
-  }
-
-  depends_on = [aws_eks_node_group.system]
-}
-
 # CoreDNS addon with toleration
 resource "aws_eks_addon" "coredns" {
   cluster_name = aws_eks_cluster.main.name
@@ -646,138 +549,8 @@ resource "aws_eks_addon" "coredns" {
   depends_on = [aws_eks_node_group.system]
 }
 
-# ── Kubernetes Manifests ──────────────────────────────────────────────
-
-resource "kubectl_manifest" "namespace" {
-  yaml_body  = <<-YAML
-    apiVersion: v1
-    kind: Namespace
-    metadata:
-      name: wsi-app
-  YAML
-  depends_on = [aws_eks_node_group.system]
-}
-
-resource "kubectl_manifest" "service_account" {
-  yaml_body = <<-YAML
-    apiVersion: v1
-    kind: ServiceAccount
-    metadata:
-      name: wsi-worker-sa
-      namespace: wsi-app
-      annotations:
-        eks.amazonaws.com/role-arn: "${aws_iam_role.app_irsa.arn}"
-  YAML
-  depends_on = [kubectl_manifest.namespace]
-}
-
-resource "kubectl_manifest" "deployment" {
-  yaml_body = <<-YAML
-    apiVersion: apps/v1
-    kind: Deployment
-    metadata:
-      name: wsi-worker-app
-      namespace: wsi-app
-    spec:
-      replicas: 0
-      selector:
-        matchLabels:
-          app: wsi-worker-app
-      template:
-        metadata:
-          labels:
-            app: wsi-worker-app
-        spec:
-          serviceAccountName: wsi-worker-sa
-          containers:
-          - name: worker
-            image: python:3.11-slim
-            command: ["python", "/app/app.py"]
-            env:
-            - name: QUEUE_URL
-              value: "${aws_sqs_queue.main.url}"
-            resources:
-              requests:
-                cpu: "200m"
-                memory: "128Mi"
-              limits:
-                cpu: "500m"
-                memory: "256Mi"
-  YAML
-  depends_on = [kubectl_manifest.service_account, helm_release.keda]
-}
-
-resource "kubectl_manifest" "scaledobject" {
-  yaml_body = <<-YAML
-    apiVersion: keda.sh/v1alpha1
-    kind: ScaledObject
-    metadata:
-      name: wsi-keda-scaler
-      namespace: wsi-app
-    spec:
-      scaleTargetRef:
-        name: wsi-worker-app
-      minReplicaCount: 0
-      maxReplicaCount: 20
-      triggers:
-      - type: aws-sqs-queue
-        metadata:
-          queueURL: "${aws_sqs_queue.main.url}"
-          queueLength: "1"
-          awsRegion: "ap-northeast-2"
-  YAML
-  depends_on = [kubectl_manifest.deployment]
-}
-
-resource "kubectl_manifest" "nodeclass" {
-  yaml_body = <<-YAML
-    apiVersion: karpenter.k8s.aws/v1
-    kind: EC2NodeClass
-    metadata:
-      name: wsi-nodeclass
-    spec:
-      role: "${aws_iam_role.karpenter_node.name}"
-      amiSelectorTerms:
-      - alias: al2023@latest
-      subnetSelectorTerms:
-      - tags:
-          karpenter.sh/discovery: "wsi-eks"
-      securityGroupSelectorTerms:
-      - id: "${aws_eks_cluster.main.vpc_config[0].cluster_security_group_id}"
-  YAML
-  depends_on = [helm_release.karpenter, aws_iam_instance_profile.karpenter_node, aws_eks_access_entry.karpenter_node]
-}
-
-resource "kubectl_manifest" "nodepool" {
-  yaml_body = <<-YAML
-    apiVersion: karpenter.sh/v1
-    kind: NodePool
-    metadata:
-      name: wsi-nodepool
-    spec:
-      template:
-        spec:
-          nodeClassRef:
-            group: karpenter.k8s.aws
-            kind: EC2NodeClass
-            name: wsi-nodeclass
-          requirements:
-          - key: karpenter.k8s.aws/instance-family
-            operator: In
-            values: ["c5"]
-          - key: kubernetes.io/arch
-            operator: In
-            values: ["amd64"]
-      limits:
-        cpu: "100"
-      disruption:
-        consolidationPolicy: WhenEmptyOrUnderutilized
-        consolidateAfter: 30s
-  YAML
-  depends_on = [kubectl_manifest.nodeclass]
-}
-
 # ── Outputs ──────────────────────────────────────────────────────────
+# (k8s 폴더가 terraform_remote_state 로 읽어감)
 
 output "sqs_queue_url" {
   value = aws_sqs_queue.main.url
@@ -789,6 +562,30 @@ output "app_irsa_role_arn" {
 
 output "cluster_name" {
   value = aws_eks_cluster.main.name
+}
+
+output "cluster_endpoint" {
+  value = aws_eks_cluster.main.endpoint
+}
+
+output "cluster_ca" {
+  value = aws_eks_cluster.main.certificate_authority[0].data
+}
+
+output "cluster_security_group_id" {
+  value = aws_eks_cluster.main.vpc_config[0].cluster_security_group_id
+}
+
+output "keda_irsa_role_arn" {
+  value = aws_iam_role.keda_irsa.arn
+}
+
+output "karpenter_irsa_role_arn" {
+  value = aws_iam_role.karpenter_irsa.arn
+}
+
+output "karpenter_node_role_name" {
+  value = aws_iam_role.karpenter_node.name
 }
 
 output "node_role_name" {

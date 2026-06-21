@@ -18,6 +18,8 @@
 
 > **실행 환경: AWS CloudShell (Amazon Linux 2023, 서울 `ap-northeast-2`)** 기준.
 > 필요한 도구는 CloudShell에 모두 내장(terraform, aws CLI, docker, kubectl). 별도 설치 불필요.
+> **로컬 Windows에서 돌리려면** 아래 [Windows (PowerShell) 실행](#windows-powershell-실행--설치부터-배포까지) 섹션 참고
+> (Docker Desktop + Git bash 필요).
 
 ## 효율성 설계 (채점기준 반영)
 
@@ -144,35 +146,144 @@ terraform output endpoint
 
 ---
 
-## 대회 당일 — 앱을 새로 받았을 때 적용
+## Windows (PowerShell) 실행 — 설치부터 배포까지
 
-대회 중 제공되는 **새 앱 바이너리**를 배포에 반영하는 절차.
+> CloudShell 대신 **로컬 Windows에서** 돌릴 때의 전체 절차.
+> ⚠️ `build.tf`가 `docker build`/`docker push`를 호출하므로 **Docker Desktop이 반드시 실행 중**이어야 하며,
+> local-exec 인터프리터가 `bash`라서 **Git for Windows의 bash가 PATH에 있어야** 합니다.
 
-### 1. 바이너리 교체
-받은 실행 파일을 아래 경로에 그대로 덮어씁니다 (파일명 고정: `user`, `product`, `stress`).
+### 1. 필수 도구 설치 (PowerShell 관리자 권한)
 
-```bash
-cp /path/to/new/user    ~/wsi-2026-task3/application/binary/user
-cp /path/to/new/product ~/wsi-2026-task3/application/binary/product
-cp /path/to/new/stress  ~/wsi-2026-task3/application/binary/stress
-chmod +x ~/wsi-2026-task3/application/binary/{user,product,stress}
+Windows 11 내장 `winget`으로 한 번에 설치합니다.
+
+```powershell
+winget install --id Hashicorp.Terraform -e
+winget install --id Amazon.AWSCLI -e
+winget install --id Docker.DockerDesktop -e
+winget install --id Kubernetes.kubectl -e
+winget install --id Git.Git -e
 ```
 
-### 2. 새 태그로 apply (권장)
-이미지 태그를 새 값으로 바꿔 apply 하면, ECR push와 **Deployment 롤링 업데이트가 같이** 일어납니다.
-(기본 태그가 `latest`로 고정이면 매니페스트가 안 바뀌어 새 이미지가 롤아웃되지 않습니다.)
+> 설치 후 **PowerShell 창을 새로 열어야** PATH가 반영됩니다. Docker Desktop은 설치 후 **앱을 실행**해
+> 고래 아이콘이 "running" 상태가 되어야 합니다 (최초 1회 WSL2 설정 요구할 수 있음).
 
+### 2. 설치 확인
+
+```powershell
+terraform -version
+aws --version
+docker version          # Server 항목까지 나와야 함(데몬 실행 중)
+kubectl version --client
+bash --version          # Git for Windows 제공 (build.tf가 사용)
+```
+
+`docker version`에 Server가 안 나오면 Docker Desktop이 안 떠 있는 것 → 실행 후 재시도.
+`bash`가 없다고 나오면 `C:\Program Files\Git\bin`을 PATH에 추가하거나 PowerShell 새로 열기.
+
+### 3. AWS 자격증명 설정
+
+```powershell
+aws configure
+# AWS Access Key ID / Secret / region(ap-northeast-2) / output(json) 입력
+aws sts get-caller-identity     # 계정 확인
+```
+
+> 명명 프로파일을 쓰면 apply 시 `-var aws_profile=<이름>`을 붙입니다.
+
+### 4. 배포 (PowerShell)
+
+```powershell
+cd C:\Users\competitor\2026-terraform\3과제\terraform
+
+# (선택) 프로바이더/캐시를 임시 폴더로 — Windows는 홈 용량 제한이 없어 필수는 아님
+$env:TF_PLUGIN_CACHE_DIR = "$env:TEMP\tf-plugin-cache"
+$env:TF_DATA_DIR         = "$env:TEMP\wsi-tf-data"
+New-Item -ItemType Directory -Force $env:TF_PLUGIN_CACHE_DIR | Out-Null
+
+terraform init
+if ($?) { terraform apply -auto-approve }     # ~20분 (EKS + RDS)
+
+terraform output endpoint                      # https://dXXXX.cloudfront.net → 채점 플랫폼 입력
+```
+
+> PowerShell 5.1에는 `&&`가 없어 `terraform init && terraform apply`가 **에러**입니다.
+> → `terraform init; if ($?) { terraform apply -auto-approve }` 로 씁니다 (PowerShell 7+는 `&&` 가능).
+> `if ($?)`는 "앞 명령(init) 성공 시에만 apply" 를 뜻합니다.
+
+### 5. 클러스터 접속 / 롤아웃 확인
+
+```powershell
+aws eks update-kubeconfig --name <클러스터명> --region ap-northeast-2
+kubectl -n app get pods -o wide
+kubectl -n app logs job/db-init        # 시드 적재 로그
+```
+
+### Windows에서 흔한 함정
+
+| 증상 | 원인 / 해결 |
+|---|---|
+| `exec: "bash": executable file not found` (apply 중) | `build.tf`가 bash 필요 → Git for Windows 설치 후 PATH 등록, 새 PowerShell |
+| `error during connect ... docker daemon` | Docker Desktop 미실행 → 실행 후 `docker version`에 Server 확인 |
+| `sed`/`rm` 등 리눅스 명령이 안 됨 | PowerShell 문법으로 대체 (`Remove-Item`, `(Get-Content) -replace ... | Set-Content`) |
+| 줄바꿈(CRLF) 때문에 스크립트 깨짐 | `application/binary/*`는 바이너리라 무관. `.sh`는 LF 유지 |
+
+> ⚠️ **state는 한 곳에서만**: Windows와 CloudShell을 번갈아 apply하면 `*.tfstate`가 공유되지 않아
+> 409(이름 충돌)가 반복됩니다. 한 환경에서만 작업하거나 S3 backend로 state를 공유하세요.
+
+---
+
+## 대회 당일 — 앱(바이너리)이 바뀌었을 때 적용
+
+대회 중 **새 앱 바이너리**가 제공되면(또는 저장소가 갱신되면) 아래 순서로 반영합니다.
+배포에 실제로 쓰이는 건 소스(`.go`)가 아니라 **`application/binary/{user,product,stress}`** 입니다
+([build.tf](build.tf)가 이 바이너리만 ECR 이미지로 빌드·push). 그래서 **바이너리만 교체**하면 됩니다.
+
+### 1. 바이너리 교체 (파일명 고정: `user`, `product`, `stress`)
+
+**(A) jaemoohong 저장소에서 받는 경우** — 지금까지의 워크플로:
 ```bash
-cd ~/wsi-2026-task3/terraform
+git clone --depth 1 https://github.com/jaemoohong/user.git /tmp/userrepo
+cp /tmp/userrepo/user    <repo>/application/binary/user
+cp /tmp/userrepo/product <repo>/application/binary/product
+cp /tmp/userrepo/stress  <repo>/application/binary/stress
+```
+바뀐 것만 받으려면 해당 파일만 복사하면 됩니다. (예: user만 바뀌었으면 user만)
+
+**(B) 파일로 직접 받은 경우**:
+```bash
+cp /path/to/new/user    <repo>/application/binary/user   # product, stress 동일
+```
+
+> 실행권한 `chmod +x`는 **불필요**합니다 — [application/binary/Dockerfile](../application/binary/Dockerfile)이
+> `COPY --chmod=0755`로 이미지 안에서 권한을 부여합니다 (Windows에서도 OK).
+
+교체 확인(원본과 동일한지):
+```bash
+sha256sum <repo>/application/binary/user /tmp/userrepo/user   # 두 해시가 같아야 함
+```
+
+### 2. 새 태그로 apply (반드시 태그 변경)
+이미지 태그를 **새 값으로** 바꿔 apply 해야 ECR push + Deployment 롤링 업데이트가 같이 일어납니다.
+태그가 `latest`로 고정이면 매니페스트가 안 바뀌어 **새 이미지가 롤아웃되지 않습니다.**
+
+PowerShell (Windows):
+```powershell
+cd <repo>\terraform
+terraform apply -auto-approve -var is_windows=true -var app_image_tag="v$([int](Get-Date -UFormat %s))"
+```
+bash (CloudShell):
+```bash
+cd <repo>/terraform
 terraform apply -auto-approve -var app_image_tag="v$(date +%s)"
 ```
 
 - 동작 흐름: 바이너리 hash 변경 → `null_resource.build_push` 재실행(빌드+push)
   → Deployment 이미지 태그 변경 → user/product/stress 파드 롤링 재배포.
+- ⚠️ Windows는 `-var is_windows=true` 필수(빌드를 PowerShell로 수행), **Docker Desktop 실행 중**이어야 함.
 
 ### 3. 롤아웃 확인
 ```bash
-aws eks update-kubeconfig --name wsi2026-cluster --region ap-northeast-2   # 최초 1회
+aws eks update-kubeconfig --name <project>-cluster --region ap-northeast-2   # 최초 1회 (예: wsi2026e-cluster)
 kubectl -n app rollout status deploy/user
 kubectl -n app rollout status deploy/product
 kubectl -n app rollout status deploy/stress
@@ -180,34 +291,52 @@ kubectl -n app get pods -o wide
 ```
 
 > 같은 태그(`latest`)로 빌드만 다시 한 경우엔 매니페스트가 동일해 자동 롤아웃이 안 됩니다.
-> 그럴 땐 강제로:
-> ```bash
-> kubectl -n app rollout restart deploy/user deploy/product deploy/stress
-> ```
+> 그럴 땐 강제로: `kubectl -n app rollout restart deploy/user deploy/product deploy/stress`
+
+### 4. 동작 검증 (교체 후 빠른 스모크 테스트)
+```bash
+EP=https://<cloudfront-domain>          # terraform output endpoint
+curl -s -o /dev/null -w "%{http_code}\n" $EP/healthcheck                      # 200
+curl -s "$EP/v1/product?id=dbdump1&requestid=1&uuid=1"                        # 200 또는 404(없으면)
+```
+> 엔드포인트(앱 동작)가 바뀌었을 수 있으니, 경로/메서드/필드가 [문제지 검증된 동작](#검증된-동작) 표와
+> 맞는지 확인. 앱 API 형식이 바뀌면 인프라가 아니라 **요청 형식**을 새 스펙에 맞춰야 합니다
+> (라우팅 경로가 `/v1/user|product|stress`에서 바뀌면 [alb.tf](alb.tf)의 `listener_rule` path도 수정).
 
 ---
 
 ## 데이터 로드
 
-⚠️ **RDS는 프라이빗**(`publicly_accessible=false`, SG가 VPC 내부 CIDR만 허용)이라
-**CloudShell에서 직접 `mysql` 접속은 안 됩니다(연결 대기/멈춤).** VPC 안에서 도는
-**임시 파드**로 덤프를 주입하세요.
+✅ **`terraform apply`가 자동으로 적재합니다.** `db-init` Job([k8s_base.tf](k8s_base.tf))이
+테이블 생성 직후 `../load_user.dump`(=`user-seed` ConfigMap으로 마운트)를 적재합니다.
+**user 테이블이 비어 있을 때만** 적재하므로 Job 재시도·재apply에도 PK 중복이 안 납니다.
+별도 수동 적재 단계가 필요 없습니다.
 
+- 덤프 위치: `application` 상위의 [load_user.dump](../load_user.dump) (`file()`로 ConfigMap에 주입)
+- ⚠️ **ConfigMap 1MB 한도**: 덤프가 1MB를 넘으면 이 방식이 안 됨 → 아래 *수동 적재* 또는 S3+initContainer 방식 사용.
+
+적재 확인:
+```bash
+aws eks update-kubeconfig --name <클러스터명> --region ap-northeast-2
+kubectl -n app logs job/db-init        # "seed load done" 또는 "skipping seed"
+kubectl -n app run mysql-q --rm -i --restart=Never --image=mysql:8.0 -- \
+  mysql -h <rds-endpoint> -u appuser -p"$(terraform output -raw db_password)" dev \
+  -e "SELECT COUNT(*) FROM user;"
+```
+
+<details><summary>수동 적재(폴백) — 덤프가 1MB 초과 등 자동 적재가 안 될 때</summary>
+
+RDS는 프라이빗(`publicly_accessible=false`)이라 CloudShell에서 직접 접속은 안 됩니다.
+VPC 안에서 도는 임시 파드로 주입하세요.
 ```bash
 cd ~/2026-terraform/3과제/terraform
 export TF_DATA_DIR=/tmp/wsi-tf-data
 EP=$(terraform output -raw rds_endpoint | cut -d: -f1)
 PW=$(terraform output -raw db_password)
-
-# dump 는 3과제 폴더(상위)에 있음 → ../load_user.dump
 kubectl -n app run mysql-load --rm -i --restart=Never --image=mysql:8.0 -- \
   mysql -h "$EP" -u appuser -p"$PW" dev < ../load_user.dump
-
-# 적재 확인
-kubectl -n app run mysql-q --rm -i --restart=Never --image=mysql:8.0 -- \
-  mysql -h "$EP" -u appuser -p"$PW" dev -e "SELECT COUNT(*) FROM user;"
 ```
-> `kubectl` 안 잡히면 먼저: `aws eks update-kubeconfig --name <클러스터명> --region ap-northeast-2`
+</details>
 
 ## 검증된 동작
 
@@ -223,6 +352,57 @@ POST /v1/stress      {length:N}         → 201
 GET  /v1/none                           → 404
 GET  /random                            → 404
 ```
+
+## 문제 변경 대응 (당일 ±30% 변경 대비)
+
+> 문제지의 값이 바뀌면 **무엇을 어디서 고쳐야 하는지** 빠르게 찾는 표.
+> 변경 후엔 항상 `terraform fmt && terraform validate` → `terraform apply` 순으로 적용.
+> 앱 동작 자체(코드)는 **제공 바이너리**라 우리가 못 고침 → 인프라/매니페스트/덤프만 조정.
+
+### DB 관련
+
+| 문제지 변경 | 고칠 곳 | 비고 |
+|---|---|---|
+| **RDS identifier 지정** (예: `apdev-rds-instance` → 다른 이름) | [rds.tf](rds.tf) `aws_db_instance.this`의 `identifier` + `tags.Name` | 식별자만 바뀜. **덤프는 영향 없음**(덤프는 스키마명 `dev`만 참조) |
+| **스키마(DB)명 변경** (`dev` → 다른 이름) | ① [variables.tf](variables.tf) `db_name` ② **[load_user.dump](../load_user.dump) 첫 줄 `USE \`dev\`;`** 도 같이 변경 | ⚠️ 덤프에 `USE dev;`가 하드코딩됨 → 안 바꾸면 적재 실패. db-init은 `$MYSQL_DBNAME`라 자동 |
+| **DB 사용자/비번 규칙 변경** | [variables.tf](variables.tf) `db_username` (비번은 `random_password`) | Secret([k8s_base.tf](k8s_base.tf))이 자동 반영 |
+| **테이블 스키마 변경** (컬럼/인덱스/제약 추가) | [k8s_base.tf](k8s_base.tf) `db-init` Job의 `CREATE TABLE` | 인덱스 추가 등은 여기서. 앱이 새 컬럼 쓰면 바이너리 의존 |
+| **시드 덤프 교체** | [load_user.dump](../load_user.dump) 덮어쓰기 | 1MB↓면 그대로 자동 적재. **1MB↑면 ConfigMap 불가** → S3+initContainer로 전환 필요 |
+| **인스턴스 클래스/스토리지 변경** (`db.t3.micro` 등) | [rds.tf](rds.tf) `instance_class` / `allocated_storage` / `storage_type` | |
+| **Multi-AZ 요구 변경** | [rds.tf](rds.tf) `multi_az` | |
+
+### 앱 / 엔드포인트 관련
+
+| 문제지 변경 | 고칠 곳 | 비고 |
+|---|---|---|
+| **새 앱 바이너리 제공** | `application/binary/{user,product,stress}` 덮어쓰기 + `apply -var app_image_tag="v$(date +%s)"` | hash 변경 → 자동 재빌드·롤아웃 ("대회 당일" 섹션 참고) |
+| **컨테이너 포트 변경** (`8080` → 다른) | [k8s_apps.tf](k8s_apps.tf) `container_port`·probe `port`·Service `target_port` + [alb.tf](alb.tf) target group `port` | 세 곳 모두 일치시켜야 함 |
+| **새 환경변수 요구** | [k8s_base.tf](k8s_base.tf) ConfigMap/Secret 추가 → [k8s_apps.tf](k8s_apps.tf) 해당 컨테이너에 `env_from`/`env` | 예: `S3_BUCKET`은 `s3-config` ConfigMap → user/product에 주입 중 |
+| **이미지 다운로드 경로 변경** (`/images/<path>` → 다른) | [cloudfront.tf](cloudfront.tf) URI-rewrite function + S3 origin behavior(path pattern) | |
+| **S3 버킷 이름 지정 요구** | [s3.tf](s3.tf) `aws_s3_bucket.images.bucket` (현재 랜덤 suffix) | 버킷명은 `s3-config` ConfigMap이 자동으로 `S3_BUCKET`에 반영 |
+| **비정상 요청 응답코드 변경** (403/404) | [waf.tf](waf.tf) (차단=403) / [alb.tf](alb.tf) default fixed-response(미정의 path=404) | |
+
+### 인프라 / 리전 관련
+
+| 문제지 변경 | 고칠 곳 | 비고 |
+|---|---|---|
+| **리전 변경** | [variables.tf](variables.tf) `region` + `azs`(해당 리전 AZ로) | |
+| **노드 인스턴스 타입 변경** (`t3.medium` 강제 등) | [variables.tf](variables.tf) `node_instance_type` + [karpenter.tf](karpenter.tf) NodePool 허용 타입 | |
+| **EKS 버전 지정** | [variables.tf](variables.tf) `eks_version` | |
+| **노드 수 / 오토스케일 범위 변경** | [variables.tf](variables.tf) `node_*_size` + [k8s_apps.tf](k8s_apps.tf) HPA `min/max_replicas` | |
+| **이름 충돌(409) / 전체 새 배포** | [variables.tf](variables.tf) `project` 변경 | 모든 리소스 이름이 새로 생성됨 (트러블슈팅 #6) |
+
+> **변경 시 자주 놓치는 연쇄 의존**:
+> - 스키마명(`dev`) 변경 → **덤프의 `USE` 문**도 같이.
+> - 포트 변경 → Deployment·probe·Service·ALB TG **4곳** 모두.
+> - 엔드포인트 경로/응답코드 변경 → ALB·WAF·CloudFront 중 **해당 계층** 확인.
+
+---
+
+> **WAF 차단 대상 분석/대응**(`waf_header_stats.py`로 들어온 공격 보고 막는 법)은
+> [tuning/README.md](../tuning/README.md#waf-차단-분석--waf_header_statspy)에 정리.
+
+---
 
 ## 트러블슈팅
 

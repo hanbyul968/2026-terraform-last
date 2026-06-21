@@ -101,9 +101,40 @@ resource "aws_lb_listener_rule" "app" {
     target_group_arn = each.value.arn
   }
 
+  # path AND origin-verify header (set by CloudFront) — both must match to forward.
   condition {
     path_pattern {
       values = ["/v1/${each.key}", "/v1/${each.key}/*"]
+    }
+  }
+  condition {
+    http_header {
+      http_header_name = "X-Origin-Verify"
+      values           = [random_password.origin_verify.result]
+    }
+  }
+}
+
+# Requests to a valid API path WITHOUT the CloudFront origin-verify header did not
+# come through CloudFront (direct-to-ALB / abnormal) → 403. (Unknown paths → 404
+# via the listener default action.) This replaces the old ALB-scoped WAF rule.
+resource "aws_lb_listener_rule" "deny_direct" {
+  listener_arn = aws_lb_listener.http.arn
+  priority     = 50
+
+  action {
+    type = "fixed-response"
+    fixed_response {
+      content_type = "application/json"
+      message_body = "{\"err\":\"forbidden\"}"
+      status_code  = "403"
+    }
+  }
+
+  condition {
+    # 정확히 유효 엔드포인트만 (와일드카드 X) — /v1/users 같은 미정의 경로는 default 404 로.
+    path_pattern {
+      values = ["/v1/user", "/v1/product", "/v1/stress"]
     }
   }
 }
@@ -122,11 +153,6 @@ resource "aws_lb_listener_rule" "healthcheck" {
       values = ["/healthcheck"]
     }
   }
-}
-
-resource "aws_wafv2_web_acl_association" "alb" {
-  resource_arn = aws_lb.this.arn
-  web_acl_arn  = aws_wafv2_web_acl.regional.arn
 }
 
 # Nodes (managed node group AND Karpenter) use the EKS cluster primary SG.

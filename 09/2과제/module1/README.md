@@ -2,35 +2,37 @@
 
 ## 실행
 
-> ⚠️ **반드시 2단계로 실행. 1단계(클러스터 ACTIVE) 완료 전에는 절대 전체 apply 금지.**
+> 폴더가 2개로 분리되어 있습니다. **각 폴더에서 그냥 `terraform apply` 하면 됩니다 (`-target` 불필요).**
+> - `module1/`       → VPC, EKS 클러스터, 노드그룹, IAM, bastion (AWS 인프라)
+> - `module1/k8s/`   → KEDA, Karpenter, k8s 매니페스트 (클러스터에 배포)
 >
-> 클러스터를 만드는 같은 apply에서는 endpoint가 "known after apply"(미정)가 되어
-> helm/kubectl provider가 localhost로 폴백 → `Kubernetes cluster unreachable` /
-> `dial tcp [::1]:80` 에러. 코드 버그가 아니라 Terraform 구조적 제약이라 단계 분리가 유일한 해법.
+> 클러스터를 만드는 apply와 그 클러스터에 helm/kubectl을 배포하는 apply를 **같은 폴더에서 하면**
+> endpoint가 미정이 되어 `Kubernetes cluster unreachable` 에러가 납니다. 그래서 폴더를 나눴습니다.
+> k8s 폴더는 `../terraform.tfstate`(클러스터 상태)를 읽으므로 **반드시 module1 먼저, k8s 나중**.
+
+**1단계 — 클러스터 폴더 (약 15~20분)**
 
 ```powershell
+cd module1
 terraform init
+terraform apply --auto-approve
 ```
 
-**1단계 — VPC + EKS 클러스터 + 노드그룹 생성 (약 15~20분)**
-
-```powershell
-terraform apply "-target=aws_eks_node_group.system" "-target=aws_instance.bastion" --auto-approve
-```
-
-**1단계 완료 확인 — ACTIVE가 나와야 2단계 진행**
+**1단계 완료 확인 — ACTIVE 떠야 2단계**
 
 ```powershell
 aws eks describe-cluster --name wsi-eks --region ap-northeast-2 --query "cluster.status" --output text
 ```
 
-**2단계 — 나머지 전체 (IRSA, KEDA, Karpenter, k8s 리소스)**
+**2단계 — k8s 폴더 (KEDA, Karpenter, 매니페스트)**
 
 ```powershell
+cd k8s
+terraform init
 terraform apply --auto-approve
 ```
 
-> 클러스터가 AWS에서 삭제되어 다시 만드는 경우에도 위 순서 그대로. 전체 apply부터 하면 매번 에러.
+> 클러스터가 삭제되어 다시 만드는 경우에도 순서 동일: `module1` apply → ACTIVE 확인 → `module1/k8s` apply.
 
 ## apply 후 할 일
 

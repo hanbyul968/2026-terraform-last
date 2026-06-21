@@ -3,11 +3,15 @@
 ## 실행
 
 ```bash
-# terraform.tfvars에 비번호 설정 (본인 비번호로 변경, PowerShell에서 실행)
-Set-Content -Path terraform.tfvars -Value 'competitor_number = "01"' -Encoding utf8
-
+# apply 시 비번호를 직접 물어봄 (var.competitor_number)
 terraform init
 terraform apply --auto-approve
+#   var.competitor_number
+#     대회 비번호 (예: 01, 15). ...
+#   Enter a value: 01    ← 본인 비번호 입력
+
+# 입력 없이 바로 넘기려면:
+# terraform apply -var="competitor_number=01" --auto-approve
 ```
 
 ## apply 후 할 일

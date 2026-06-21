@@ -1,0 +1,11 @@
+id,product_id,category,price
+1,P001,Electronics,100
+2,P002,Electronics,130
+3,P003,Electronics,220
+4,P004,Electronics,300
+5,P005,Electronics,450
+6,P006,Books,15
+7,P007,Books,22
+8,P008,Books,35
+9,P009,Books,45
+10,P010,Books,55

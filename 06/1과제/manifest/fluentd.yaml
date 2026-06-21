@@ -1,0 +1,77 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluentd-config
+  namespace: unicorn
+data:
+  fluent.conf: |
+    <source>
+      @type forward
+      port 24224
+      bind 0.0.0.0
+    </source>
+
+    <match book.**>
+      @type cloudwatch_logs
+      region ap-northeast-2
+      log_group_name /unicorn/eks/book-app
+      log_stream_name fluentd-stream
+      auto_create_stream true
+      auto_create_group false
+      <buffer>
+        flush_mode interval
+        flush_interval 10s
+        chunk_limit_size 1m
+        retry_max_times 5
+      </buffer>
+    </match>
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fluentd-svc
+  namespace: unicorn
+spec:
+  selector:
+    app: fluentd
+  ports:
+  - port: 24224
+    targetPort: 24224
+    protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fluentd
+  namespace: unicorn
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fluentd
+  template:
+    metadata:
+      labels:
+        app: fluentd
+    spec:
+      nodeSelector:
+        unicorn: addon
+      serviceAccountName: unicorn-book-app-sa
+      containers:
+      - name: fluentd
+        image: fluent/fluentd-kubernetes-daemonset:v1-debian-cloudwatch
+        env:
+        - name: AWS_REGION
+          value: "ap-northeast-2"
+        - name: FLUENTD_CONF
+          value: "fluent.conf"
+        ports:
+        - containerPort: 24224
+        volumeMounts:
+        - name: config
+          mountPath: /fluentd/etc/
+      volumes:
+      - name: config
+        configMap:
+          name: fluentd-config

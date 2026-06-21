@@ -1,0 +1,14 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+
+# 실제 변수값(비번호)
+terraform.tfvars
+*.auto.tfvars
+
+# Lambda 빌드 산출물
+build/
+*.tfplan

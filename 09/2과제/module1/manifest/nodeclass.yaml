@@ -1,0 +1,14 @@
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: wsi-nodeclass
+spec:
+  amiSelectorTerms:
+    - alias: "al2023@latest"
+  role: "wsi-system-ng-role"
+  subnetSelectorTerms:
+    - tags:
+        kubernetes.io/cluster/wsi-eks: shared
+  securityGroupSelectorTerms:
+    - tags:
+        kubernetes.io/cluster/wsi-eks: owned

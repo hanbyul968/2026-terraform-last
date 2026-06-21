@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: wsi-app
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: wsi-worker-sa
+  namespace: wsi-app
+  annotations:
+    eks.amazonaws.com/role-arn: "${APP_IRSA_ROLE_ARN}"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wsi-worker-app
+  namespace: wsi-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: wsi-worker-app
+  template:
+    metadata:
+      labels:
+        app: wsi-worker-app
+    spec:
+      serviceAccountName: wsi-worker-sa
+      tolerations:
+        - key: "wsi-nodepool"
+          operator: "Exists"
+          effect: "NoSchedule"
+      nodeSelector:
+        karpenter.sh/nodepool: wsi-nodepool
+      containers:
+        - name: worker
+          image: "${ECR_IMAGE}"
+          env:
+            - name: AWS_REGION
+              value: "ap-northeast-2"
+            - name: QUEUE_URL
+              value: "${SQS_QUEUE_URL}"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"

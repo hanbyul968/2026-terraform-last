@@ -1,0 +1,70 @@
+adminUser: admin
+adminPassword: "worldpay2026!"
+service:
+  type: ClusterIP
+  port: 3000
+datasources:
+  datasources.yaml:
+    apiVersion: 1
+    datasources:
+    - name: worldpay-prometheus
+      type: prometheus
+      url: http://prometheus-server.monitoring.svc:80
+      access: proxy
+      isDefault: true
+    - name: worldpay-logs
+      type: cloudwatch
+      access: proxy
+      jsonData:
+        defaultRegion: ap-northeast-2
+dashboardProviders:
+  dashboardproviders.yaml:
+    apiVersion: 1
+    providers:
+    - name: default
+      orgId: 1
+      folder: ''
+      type: file
+      disableDeletion: false
+      editable: true
+      options:
+        path: /var/lib/grafana/dashboards/default
+dashboards:
+  default:
+    worldpay-dashboard:
+      json: |
+        {
+          "title": "worldpay-dashboard",
+          "panels": [
+            {
+              "title": "POD_CPU",
+              "type": "timeseries",
+              "datasource": "worldpay-prometheus",
+              "targets": [{"expr": "rate(container_cpu_usage_seconds_total{namespace=\"worldpay\",pod=~\"book-deploy.*\",container=\"book\"}[5m])"}],
+              "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+            },
+            {
+              "title": "POD_MEMORY",
+              "type": "timeseries",
+              "datasource": "worldpay-prometheus",
+              "targets": [{"expr": "container_memory_working_set_bytes{namespace=\"worldpay\",pod=~\"book-deploy.*\",container=\"book\"}"}],
+              "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+            },
+            {
+              "title": "APP_LOGS",
+              "type": "logs",
+              "datasource": "worldpay-logs",
+              "targets": [{"queryMode": "Logs", "logGroups": [{"arn": "arn:aws:logs:ap-northeast-2:ACCOUNT_ID:log-group:/worldpay/application", "name": "/worldpay/application"}], "expression": "fields @timestamp, @message | sort @timestamp desc | limit 50", "refId": "A"}],
+              "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
+            },
+            {
+              "title": "NETWORK_CAPACITY",
+              "type": "timeseries",
+              "datasource": "worldpay-prometheus",
+              "targets": [{"expr": "kube_node_status_allocatable{resource=\"pods\"} - on(node) count(kube_pod_info) by (node)"}],
+              "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
+            }
+          ],
+          "schemaVersion": 38,
+          "version": 1
+        }

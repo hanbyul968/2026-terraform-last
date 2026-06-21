@@ -1,0 +1,540 @@
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+    local = {
+      source  = "hashicorp/local"
+      version = "~> 2.0"
+    }
+    null = {
+      source  = "hashicorp/null"
+      version = "~> 3.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = "ap-northeast-2"
+}
+
+data "aws_caller_identity" "current" {}
+data "aws_region" "current" {}
+
+# SQS Queue
+resource "aws_sqs_queue" "order" {
+  name = "skm-order-queue"
+}
+
+# VPC for EKS
+resource "aws_vpc" "main" {
+  cidr_block           = "10.0.0.0/16"
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+  tags                 = { Name = "skm-vpc" }
+}
+
+resource "aws_internet_gateway" "main" {
+  vpc_id = aws_vpc.main.id
+  tags   = { Name = "skm-igw" }
+}
+
+resource "aws_subnet" "pub_a" {
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = "10.0.1.0/24"
+  availability_zone       = "ap-northeast-2a"
+  map_public_ip_on_launch = true
+  tags = {
+    Name                                    = "skm-pub-a"
+    "kubernetes.io/cluster/skm-eks-cluster" = "shared"
+    "kubernetes.io/role/elb"                = "1"
+  }
+}
+
+resource "aws_subnet" "pub_b" {
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = "10.0.2.0/24"
+  availability_zone       = "ap-northeast-2b"
+  map_public_ip_on_launch = true
+  tags = {
+    Name                                    = "skm-pub-b"
+    "kubernetes.io/cluster/skm-eks-cluster" = "shared"
+    "kubernetes.io/role/elb"                = "1"
+  }
+}
+
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.main.id
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.main.id
+  }
+  tags = { Name = "skm-pub-rt" }
+}
+
+resource "aws_route_table_association" "pub_a" {
+  subnet_id      = aws_subnet.pub_a.id
+  route_table_id = aws_route_table.public.id
+}
+
+resource "aws_route_table_association" "pub_b" {
+  subnet_id      = aws_subnet.pub_b.id
+  route_table_id = aws_route_table.public.id
+}
+
+locals {
+  subnet_ids = [aws_subnet.pub_a.id, aws_subnet.pub_b.id]
+}
+
+# EKS Cluster IAM Role
+resource "aws_iam_role" "eks_cluster" {
+  name = "skm-eks-cluster-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
+      Principal = { Service = "eks.amazonaws.com" }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "eks_cluster_policy" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
+  role       = aws_iam_role.eks_cluster.name
+}
+
+# EKS Cluster
+resource "aws_eks_cluster" "main" {
+  name     = "skm-eks-cluster"
+  version  = "1.35"
+  role_arn = aws_iam_role.eks_cluster.arn
+
+  vpc_config {
+    subnet_ids              = local.subnet_ids
+    endpoint_public_access  = true
+    endpoint_private_access = true
+  }
+
+  access_config {
+    authentication_mode                         = "API_AND_CONFIG_MAP"
+    bootstrap_cluster_creator_admin_permissions = false
+  }
+
+  depends_on = [aws_iam_role_policy_attachment.eks_cluster_policy]
+}
+
+# === 채점용: terraform을 실행한 IAM 주체에 EKS Cluster Admin 부여 ===
+# 대회 때 terraform을 apply한 계정(IAM User/Role)이 CloudShell에서 kubectl로
+# 채점할 수 있도록, 호출 주체에 AmazonEKSClusterAdminPolicy access entry를 연결한다.
+locals {
+  caller_arn = data.aws_caller_identity.current.arn
+  # STS assumed-role 세션 ARN(arn:aws:sts::...:assumed-role/ROLE/SESSION)을
+  # access entry가 요구하는 IAM Role ARN(arn:aws:iam::...:role/ROLE)으로 변환.
+  # IAM User ARN(arn:aws:iam::...:user/NAME)은 그대로 사용.
+  grader_principal_arn = can(regex(":assumed-role/", local.caller_arn)) ? format(
+    "arn:aws:iam::%s:role/%s",
+    data.aws_caller_identity.current.account_id,
+    element(split("/", local.caller_arn), 1)
+  ) : local.caller_arn
+}
+
+resource "aws_eks_access_entry" "creator" {
+  cluster_name  = aws_eks_cluster.main.name
+  principal_arn = local.grader_principal_arn
+  type          = "STANDARD"
+}
+
+resource "aws_eks_access_policy_association" "creator" {
+  cluster_name  = aws_eks_cluster.main.name
+  principal_arn = local.grader_principal_arn
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+  access_scope {
+    type = "cluster"
+  }
+  depends_on = [aws_eks_access_entry.creator]
+}
+
+# Addon NodeGroup IAM Role
+resource "aws_iam_role" "addon_ng" {
+  name = "skm-cluster-addon-ng-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
+      Principal = { Service = "ec2.amazonaws.com" }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "addon_ng_worker" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
+  role       = aws_iam_role.addon_ng.name
+}
+
+resource "aws_iam_role_policy_attachment" "addon_ng_cni" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
+  role       = aws_iam_role.addon_ng.name
+}
+
+resource "aws_iam_role_policy_attachment" "addon_ng_ecr" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+  role       = aws_iam_role.addon_ng.name
+}
+
+# EKS managed node group tags are NOT propagated to EC2 instances; LT tag_specifications
+# is required for grading 3-2 (tag:Name=skm-cluster-addon-ng-node).
+resource "aws_launch_template" "addon_ng" {
+  name_prefix = "skm-cluster-addon-ng-"
+  tag_specifications {
+    resource_type = "instance"
+    tags          = { Name = "skm-cluster-addon-ng-node" }
+  }
+  tag_specifications {
+    resource_type = "volume"
+    tags          = { Name = "skm-cluster-addon-ng-node" }
+  }
+  tags = { Name = "skm-cluster-addon-ng-lt" }
+}
+
+resource "aws_eks_node_group" "addon" {
+  cluster_name    = aws_eks_cluster.main.name
+  node_group_name = "skm-cluster-addon-ng"
+  node_role_arn   = aws_iam_role.addon_ng.arn
+  subnet_ids      = local.subnet_ids
+  instance_types  = ["t3.medium"]
+
+  launch_template {
+    id      = aws_launch_template.addon_ng.id
+    version = aws_launch_template.addon_ng.latest_version
+  }
+
+  scaling_config {
+    desired_size = 1
+    min_size     = 1
+    max_size     = 1
+  }
+
+  taint {
+    key    = "dedicated"
+    value  = "addon"
+    effect = "NO_SCHEDULE"
+  }
+
+  tags = {
+    Name = "skm-cluster-addon-ng-node"
+  }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.addon_ng_worker,
+    aws_iam_role_policy_attachment.addon_ng_cni,
+    aws_iam_role_policy_attachment.addon_ng_ecr,
+    aws_route_table_association.pub_a,
+    aws_route_table_association.pub_b,
+  ]
+}
+
+# IRSA for KEDA (SQS access)
+resource "aws_iam_openid_connect_provider" "eks" {
+  client_id_list  = ["sts.amazonaws.com"]
+  thumbprint_list = ["9e99a48a9960b14926bb7f3b02e22da2b0ab7280"]
+  url             = aws_eks_cluster.main.identity[0].oidc[0].issuer
+}
+
+locals {
+  oidc_provider = replace(aws_eks_cluster.main.identity[0].oidc[0].issuer, "https://", "")
+}
+
+# IRSA for App (SQS access)
+resource "aws_iam_role" "app_irsa" {
+  name = "skm-order-processor-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Federated = aws_iam_openid_connect_provider.eks.arn }
+      Action    = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = {
+          "${local.oidc_provider}:sub" = "system:serviceaccount:skillsmkt:order-processor-sa"
+          "${local.oidc_provider}:aud" = "sts.amazonaws.com"
+        }
+      }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "app_sqs" {
+  name = "skm-order-processor-sqs-policy"
+  role = aws_iam_role.app_irsa.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "sqs:ReceiveMessage",
+        "sqs:DeleteMessage",
+        "sqs:GetQueueAttributes"
+      ]
+      Resource = aws_sqs_queue.order.arn
+    }]
+  })
+}
+
+# IRSA for KEDA
+resource "aws_iam_role" "keda_irsa" {
+  name = "skm-keda-operator-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Federated = aws_iam_openid_connect_provider.eks.arn }
+      Action    = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = {
+          "${local.oidc_provider}:sub" = "system:serviceaccount:keda:keda-operator"
+          "${local.oidc_provider}:aud" = "sts.amazonaws.com"
+        }
+      }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "keda_sqs" {
+  name = "skm-keda-sqs-policy"
+  role = aws_iam_role.keda_irsa.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "sqs:GetQueueAttributes",
+        "sqs:GetQueueUrl"
+      ]
+      Resource = aws_sqs_queue.order.arn
+    }]
+  })
+}
+
+# IRSA for Karpenter
+resource "aws_iam_role" "karpenter_irsa" {
+  name = "skm-karpenter-controller-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Federated = aws_iam_openid_connect_provider.eks.arn }
+      Action    = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = {
+          "${local.oidc_provider}:sub" = "system:serviceaccount:kube-system:karpenter"
+          "${local.oidc_provider}:aud" = "sts.amazonaws.com"
+        }
+      }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "karpenter" {
+  name = "skm-karpenter-policy"
+  role = aws_iam_role.karpenter_irsa.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateLaunchTemplate",
+          "ec2:CreateFleet",
+          "ec2:RunInstances",
+          "ec2:CreateTags",
+          "ec2:TerminateInstances",
+          "ec2:DescribeLaunchTemplates",
+          "ec2:DescribeInstances",
+          "ec2:DescribeSecurityGroups",
+          "ec2:DescribeSubnets",
+          "ec2:DescribeImages",
+          "ec2:DescribeInstanceTypes",
+          "ec2:DescribeInstanceTypeOfferings",
+          "ec2:DescribeAvailabilityZones",
+          "ec2:DeleteLaunchTemplate",
+          "ec2:DescribeSpotPriceHistory",
+          "pricing:GetProducts"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = "iam:PassRole"
+        Resource = aws_iam_role.addon_ng.arn
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "iam:CreateInstanceProfile",
+          "iam:DeleteInstanceProfile",
+          "iam:GetInstanceProfile",
+          "iam:AddRoleToInstanceProfile",
+          "iam:RemoveRoleFromInstanceProfile",
+          "iam:TagInstanceProfile"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "eks:DescribeCluster"
+        ]
+        Resource = aws_eks_cluster.main.arn
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ssm:GetParameter"
+        ]
+        Resource = "arn:aws:ssm:${data.aws_region.current.name}::parameter/aws/service/eks/optimized-ami/*"
+      }
+    ]
+  })
+}
+
+# CoreDNS addon with toleration
+resource "aws_eks_addon" "coredns" {
+  cluster_name = aws_eks_cluster.main.name
+  addon_name   = "coredns"
+
+  configuration_values = jsonencode({
+    tolerations = [{
+      key    = "dedicated"
+      value  = "addon"
+      effect = "NoSchedule"
+    }]
+  })
+
+  depends_on = [aws_eks_node_group.addon]
+}
+
+output "sqs_queue_url" {
+  value = aws_sqs_queue.order.url
+}
+
+output "app_irsa_role_arn" {
+  value = aws_iam_role.app_irsa.arn
+}
+
+output "cluster_name" {
+  value = aws_eks_cluster.main.name
+}
+
+
+# ============================================================
+# 제공파일(app/) 자동 빌드 & 배포 — 별도 수동 docker build / kubectl 불필요
+# terraform apply 한 번으로 ECR 빌드/푸시 + 워크로드 배포까지 완료된다.
+# (apply 호스트에 docker, aws cli, bash 필요)
+# ============================================================
+
+resource "aws_ecr_repository" "app" {
+  name                 = "skm-order-processor"
+  image_tag_mutability = "MUTABLE"
+  force_delete         = true
+}
+
+locals {
+  ecr_image = "${aws_ecr_repository.app.repository_url}:latest"
+}
+
+# Docker 이미지 빌드 & 푸시 (app/ 내용이 바뀌면 재빌드)
+resource "null_resource" "build_push" {
+  triggers = {
+    app_hash    = filesha256("${path.module}/app/app.py")
+    docker_hash = filesha256("${path.module}/app/Dockerfile")
+    req_hash    = filesha256("${path.module}/app/requirements.txt")
+    repo        = aws_ecr_repository.app.repository_url
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["powershell", "-Command"]
+    command     = <<-EOT
+      $ErrorActionPreference = "Stop"
+      $REGION  = "${data.aws_region.current.name}"
+      $ACCOUNT = "${data.aws_caller_identity.current.account_id}"
+      $REPO    = "${aws_ecr_repository.app.repository_url}"
+      $pw = aws ecr get-login-password --region $REGION
+      docker login --username AWS --password $pw "$($ACCOUNT).dkr.ecr.$($REGION).amazonaws.com"
+      docker build --platform linux/amd64 -t "$($REPO):latest" "${path.module}/app"
+      docker push "$($REPO):latest"
+    EOT
+  }
+
+  depends_on = [aws_ecr_repository.app]
+}
+
+# --- 렌더링된 매니페스트를 디스크에 기록 ---
+locals {
+  rendered_karpenter = templatefile("${path.module}/k8s-karpenter.yaml", {
+    CLUSTER_NAME   = aws_eks_cluster.main.name
+    NODE_ROLE_NAME = aws_iam_role.addon_ng.name
+  })
+  rendered_app = templatefile("${path.module}/k8s-app.yaml", {
+    APP_IRSA_ROLE_ARN = aws_iam_role.app_irsa.arn
+    ECR_IMAGE         = local.ecr_image
+    SQS_QUEUE_URL     = aws_sqs_queue.order.url
+  })
+  rendered_keda = templatefile("${path.module}/k8s-keda.yaml", {
+    SQS_QUEUE_URL = aws_sqs_queue.order.url
+  })
+}
+
+resource "local_file" "karpenter" {
+  content  = local.rendered_karpenter
+  filename = "${path.module}/.rendered/karpenter.yaml"
+}
+resource "local_file" "app" {
+  content  = local.rendered_app
+  filename = "${path.module}/.rendered/app.yaml"
+}
+resource "local_file" "keda" {
+  content  = local.rendered_keda
+  filename = "${path.module}/.rendered/keda.yaml"
+}
+
+# --- 단일 apply: helm(KEDA/Karpenter) + kubectl 매니페스트를 apply 시점 CLI 로 배포 ---
+# helm/kubectl provider 가 같은 apply 에서 만든 클러스터 endpoint 를 plan 시점에 못 읽는
+# Terraform 한계를 피하려고 local-exec 로 실행한다 => terraform apply 한 번으로 완료.
+resource "null_resource" "deploy" {
+  triggers = {
+    karpenter = local_file.karpenter.content
+    app       = local_file.app.content
+    keda      = local_file.keda.content
+    image     = local.ecr_image
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["powershell", "-NoProfile", "-File"]
+    command     = "${path.module}/deploy_k8s.ps1"
+    environment = {
+      CLUSTER_NAME       = aws_eks_cluster.main.name
+      CLUSTER_ENDPOINT   = aws_eks_cluster.main.endpoint
+      REGION             = data.aws_region.current.name
+      KEDA_ROLE_ARN      = aws_iam_role.keda_irsa.arn
+      KARPENTER_ROLE_ARN = aws_iam_role.karpenter_irsa.arn
+      MANIFEST_DIR       = "${path.module}/.rendered"
+    }
+  }
+
+  depends_on = [
+    aws_eks_node_group.addon,
+    aws_eks_access_policy_association.creator,
+    aws_eks_addon.coredns,
+    null_resource.build_push,
+    local_file.karpenter,
+    local_file.app,
+    local_file.keda,
+  ]
+}
+
+output "ecr_image" {
+  value = local.ecr_image
+}

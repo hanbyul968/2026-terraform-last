@@ -1,0 +1,13 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+
+# 실제 변수값 (선수ID 등) — 예시 파일만 커밋
+terraform.tfvars
+*.auto.tfvars
+
+# Plan 출력물
+*.tfplan

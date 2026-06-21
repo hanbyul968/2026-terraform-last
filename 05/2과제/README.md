@@ -5,9 +5,9 @@
 | 紐⑤뱢 | 寃쎈줈 | 由ъ쟾 | ?댁슜 |
 |---|---|---|---|
 | 1 | `module1/infra/` | us-east-1 | CDN (S3 + Lambda + CloudFront) |
-| 2 | `module-2/` | ap-southeast-1 | Kafka + Flink + NLB |
+| 2 | `module2/` | ap-southeast-1 | Kafka + Flink + NLB |
 | 3 | `module3/infra/` | ap-northeast-2 | FastAPI + CW Agent + EventBridge |
-| 4 | `module-4/` | eu-central-1 | Keycloak + OIDC + IAM |
+| 4 | `module4/` | eu-central-1 | Keycloak + OIDC + IAM |
 
 ---
 
@@ -41,7 +41,7 @@ terraform apply -var pin=<鍮꾨쾲??
 ### Module 2: Real-time data analytics
 
 ```bash
-cd ~/2026-terraform/05/2怨쇱젣/module-2
+cd ~/2026-terraform/05/2怨쇱젣/module2
 
 terraform init
 terraform apply
@@ -65,7 +65,7 @@ terraform apply -var alarm_email=<?대찓?쇱＜??
 ### Module 4: Keycloak
 
 ```bash
-cd ~/2026-terraform/05/2怨쇱젣/module-4
+cd ~/2026-terraform/05/2怨쇱젣/module4
 
 terraform init
 terraform apply
@@ -104,12 +104,12 @@ terraform apply
 
 | 蹂寃???ぉ | ?뚯씪 | ?섏젙 ?꾩튂 |
 |---|---|---|
-| EC2 ?대쫫 (`gj2026-data-ec2`) | `module-2/main.tf` | `aws_instance.kafka` ??`tags.Name` |
-| NLB ?대쫫 (`gj2026-data-nlb`) | `module-2/main.tf` | `aws_lb.data.name` |
-| Kafka ?대? ?ы듃 (`9092`) | `module-2/main.tf` | SG ingress + userdata `INTERNAL://0.0.0.0:9092` |
-| Kafka ?몃? ?ы듃 (`9094`) | `module-2/main.tf` | SG ingress + TG port + Listener port + userdata `EXTERNAL://0.0.0.0:9094` |
-| ?좏뵿 ?대쫫/?뚰떚????| `module-2/main.tf` | userdata??`kafka-topics.sh --create` 紐낅졊 |
-| Glue DB ?대쫫 (`real_time_analytics`) | `module-2/main.tf` | `aws_glue_catalog_database.analytics.name` |
+| EC2 ?대쫫 (`gj2026-data-ec2`) | `module2/main.tf` | `aws_instance.kafka` ??`tags.Name` |
+| NLB ?대쫫 (`gj2026-data-nlb`) | `module2/main.tf` | `aws_lb.data.name` |
+| Kafka ?대? ?ы듃 (`9092`) | `module2/main.tf` | SG ingress + userdata `INTERNAL://0.0.0.0:9092` |
+| Kafka ?몃? ?ы듃 (`9094`) | `module2/main.tf` | SG ingress + TG port + Listener port + userdata `EXTERNAL://0.0.0.0:9094` |
+| ?좏뵿 ?대쫫/?뚰떚????| `module2/main.tf` | userdata??`kafka-topics.sh --create` 紐낅졊 |
+| Glue DB ?대쫫 (`real_time_analytics`) | `module2/main.tf` | `aws_glue_catalog_database.analytics.name` |
 
 ### Module 3
 
@@ -133,14 +133,15 @@ terraform apply
 
 | 蹂寃???ぉ | ?뚯씪 | ?섏젙 ?꾩튂 |
 |---|---|---|
-| EC2 ?대쫫 (`gj2026-keycloak-ec2`) | `module-4/main.tf` | `aws_instance.keycloak` ??`tags.Name` |
-| Realm ?대쫫 (`team`) | `module-4/main.tf` | userdata setup script??紐⑤뱺 `/realms/team` + `null_resource.oidc_provider` |
-| Client ?대쫫 (`gj2026-keycloak-dev/sec`) | `module-4/main.tf` | userdata??`for CLIENT in` 諛곗뿴 + `null_resource.iam_roles` |
-| Client Scope ?대쫫 (`gj2026-keycloak-claims`) | `module-4/main.tf` | userdata??`SCOPE_PAYLOAD.name` |
-| Group ?대쫫 (`dev-team`, `sec-team`) | `module-4/main.tf` | userdata??`for g in dev-team sec-team` |
-| ?ъ슜??鍮꾨?踰덊샇 | `module-4/main.tf` | userdata??`create_user` ?몄텧 |
-| Dev/Sec Role ?대쫫 | `module-4/main.tf` | `null_resource.iam_roles` ??`create_role` ?몄텧 |
-| Dev/Sec Policy ?대쫫 | `module-4/main.tf` | `aws_iam_policy.dev/sec.name` |
-| ? ?쒓렇 ??(`team`) | `module-4/main.tf` | `aws_iam_policy.dev/sec` ??`Condition.StringEquals["ec2:ResourceTag/team"]` |
-| admin 鍮꾨?踰덊샇 (`admin1234!`) | `module-4/main.tf` | `variable.keycloak_admin_password.default` |
+| EC2 ?대쫫 (`gj2026-keycloak-ec2`) | `module4/main.tf` | `aws_instance.keycloak` ??`tags.Name` |
+| Realm ?대쫫 (`team`) | `module4/main.tf` | userdata setup script??紐⑤뱺 `/realms/team` + `null_resource.oidc_provider` |
+| Client ?대쫫 (`gj2026-keycloak-dev/sec`) | `module4/main.tf` | userdata??`for CLIENT in` 諛곗뿴 + `null_resource.iam_roles` |
+| Client Scope ?대쫫 (`gj2026-keycloak-claims`) | `module4/main.tf` | userdata??`SCOPE_PAYLOAD.name` |
+| Group ?대쫫 (`dev-team`, `sec-team`) | `module4/main.tf` | userdata??`for g in dev-team sec-team` |
+| ?ъ슜??鍮꾨?踰덊샇 | `module4/main.tf` | userdata??`create_user` ?몄텧 |
+| Dev/Sec Role ?대쫫 | `module4/main.tf` | `null_resource.iam_roles` ??`create_role` ?몄텧 |
+| Dev/Sec Policy ?대쫫 | `module4/main.tf` | `aws_iam_policy.dev/sec.name` |
+| ? ?쒓렇 ??(`team`) | `module4/main.tf` | `aws_iam_policy.dev/sec` ??`Condition.StringEquals["ec2:ResourceTag/team"]` |
+| admin 鍮꾨?踰덊샇 (`admin1234!`) | `module4/main.tf` | `variable.keycloak_admin_password.default` |
+
 

@@ -87,32 +87,46 @@ terraform init
 terraform apply -auto-approve
 ```
 
-**2. kubeconfig 설정**
+> ⚠️ 이후 단계는 **CloudShell VPC 환경**(private-subnet-a + `wsc2026-logging-cloudshell-sg`)에서 실행.
+> private endpoint 클러스터라 일반 CloudShell/VPC 밖에선 kubectl 안 됨. (상세는 `module2/README.md` 0단계)
+
+**2. helm 설치** (CloudShell엔 helm 없음 → `helm: command not found` 방지)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+helm version   # 안 잡히면: export PATH=$PATH:/usr/local/bin:~/.local/bin
+```
+
+**3. kubeconfig 설정**
 
 ```bash
 aws eks update-kubeconfig --name wsc2026-logging-cluster --region ap-southeast-2
 kubectl get nodes
 ```
 
-**3. ALB Controller 설치**
+**4. ALB Controller 설치** (`region`/`vpcId` 필수 — 없으면 VPC ID 못 찾아 CrashLoop)
 
 ```bash
-# ALB Controller Role ARN 확인
-ALB_ROLE=$(terraform output -raw alb_controller_role_arn 2>/dev/null || \
-  aws iam get-role --role-name wsc2026-logging-alb-controller-role \
+ALB_ROLE=$(aws iam get-role --role-name wsc2026-logging-alb-controller-role \
   --query Role.Arn --output text)
+VPC_ID=$(aws ec2 describe-vpcs --region ap-southeast-2 \
+  --filters "Name=tag:Name,Values=wsc2026-logging-vpc" --query "Vpcs[0].VpcId" --output text)
 
-helm repo add eks https://aws.github.io/eks-charts
-helm repo update
+helm repo add eks https://aws.github.io/eks-charts && helm repo update
 helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
   -n kube-system \
   --set clusterName=wsc2026-logging-cluster \
+  --set region=ap-southeast-2 \
+  --set vpcId=$VPC_ID \
   --set serviceAccount.create=true \
   --set serviceAccount.name=aws-load-balancer-controller \
   --set "serviceAccount.annotations.eks\.amazonaws\.com/role-arn=$ALB_ROLE"
+
+kubectl get sa aws-load-balancer-controller -n kube-system   # SA 존재 확인
+kubectl rollout status deploy/aws-load-balancer-controller -n kube-system --timeout=120s
 ```
 
-**4. k8s 리소스 배포**
+**5. k8s 리소스 배포**
 
 ```bash
 kubectl create namespace logging
@@ -122,10 +136,11 @@ helm repo add grafana https://grafana.github.io/helm-charts
 helm repo update
 helm install loki grafana/loki-stack -n logging
 
-# Grafana
+# Grafana (/logging 서브패스 서비스)
 helm install grafana grafana/grafana -n logging \
   --set adminUser=admin \
-  --set adminPassword=wsc2026-logging-admin-61
+  --set adminPassword=wsc2026-logging-admin-61 \
+  --set "grafana\.ini.server.serve_from_sub_path=true"
 
 # Fluent Bit
 helm repo add fluent https://fluent.github.io/helm-charts
@@ -136,7 +151,7 @@ kubectl run nginx --image=nginx -n logging
 kubectl expose pod nginx --port=80 -n logging
 ```
 
-**5. Ingress 배포 (ALB 생성)**
+**6. Ingress 배포 (ALB 생성)**
 
 ```bash
 kubectl apply -f - <<'EOF'
@@ -150,6 +165,7 @@ metadata:
     alb.ingress.kubernetes.io/load-balancer-name: wsc2026-logging-alb
     alb.ingress.kubernetes.io/scheme: internet-facing
     alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/success-codes: "200,302"
 spec:
   defaultBackend:
     service:
@@ -176,12 +192,25 @@ spec:
 EOF
 ```
 
-**6. ALB DNS 확인**
+**7. ALB DNS 확인 + Grafana root_url 재설정**
 
 ```bash
-aws elbv2 describe-load-balancers --names wsc2026-logging-alb \
-  --region ap-southeast-2 --query "LoadBalancers[].DNSName" --output text
+ALB_DNS=$(aws elbv2 describe-load-balancers --names wsc2026-logging-alb \
+  --region ap-southeast-2 --query "LoadBalancers[0].DNSName" --output text)
+echo $ALB_DNS
+
+# grafana를 ALB DNS의 /logging 서브패스로 재설정 (안 하면 /logging 접속 깨짐)
+helm upgrade grafana grafana/grafana -n logging --reuse-values \
+  --set "grafana\.ini.server.root_url=http://$ALB_DNS/logging" \
+  --set "grafana\.ini.server.serve_from_sub_path=true"
+
+# 접속 테스트 (1~2분 후): / →200(nginx), /logging →200(grafana), 임의경로 →404
+curl -s -o /dev/null -w "/: %{http_code}\n" http://$ALB_DNS/
+curl -s -L -o /dev/null -w "/logging: %{http_code}\n" http://$ALB_DNS/logging
+curl -s -o /dev/null -w "/zzz: %{http_code}\n" http://$ALB_DNS/zzz
 ```
+
+> `/logging`이 503이면 grafana 타깃 unhealthy → Ingress의 `success-codes: "200,302"` 들어갔는지 확인.
 
 ---
 

@@ -312,6 +312,9 @@ resource "aws_instance" "app" {
   vpc_security_group_ids = [aws_security_group.ec2.id]
   iam_instance_profile   = aws_iam_instance_profile.ec2.name
 
+  # user_data 변경 시 stop/start(재실행 안 됨)이 아니라 인스턴스 교체 → 새 user_data가 깨끗이 실행
+  user_data_replace_on_change = true
+
   user_data = <<-EOF
 #!/bin/bash
 exec > /var/log/user-data.log 2>&1

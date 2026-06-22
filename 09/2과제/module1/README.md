@@ -67,6 +67,11 @@ kubectl get nodepool
 kubectl get ec2nodeclass
 ```
 
+> 워커 앱(`app.py`)은 배포파일 `module1/app.py`를 ConfigMap(`wsi-worker-code`)으로 만들어
+> 컨테이너 `/app`에 마운트하고 `pip install boto3 && python /app/app.py`로 기동한다 (`module1/k8s/main.tf`).
+> 따라서 파드는 CrashLoop 없이 실제로 SQS를 polling·처리·삭제한다.
+> app.py를 바꾸면 `module1/k8s`에서 `terraform apply`로 ConfigMap 갱신 → `kubectl rollout restart deploy/wsi-worker-app -n wsi-app`.
+
 ## 채점 정보
 
 | 항목           | 값                                                              |

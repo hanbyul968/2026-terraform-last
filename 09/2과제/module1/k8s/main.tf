@@ -144,6 +144,22 @@ resource "kubectl_manifest" "service_account" {
   depends_on = [kubectl_manifest.namespace]
 }
 
+# 배포파일 app.py 를 ConfigMap 으로 → 컨테이너 /app 에 마운트
+resource "kubectl_manifest" "app_code" {
+  yaml_body = yamlencode({
+    apiVersion = "v1"
+    kind       = "ConfigMap"
+    metadata = {
+      name      = "wsi-worker-code"
+      namespace = "wsi-app"
+    }
+    data = {
+      "app.py" = file("${path.module}/../app.py")
+    }
+  })
+  depends_on = [kubectl_manifest.namespace]
+}
+
 resource "kubectl_manifest" "deployment" {
   yaml_body = <<-YAML
     apiVersion: apps/v1
@@ -165,10 +181,12 @@ resource "kubectl_manifest" "deployment" {
           containers:
           - name: worker
             image: python:3.11-slim
-            command: ["python", "/app/app.py"]
+            command: ["sh", "-c", "pip install --no-cache-dir --quiet boto3 && python /app/app.py"]
             env:
             - name: QUEUE_URL
               value: "${local.sqs_queue_url}"
+            - name: AWS_REGION
+              value: "ap-northeast-2"
             resources:
               requests:
                 cpu: "200m"
@@ -176,8 +194,15 @@ resource "kubectl_manifest" "deployment" {
               limits:
                 cpu: "500m"
                 memory: "256Mi"
+            volumeMounts:
+            - name: app-code
+              mountPath: /app
+          volumes:
+          - name: app-code
+            configMap:
+              name: wsi-worker-code
   YAML
-  depends_on = [kubectl_manifest.service_account, helm_release.keda]
+  depends_on = [kubectl_manifest.service_account, kubectl_manifest.app_code, helm_release.keda]
 }
 
 resource "kubectl_manifest" "scaledobject" {

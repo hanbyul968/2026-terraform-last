@@ -43,6 +43,22 @@ aws s3 cp s3://$(aws s3 ls | grep unicorn-manifest | awk '{print $3}')/ ./ --rec
 
 > CloudShell 세션 만료로 끊기면 다시 접속 후 동일 명령어 재실행
 
+> ⚠️ **manifest 파일을 추가/수정했다면** (예: `grafana-dashboard.yaml` 신규 추가)
+> CloudShell은 **S3 경유로만** 파일을 받으므로, 반드시 아래 순서를 거쳐야 한다:
+>
+> 1. **로컬 PC**에서 `terraform apply --auto-approve` 재실행 → 새/변경 파일이 S3 manifest 버킷에 업로드됨
+>    (plan에 `aws_s3_object.manifests["<파일명>"] will be created/updated` 만 뜨면 정상)
+> 2. **CloudShell**에서 다시 다운로드 후 적용:
+>    ```bash
+>    # 전체 다시 받기
+>    aws s3 cp s3://$(aws s3 ls | grep unicorn-manifest | awk '{print $3}')/ ./ --recursive
+>    # 또는 특정 파일만
+>    aws s3 cp s3://$(aws s3 ls | grep unicorn-manifest | awk '{print $3}')/grafana-dashboard.yaml ./
+>    kubectl apply -f grafana-dashboard.yaml
+>    ```
+>
+> `error: the path "...yaml" does not exist` 에러는 1번(로컬 재apply)을 안 해서 S3에 파일이 없을 때 발생한다.
+
 **apply.sh 자동 처리 목록:**
 
 | 순서 | 내용 |

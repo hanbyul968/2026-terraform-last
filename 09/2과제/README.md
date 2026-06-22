@@ -489,3 +489,65 @@ terraform apply -var="competitor_number=01"
 4. **스케일링 값** — min/max/desired → `scaling_config` 값 변경
 5. **Lambda 설정** — 런타임, 메모리, 타임아웃 → `runtime` / `memory_size` / `timeout` 값 변경
 6. **Region 변경** — `provider "aws".region` + AZ 접두사 + Lambda 환경변수 일괄 변경
+
+---
+
+## "이미 존재합니다(already exists)" 오류 → terraform import 로 해결
+
+대회 환경이 초기화되거나 일부만 apply된 상태에서 다시 apply하면, **AWS엔 리소스가 있는데 terraform state엔 없어서** `EntityAlreadyExists` / `BucketAlreadyOwnedByYou` / `already exists` 오류가 난다.
+이때 **삭제하지 말고 `terraform import`** 로 기존 리소스를 state에 편입한 뒤 apply 하면 된다.
+
+### 기본 문법
+```bash
+terraform import '<리소스 주소>' '<AWS 리소스 ID>'
+# 예: terraform import 'aws_s3_bucket.data' wsc-msk-order-data-101-bucket
+```
+
+### 자주 나는 리소스별 import ID
+
+| 리소스 | terraform 주소 | import ID (얻는 법) |
+|--------|----------------|--------------------|
+| S3 버킷 | `aws_s3_bucket.data` | 버킷 이름 (`wsc-msk-order-data-101-bucket`) |
+| IAM 역할 | `aws_iam_role.lambda` | 역할 이름 (`msk-order-consumer-role`) |
+| IAM 인스턴스 프로필 | `aws_iam_instance_profile.ec2` | 프로필 이름 |
+| IAM 역할 정책(inline) | `aws_iam_role_policy.ec2_s3` | `역할이름:정책이름` |
+| IAM 정책 attach | `aws_iam_role_policy_attachment.ec2_ssm` | `역할이름/정책ARN` |
+| VPC | `aws_vpc.main` | `vpc-xxxx` |
+| 서브넷 | `aws_subnet.public_a` | `subnet-xxxx` |
+| 보안그룹 | `aws_security_group.msk` | `sg-xxxx` |
+| EKS 클러스터 | `aws_eks_cluster.main` | 클러스터 이름 (`wsi-eks`) |
+| EKS 노드그룹 | `aws_eks_node_group.system` | `클러스터이름:노드그룹이름` (`wsi-eks:wsi-system`) |
+| DynamoDB 테이블 | `aws_dynamodb_table.orders` | 테이블 이름 (`order-records`) |
+| Lambda 함수 | `aws_lambda_function.consumer` | 함수 이름 (`msk-order-consumer`) |
+| MSK 클러스터 | `aws_msk_cluster.main` | 클러스터 ARN |
+| NAT 게이트웨이 | `aws_nat_gateway.nat_a` | `nat-xxxx` |
+| EC2 인스턴스 | `aws_instance.app` | `i-xxxx` |
+
+### 절차 (예: S3 버킷이 이미 있다고 나올 때)
+```bash
+# 1) 오류 메시지에서 리소스 주소 확인 (예: aws_s3_bucket.data)
+# 2) AWS에서 실제 ID 조회
+aws s3 ls | grep wsc-msk-order-data
+
+# 3) import
+terraform import 'aws_s3_bucket.data' wsc-msk-order-data-101-bucket
+#   (module3는 var 필요: terraform import -var="competitor_number=101" 'aws_s3_bucket.data' ...)
+
+# 4) 다시 apply → 나머지 변경만 적용됨
+terraform apply --auto-approve
+```
+
+### ID를 모를 때 빠르게 찾기
+```bash
+# IAM 역할/정책 존재 확인
+aws iam get-role --role-name msk-order-consumer-role
+# VPC / 서브넷 / SG
+aws ec2 describe-vpcs --filters "Name=tag:Name,Values=wsc-msk-vpc" --query "Vpcs[0].VpcId" --output text
+aws ec2 describe-subnets --filters "Name=tag:Name,Values=wsc2026-logging-public-subnet-a" --query "Subnets[0].SubnetId" --output text
+# EKS 노드그룹
+aws eks list-nodegroups --cluster-name wsi-eks
+```
+
+> ⚠️ PowerShell에서는 작은따옴표 대신 큰따옴표 사용: `terraform import "aws_s3_bucket.data" "버킷이름"`
+> ⚠️ import는 state만 채운다. 속성이 코드와 다르면 다음 apply에서 그 차이만 수정된다(리소스 재생성 아님, 단 일부는 replace될 수 있으니 plan 먼저 확인).
+> ⚠️ 반대로 state엔 있는데 AWS엔 없어 꼬이면 `terraform state rm '<주소>'` 로 state에서 빼고 다시 apply.

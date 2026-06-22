@@ -332,9 +332,10 @@ tar -xzf kafka_2.13-3.5.1.tgz
 rm -f kafka_2.13-3.5.1.tgz
 chown -R ec2-user:ec2-user /home/ec2-user/kafka_2.13-3.5.1
 
-# ec2_consumer.py 다운로드
+# ec2_consumer.py / producer.py 다운로드
 aws s3 cp s3://wsc-msk-setup-${data.aws_caller_identity.current.account_id}/ec2_consumer.py /home/ec2-user/ec2_consumer.py --region ap-northeast-3
-chown ec2-user:ec2-user /home/ec2-user/ec2_consumer.py
+aws s3 cp s3://wsc-msk-setup-${data.aws_caller_identity.current.account_id}/producer.py /home/ec2-user/producer.py --region ap-northeast-3
+chown ec2-user:ec2-user /home/ec2-user/ec2_consumer.py /home/ec2-user/producer.py
 
 # MSK 준비될 때까지 대기 후 consumer 백그라운드 실행
 cat > /home/ec2-user/start_consumer.sh << 'SCRIPT'
@@ -391,6 +392,13 @@ resource "aws_s3_object" "ec2_consumer" {
   key    = "ec2_consumer.py"
   source = "${path.module}/ec2_consumer.py"
   etag   = filemd5("${path.module}/ec2_consumer.py")
+}
+
+resource "aws_s3_object" "producer" {
+  bucket = aws_s3_bucket.setup.bucket
+  key    = "producer.py"
+  source = "${path.module}/producer.py"
+  etag   = filemd5("${path.module}/producer.py")
 }
 
 # MSK Cluster

@@ -269,11 +269,9 @@ ESM_UUID=$(aws lambda list-event-source-mappings --function-name msk-order-consu
   --region ap-northeast-3 --query "EventSourceMappings[0].UUID" --output text)
 aws lambda update-event-source-mapping --uuid $ESM_UUID --enabled --region ap-northeast-3
 
-# 메시지 100건 발행 → Lambda가 DynamoDB, consumer가 S3에 저장
-for i in $(seq 1 100); do
-  echo "{\"orderId\":\"uuid-$(cat /proc/sys/kernel/random/uuid)\",\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%S).000Z\",\"region\":\"ap-northeast-3\",\"product\":{\"id\":\"P001\",\"name\":\"item\",\"price\":1000},\"quantity\":1,\"totalPrice\":1000,\"status\":\"CREATED\"}" | \
-  /home/ec2-user/kafka_2.13-3.5.1/bin/kafka-console-producer.sh --bootstrap-server $BOOTSTRAP --topic order-events
-done
+# 메시지 발행 (배포파일 producer.py 사용) → Lambda가 DynamoDB, consumer가 S3에 저장
+python3 /home/ec2-user/producer.py --bootstrap-servers $BOOTSTRAP --count 100 --interval 0
+# (producer.py 없으면: aws s3 cp s3://wsc-msk-setup-$(aws sts get-caller-identity --query Account --output text)/producer.py . --region ap-northeast-3)
 
 sleep 15
 aws dynamodb scan --table-name order-records --select COUNT --query Count --output text --region ap-northeast-3

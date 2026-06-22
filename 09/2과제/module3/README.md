@@ -81,19 +81,20 @@ aws lambda update-event-source-mapping \
   --uuid $ESM_UUID --enabled --region ap-northeast-3
 ```
 
-### 6. S3/DynamoDB 데이터 채우기 (채점 전 필수 — 별도 Producer 스크립트 없음, 선수가 직접 넣어야 함)
+### 6. S3/DynamoDB 데이터 채우기 (채점 전 필수 — 배포파일 producer.py 사용)
 
 > Lambda가 DynamoDB에 저장, consumer가 S3에 저장. **채점 전 반드시 실행!**
+> user_data가 `/home/ec2-user/producer.py`를 자동 설치함 (없으면 setup 버킷에서 받기).
 
 ```bash
-# wsc-app-ec2 안에서 실행
-for i in $(seq 1 100); do
-  echo "{\"orderId\":\"order-$i-$(date +%s%N)\",\"timestamp\":\"2026-06-20T$(printf '%02d' $((i/3600))):$(printf '%02d' $(((i%3600)/60))):$(printf '%02d' $((i%60))).000Z\",\"region\":\"ap-northeast-3\",\"product\":{\"id\":\"P$(printf '%03d' $i)\",\"name\":\"상품-$i\",\"price\":$((i*1000))},\"quantity\":1,\"totalPrice\":$((i*1000)),\"status\":\"CREATED\"}" | \
-  /home/ec2-user/kafka_2.13-3.5.1/bin/kafka-console-producer.sh \
-    --bootstrap-server $BOOTSTRAP --topic order-events
-done
+# wsc-app-ec2 안에서 실행 — order 메시지 100건 발행
+python3 /home/ec2-user/producer.py --bootstrap-servers $BOOTSTRAP --count 100 --interval 0
 
-# 10초 후 확인
+# 없으면 수동 다운로드 후 실행
+# ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+# aws s3 cp s3://wsc-msk-setup-${ACCOUNT_ID}/producer.py . --region ap-northeast-3
+
+# 10초 후 확인 (Lambda 권한은 EC2 역할에 추가됨)
 sleep 10
 aws dynamodb scan --table-name order-records \
   --select COUNT --query Count --output text --region ap-northeast-3

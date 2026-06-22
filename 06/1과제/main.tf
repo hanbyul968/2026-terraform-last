@@ -312,6 +312,44 @@ resource "aws_security_group" "cloudshell" {
   }
 }
 
+# ========== CloudShell SG를 다른 SG들에서 모두 허용 ==========
+# 채점 CloudShell(unicorn-mark)이 모든 리소스에 접근 가능해야 하므로
+# 각 SG가 cloudshell SG를 source로 하는 전체 트래픽 ingress 를 허용한다.
+resource "aws_security_group_rule" "vpce_from_cloudshell" {
+  type                     = "ingress"
+  security_group_id        = module.VPC.vpc_endpoint_sg_id
+  from_port                = 0
+  to_port                  = 0
+  protocol                 = "-1"
+  source_security_group_id = aws_security_group.cloudshell.id
+  description              = "Allow all from CloudShell (unicorn-mark)"
+}
+
+# ※ ALB SG 는 의도적으로 제외한다.
+#   채점 8-5 (ALB Direct Request deny Test)는 CloudShell에서 ALB로 직접 요청 시
+#   000/403 이 나와야 득점이므로, CloudShell을 ALB SG에 허용하면 200이 반환되어 감점된다.
+#   ALB 는 CloudFront VPC Origin SG 에서만 허용한다(aws_security_group_rule.alb_from_cloudfront).
+
+resource "aws_security_group_rule" "lambda_from_cloudshell" {
+  type                     = "ingress"
+  security_group_id        = module.Lambda.lambda_sg_id
+  from_port                = 0
+  to_port                  = 0
+  protocol                 = "-1"
+  source_security_group_id = aws_security_group.cloudshell.id
+  description              = "Allow all from CloudShell (unicorn-mark)"
+}
+
+resource "aws_security_group_rule" "grafana_alb_from_cloudshell" {
+  type                     = "ingress"
+  security_group_id        = aws_security_group.grafana_alb.id
+  from_port                = 0
+  to_port                  = 0
+  protocol                 = "-1"
+  source_security_group_id = aws_security_group.cloudshell.id
+  description              = "Allow all from CloudShell (unicorn-mark)"
+}
+
 
 
 # ========== EKS SG Rule (apply after EKS exists) ==========

@@ -34,7 +34,7 @@ metadata:
   namespace: unicorn
 spec:
   selector:
-    app: fluentd
+    k8s-app: fluentd
   ports:
   - port: 24224
     targetPort: 24224
@@ -49,11 +49,11 @@ spec:
   replicas: 1
   selector:
     matchLabels:
-      app: fluentd
+      k8s-app: fluentd
   template:
     metadata:
       labels:
-        app: fluentd
+        k8s-app: fluentd
     spec:
       nodeSelector:
         unicorn: addon

@@ -21,7 +21,8 @@ data:
       auto_create_group false
       <buffer>
         flush_mode interval
-        flush_interval 10s
+        flush_interval 2s
+        flush_thread_count 2
         chunk_limit_size 1m
         retry_max_times 5
       </buffer>

@@ -87,6 +87,209 @@ Dashboard Name: **`unicorn-grafana-dashboard`**
 
 ---
 
+## Terraform Import (state 유실 시)
+
+> `terraform apply` 실패 후 리소스가 이미 AWS에 존재할 때 state에 등록하는 명령어입니다.
+> 모든 명령어는 `-var="number=<비번호>"` 필요합니다.
+
+### 사전 변수 설정
+
+```bash
+NUM=<비번호>   # 예: 103
+ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+REGION=ap-northeast-2
+
+# VPC / Subnet / NAT / RT
+VPC_ID=$(aws ec2 describe-vpcs --filters Name=tag:Name,Values=unicorn-vpc --query "Vpcs[0].VpcId" --output text)
+PUB_A=$(aws ec2 describe-subnets --filters Name=tag:Name,Values=unicorn-subnet-pub-a --query "Subnets[0].SubnetId" --output text)
+PUB_B=$(aws ec2 describe-subnets --filters Name=tag:Name,Values=unicorn-subnet-pub-b --query "Subnets[0].SubnetId" --output text)
+PUB_C=$(aws ec2 describe-subnets --filters Name=tag:Name,Values=unicorn-subnet-pub-c --query "Subnets[0].SubnetId" --output text)
+PRIV_A=$(aws ec2 describe-subnets --filters Name=tag:Name,Values=unicorn-subnet-priv-a --query "Subnets[0].SubnetId" --output text)
+PRIV_B=$(aws ec2 describe-subnets --filters Name=tag:Name,Values=unicorn-subnet-priv-b --query "Subnets[0].SubnetId" --output text)
+PRIV_C=$(aws ec2 describe-subnets --filters Name=tag:Name,Values=unicorn-subnet-priv-c --query "Subnets[0].SubnetId" --output text)
+IGW=$(aws ec2 describe-internet-gateways --filters Name=tag:Name,Values=unicorn-igw --query "InternetGateways[0].InternetGatewayId" --output text)
+EIP_A=$(aws ec2 describe-addresses --filters Name=tag:Name,Values=unicorn-eip-nat-a --query "Addresses[0].AllocationId" --output text)
+EIP_B=$(aws ec2 describe-addresses --filters Name=tag:Name,Values=unicorn-eip-nat-b --query "Addresses[0].AllocationId" --output text)
+EIP_C=$(aws ec2 describe-addresses --filters Name=tag:Name,Values=unicorn-eip-nat-c --query "Addresses[0].AllocationId" --output text)
+NAT_A=$(aws ec2 describe-nat-gateways --filter Name=tag:Name,Values=unicorn-nat-a --query "NatGateways[0].NatGatewayId" --output text)
+NAT_B=$(aws ec2 describe-nat-gateways --filter Name=tag:Name,Values=unicorn-nat-b --query "NatGateways[0].NatGatewayId" --output text)
+NAT_C=$(aws ec2 describe-nat-gateways --filter Name=tag:Name,Values=unicorn-nat-c --query "NatGateways[0].NatGatewayId" --output text)
+RT_PUB=$(aws ec2 describe-route-tables --filters Name=tag:Name,Values=unicorn-rt-pub --query "RouteTables[0].RouteTableId" --output text)
+RT_PRIV_A=$(aws ec2 describe-route-tables --filters Name=tag:Name,Values=unicorn-rt-priv-a --query "RouteTables[0].RouteTableId" --output text)
+RT_PRIV_B=$(aws ec2 describe-route-tables --filters Name=tag:Name,Values=unicorn-rt-priv-b --query "RouteTables[0].RouteTableId" --output text)
+RT_PRIV_C=$(aws ec2 describe-route-tables --filters Name=tag:Name,Values=unicorn-rt-priv-c --query "RouteTables[0].RouteTableId" --output text)
+FLOWLOG=$(aws ec2 describe-flow-logs --filter Name=resource-id,Values=$VPC_ID --query "FlowLogs[0].FlowLogId" --output text)
+VPCE_S3=$(aws ec2 describe-vpc-endpoints --filters Name=vpc-id,Values=$VPC_ID Name=service-name,Values=com.amazonaws.$REGION.s3 --query "VpcEndpoints[0].VpcEndpointId" --output text)
+VPCE_ECR_API=$(aws ec2 describe-vpc-endpoints --filters Name=vpc-id,Values=$VPC_ID Name=service-name,Values=com.amazonaws.$REGION.ecr.api --query "VpcEndpoints[0].VpcEndpointId" --output text)
+VPCE_ECR_DKR=$(aws ec2 describe-vpc-endpoints --filters Name=vpc-id,Values=$VPC_ID Name=service-name,Values=com.amazonaws.$REGION.ecr.dkr --query "VpcEndpoints[0].VpcEndpointId" --output text)
+SG_VPCE=$(aws ec2 describe-security-groups --filters Name=tag:Name,Values=unicorn-vpc-vpce-sg --query "SecurityGroups[0].GroupId" --output text)
+
+# KMS
+KMS_APP=$(aws kms describe-key --key-id alias/unicorn-kms-app --query "KeyMetadata.KeyId" --output text)
+KMS_DATA=$(aws kms describe-key --key-id alias/unicorn-kms-data --query "KeyMetadata.KeyId" --output text)
+KMS_PLATFORM=$(aws kms describe-key --key-id alias/unicorn-kms-platform --query "KeyMetadata.KeyId" --output text)
+KMS_REPLICA=$(aws kms describe-key --key-id alias/unicorn-kms-platform --region us-east-1 --query "KeyMetadata.KeyId" --output text)
+
+# S3
+BUCKET=unicorn-web-$ACCOUNT
+MANIFEST_BUCKET=$(aws s3 ls | grep unicorn-manifest | awk '{print $3}')
+
+# Lambda / SG
+LAMBDA_SG=$(aws ec2 describe-security-groups --filters Name=group-name,Values=unicorn-get-booking-func-sg --query "SecurityGroups[0].GroupId" --output text)
+
+# ALB
+ALB_ARN=$(aws elbv2 describe-load-balancers --names unicorn-alb --query "LoadBalancers[0].LoadBalancerArn" --output text)
+ALB_SG=$(aws ec2 describe-security-groups --filters Name=group-name,Values=unicorn-alb-sg --query "SecurityGroups[0].GroupId" --output text)
+TG_APP_ARN=$(aws elbv2 describe-target-groups --names unicorn-tg --query "TargetGroups[0].TargetGroupArn" --output text)
+TG_LAMBDA_ARN=$(aws elbv2 describe-target-groups --names unicorn-alb-lambda-tg --query "TargetGroups[0].TargetGroupArn" --output text)
+LISTENER_ARN=$(aws elbv2 describe-listeners --load-balancer-arn $ALB_ARN --query "Listeners[0].ListenerArn" --output text)
+RULE_HEALTH_ARN=$(aws elbv2 describe-rules --listener-arn $LISTENER_ARN --query "Rules[?Priority=='5'].RuleArn" --output text)
+RULE_LAMBDA_ARN=$(aws elbv2 describe-rules --listener-arn $LISTENER_ARN --query "Rules[?Priority=='10'].RuleArn" --output text)
+
+# Grafana ALB
+G_ALB_ARN=$(aws elbv2 describe-load-balancers --names unicorn-grafana-alb --query "LoadBalancers[0].LoadBalancerArn" --output text)
+G_ALB_SG=$(aws ec2 describe-security-groups --filters Name=group-name,Values=unicorn-grafana-alb-sg --query "SecurityGroups[0].GroupId" --output text)
+G_TG_ARN=$(aws elbv2 describe-target-groups --names unicorn-grafana-tg --query "TargetGroups[0].TargetGroupArn" --output text)
+G_LISTENER_ARN=$(aws elbv2 describe-listeners --load-balancer-arn $G_ALB_ARN --query "Listeners[0].ListenerArn" --output text)
+
+# CloudShell SG
+CLOUDSHELL_SG=$(aws ec2 describe-security-groups --filters Name=group-name,Values=unicorn-mark-sg --query "SecurityGroups[0].GroupId" --output text)
+
+# CloudFront
+CF_ID=$(aws cloudfront list-distributions --query "DistributionList.Items[?Comment=='unicorn-svc-cf'].Id|[0]" --output text)
+OAC_ID=$(aws cloudfront list-origin-access-controls --query "OriginAccessControlList.Items[?Name=='s3-oac'].Id|[0]" --output text)
+VPC_ORIGIN_ID=$(aws cloudfront list-vpc-origins --query "VpcOriginList.Items[?Name=='app-origin'].Id|[0]" --output text)
+WAF_ID=$(aws wafv2 list-web-acls --scope CLOUDFRONT --region us-east-1 --query "WebACLs[?Name=='unicorn-waf'].Id|[0]" --output text)
+WAF_ARN=$(aws wafv2 list-web-acls --scope CLOUDFRONT --region us-east-1 --query "WebACLs[?Name=='unicorn-waf'].ARN|[0]" --output text)
+```
+
+### VPC
+
+```bash
+TF="terraform import -var=\"number=$NUM\""
+
+$TF module.VPC.aws_vpc.unicorn                          $VPC_ID
+$TF module.VPC.aws_subnet.public[0]                     $PUB_A
+$TF module.VPC.aws_subnet.public[1]                     $PUB_B
+$TF module.VPC.aws_subnet.public[2]                     $PUB_C
+$TF module.VPC.aws_subnet.private[0]                    $PRIV_A
+$TF module.VPC.aws_subnet.private[1]                    $PRIV_B
+$TF module.VPC.aws_subnet.private[2]                    $PRIV_C
+$TF module.VPC.aws_internet_gateway.unicorn             $IGW
+$TF module.VPC.aws_eip.nat[0]                           $EIP_A
+$TF module.VPC.aws_eip.nat[1]                           $EIP_B
+$TF module.VPC.aws_eip.nat[2]                           $EIP_C
+$TF module.VPC.aws_nat_gateway.unicorn[0]               $NAT_A
+$TF module.VPC.aws_nat_gateway.unicorn[1]               $NAT_B
+$TF module.VPC.aws_nat_gateway.unicorn[2]               $NAT_C
+$TF module.VPC.aws_route_table.public                   $RT_PUB
+$TF module.VPC.aws_route_table.private[0]               $RT_PRIV_A
+$TF module.VPC.aws_route_table.private[1]               $RT_PRIV_B
+$TF module.VPC.aws_route_table.private[2]               $RT_PRIV_C
+$TF module.VPC.aws_route_table_association.public[0]    "$PUB_A/$RT_PUB"
+$TF module.VPC.aws_route_table_association.public[1]    "$PUB_B/$RT_PUB"
+$TF module.VPC.aws_route_table_association.public[2]    "$PUB_C/$RT_PUB"
+$TF module.VPC.aws_route_table_association.private[0]   "$PRIV_A/$RT_PRIV_A"
+$TF module.VPC.aws_route_table_association.private[1]   "$PRIV_B/$RT_PRIV_B"
+$TF module.VPC.aws_route_table_association.private[2]   "$PRIV_C/$RT_PRIV_C"
+$TF module.VPC.aws_flow_log.unicorn                     $FLOWLOG
+$TF module.VPC.aws_cloudwatch_log_group.flow_log        "/aws/vpc-flow-log/unicorn-vpc"
+$TF module.VPC.aws_iam_role.flow_log                    "unicorn-vpc-flow-log-role"
+$TF module.VPC.aws_iam_role_policy.flow_log             "unicorn-vpc-flow-log-role:unicorn-vpc-flow-log-policy"
+$TF module.VPC.aws_security_group.vpc_endpoint          $SG_VPCE
+$TF module.VPC.aws_vpc_endpoint.s3                      $VPCE_S3
+$TF module.VPC.aws_vpc_endpoint.ecr_api                 $VPCE_ECR_API
+$TF module.VPC.aws_vpc_endpoint.ecr_dkr                 $VPCE_ECR_DKR
+```
+
+### KMS
+
+```bash
+$TF module.KMS.aws_kms_key.app                          $KMS_APP
+$TF module.KMS.aws_kms_key.data                         $KMS_DATA
+$TF module.KMS.aws_kms_key.platform                     $KMS_PLATFORM
+$TF module.KMS.aws_kms_alias.app                        "alias/unicorn-kms-app"
+$TF module.KMS.aws_kms_alias.data                       "alias/unicorn-kms-data"
+$TF module.KMS.aws_kms_alias.platform                   "alias/unicorn-kms-platform"
+$TF module.KMS.aws_kms_replica_key.platform_replica     $KMS_REPLICA
+$TF module.KMS.aws_kms_alias.platform_replica           "alias/unicorn-kms-platform"
+```
+
+### S3
+
+```bash
+$TF module.S3.aws_s3_bucket.frontend                                    $BUCKET
+$TF module.S3.aws_s3_bucket_versioning.frontend                         $BUCKET
+$TF module.S3.aws_s3_bucket_server_side_encryption_configuration.frontend $BUCKET
+$TF module.S3.aws_s3_bucket_public_access_block.frontend                $BUCKET
+$TF module.CloudFront.aws_s3_bucket_policy.cloudfront                   $BUCKET
+$TF aws_s3_bucket.manifest                                               $MANIFEST_BUCKET
+```
+
+### DynamoDB / ECR
+
+```bash
+$TF module.DynamoDB.aws_dynamodb_table.concert          "unicorn-concert-db"
+$TF module.ECR.aws_ecr_repository.concert_app           "unicorn-concert-app"
+```
+
+### Lambda
+
+```bash
+$TF module.Lambda.aws_lambda_function.this              "unicorn-get-booking-func"
+$TF module.Lambda.aws_cloudwatch_log_group.lambda       "/unicorn/lambda/get-booking"
+$TF module.Lambda.aws_iam_role.lambda                   "unicorn-get-booking-func-role"
+$TF module.Lambda.aws_iam_role_policy.lambda            "unicorn-get-booking-func-role:unicorn-get-booking-func-policy"
+$TF module.Lambda.aws_security_group.lambda             $LAMBDA_SG
+```
+
+### ALB
+
+```bash
+$TF module.ALB.aws_lb.this                              $ALB_ARN
+$TF module.ALB.aws_security_group.alb                   $ALB_SG
+$TF module.ALB.aws_lb_target_group.app                  $TG_APP_ARN
+$TF module.ALB.aws_lb_target_group.lambda               $TG_LAMBDA_ARN
+$TF module.ALB.aws_lb_listener.http                     $LISTENER_ARN
+$TF module.ALB.aws_lb_listener_rule.health              $RULE_HEALTH_ARN
+$TF module.ALB.aws_lb_listener_rule.lambda_get          $RULE_LAMBDA_ARN
+```
+
+### CloudFront / WAF
+
+```bash
+$TF module.CloudFront.aws_cloudfront_distribution.this              $CF_ID
+$TF module.CloudFront.aws_cloudfront_origin_access_control.s3       $OAC_ID
+$TF module.CloudFront.aws_cloudfront_vpc_origin.alb                 $VPC_ORIGIN_ID
+$TF module.CloudFront.aws_cloudwatch_log_group.waf                  "aws-waf-logs-unicorn"
+$TF module.CloudFront.aws_wafv2_web_acl.this                        "$WAF_ID/unicorn-waf/CLOUDFRONT"
+$TF module.CloudFront.aws_wafv2_web_acl_logging_configuration.this  $WAF_ARN
+```
+
+### IAM / Security
+
+```bash
+$TF module.IAM.aws_iam_role.audit                       "unicorn-audit-role"
+$TF module.IAM.aws_iam_role_policy.audit                "unicorn-audit-role:unicorn-audit-role-policy"
+$TF aws_iam_role.book_app                               "unicorn-book-app-role"
+$TF aws_iam_role_policy.book_app                        "unicorn-book-app-role:unicorn-book-app-policy"
+```
+
+### CloudWatch / 기타
+
+```bash
+$TF aws_cloudwatch_log_group.book_app                   "/unicorn/eks/book-app"
+$TF aws_security_group.cloudshell                       $CLOUDSHELL_SG
+$TF aws_security_group.grafana_alb                      $G_ALB_SG
+$TF aws_lb.grafana                                      $G_ALB_ARN
+$TF aws_lb_target_group.grafana                         $G_TG_ARN
+$TF aws_lb_listener.grafana                             $G_LISTENER_ARN
+```
+
+> `aws_security_group_rule.alb_from_cloudfront` 와 `aws_s3_object.*` 는 import 불필요 — apply 시 자동 생성됩니다.
+
+---
+
 ## 과제 변경 시 수정 위치 가이드
 
 > 대회 당일 과제지가 최대 30% 변경될 수 있으므로 아래 표를 참고해 해당 파일만 수정하세요.

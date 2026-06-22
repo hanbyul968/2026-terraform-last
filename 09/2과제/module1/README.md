@@ -67,10 +67,34 @@ kubectl get nodepool
 kubectl get ec2nodeclass
 ```
 
-> 워커 앱(`app.py`)은 배포파일 `module1/app.py`를 ConfigMap(`wsi-worker-code`)으로 만들어
-> 컨테이너 `/app`에 마운트하고 `pip install boto3 && python /app/app.py`로 기동한다 (`module1/k8s/main.tf`).
-> 따라서 파드는 CrashLoop 없이 실제로 SQS를 polling·처리·삭제한다.
-> app.py를 바꾸면 `module1/k8s`에서 `terraform apply`로 ConfigMap 갱신 → `kubectl rollout restart deploy/wsi-worker-app -n wsi-app`.
+### 4. 배포파일 app.py 적용(import) 방식 & 검증
+
+배포파일 `module1/app.py`는 컨테이너 이미지에 굽지 않고, **ConfigMap으로 컨테이너에 주입**한다:
+- `module1/k8s/main.tf` 의 `kubectl_manifest.app_code` → `file("../app.py")` 를 ConfigMap `wsi-worker-code` 로 생성
+- deployment가 그 ConfigMap을 `/app` 에 마운트 + `command: sh -c "pip install boto3 && python /app/app.py"` 로 기동
+- 그래서 이미지(`python:3.11-slim`)는 채점 1-2 그대로 유지하면서, 파드는 CrashLoop 없이 실제 SQS 처리
+
+**app.py가 실제로 적용됐는지 검증 (bastion):**
+```bash
+# (1) ConfigMap 존재 (DATA 1 = app.py)
+kubectl get cm wsi-worker-code -n wsi-app
+
+# (2) 컨테이너 명령이 pip+app.py 인지
+kubectl get deploy wsi-worker-app -n wsi-app \
+  -o jsonpath='{.spec.template.spec.containers[0].command}'; echo
+#   → ["sh","-c","pip install --no-cache-dir --quiet boto3 && python /app/app.py"]
+
+# (3) 부하 줘서 파드가 CrashLoop 아니라 Running 인지
+QURL=$(aws sqs get-queue-url --queue-name wsi-task-queue --region ap-northeast-2 --query QueueUrl --output text)
+for i in $(seq 1 30); do aws sqs send-message --queue-url $QURL --message-body "t-$i" >/dev/null; done
+kubectl get pods -n wsi-app    # Running 1/1 이면 app.py 정상 기동
+```
+
+**app.py 수정 시 재배포:**
+```bash
+cd module1/k8s && terraform apply --auto-approve     # ConfigMap 갱신
+kubectl rollout restart deploy/wsi-worker-app -n wsi-app   # 파드 교체
+```
 
 ## 채점 정보
 

@@ -97,6 +97,125 @@ kubectl rollout restart deployment book-deploy -n worldpay
 
 ---
 
+### Terraform Import (리소스가 이미 존재할 때)
+
+`terraform apply` 실행 시 리소스가 이미 존재한다는 오류가 나면 import로 state에 등록 후 재시도합니다.
+
+```bash
+# 공통 준비
+ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+REGION=ap-northeast-2
+```
+
+#### VPC
+```bash
+VPC_ID=$(aws ec2 describe-vpcs --filters Name=tag:Name,Values=worldpay-vpc --query "Vpcs[0].VpcId" --output text)
+terraform import module.VPC.aws_vpc.this $VPC_ID
+```
+
+#### Subnet
+```bash
+# public subnet a
+SID=$(aws ec2 describe-subnets --filters Name=tag:Name,Values=worldpay-public-subnet-a --query "Subnets[0].SubnetId" --output text)
+terraform import 'module.VPC.aws_subnet.public[0]' $SID
+
+# public subnet c
+SID=$(aws ec2 describe-subnets --filters Name=tag:Name,Values=worldpay-public-subnet-c --query "Subnets[0].SubnetId" --output text)
+terraform import 'module.VPC.aws_subnet.public[1]' $SID
+
+# isolated subnet a
+SID=$(aws ec2 describe-subnets --filters Name=tag:Name,Values=worldpay-isolated-subnet-a --query "Subnets[0].SubnetId" --output text)
+terraform import 'module.VPC.aws_subnet.isolated[0]' $SID
+
+# isolated subnet c
+SID=$(aws ec2 describe-subnets --filters Name=tag:Name,Values=worldpay-isolated-subnet-c --query "Subnets[0].SubnetId" --output text)
+terraform import 'module.VPC.aws_subnet.isolated[1]' $SID
+```
+
+#### Internet Gateway
+```bash
+IGW_ID=$(aws ec2 describe-internet-gateways --filters Name=tag:Name,Values=worldpay-vpc-igw --query "InternetGateways[0].InternetGatewayId" --output text)
+terraform import module.VPC.aws_internet_gateway.this $IGW_ID
+```
+
+#### KMS
+```bash
+DB_KEY_ID=$(aws kms list-aliases --query "Aliases[?AliasName=='alias/worldpay-db-key'].TargetKeyId" --output text)
+terraform import module.KMS.aws_kms_key.db $DB_KEY_ID
+terraform import module.KMS.aws_kms_alias.db alias/worldpay-db-key
+
+S3_KEY_ID=$(aws kms list-aliases --query "Aliases[?AliasName=='alias/worldpay-s3-key'].TargetKeyId" --output text)
+terraform import module.KMS.aws_kms_key.s3 $S3_KEY_ID
+terraform import module.KMS.aws_kms_alias.s3 alias/worldpay-s3-key
+```
+
+#### DynamoDB
+```bash
+terraform import module.DynamoDB.aws_dynamodb_table.this Concerts
+terraform import module.DynamoDB.aws_dynamodb_contributor_insights.this Concerts
+```
+
+#### S3 (호스팅 버킷)
+```bash
+terraform import module.S3.aws_s3_bucket.this worldpay-bucket-$ACCOUNT
+```
+
+#### ECR
+```bash
+terraform import module.ECR.aws_ecr_repository.this worldpay-book
+```
+
+#### Bastion
+```bash
+# EIP
+ALLOC_ID=$(aws ec2 describe-addresses --filters Name=tag:Name,Values=worldpay-bastion-eip --query "Addresses[0].AllocationId" --output text)
+terraform import aws_eip.bastion $ALLOC_ID
+
+# IAM Role
+terraform import aws_iam_role.bastion worldpay-bastion-role
+
+# Instance
+INSTANCE_ID=$(aws ec2 describe-instances --filters Name=tag:Name,Values=worldpay-bastion --query "Reservations[0].Instances[0].InstanceId" --output text)
+terraform import aws_instance.bastion $INSTANCE_ID
+```
+
+#### ALB
+```bash
+BOOK_ALB_ARN=$(aws elbv2 describe-load-balancers --names book-alb --query "LoadBalancers[0].LoadBalancerArn" --output text)
+terraform import aws_lb.book $BOOK_ALB_ARN
+
+BOOK_TG_ARN=$(aws elbv2 describe-target-groups --names book-tg --query "TargetGroups[0].TargetGroupArn" --output text)
+terraform import aws_lb_target_group.book $BOOK_TG_ARN
+
+GRAFANA_ALB_ARN=$(aws elbv2 describe-load-balancers --names grafana-alb --query "LoadBalancers[0].LoadBalancerArn" --output text)
+terraform import aws_lb.grafana $GRAFANA_ALB_ARN
+
+GRAFANA_TG_ARN=$(aws elbv2 describe-target-groups --names grafana-tg --query "TargetGroups[0].TargetGroupArn" --output text)
+terraform import aws_lb_target_group.grafana $GRAFANA_TG_ARN
+```
+
+#### CloudWatch Log Group
+```bash
+terraform import aws_cloudwatch_log_group.app /worldpay/application
+```
+
+#### CloudFront
+```bash
+DIST_ID=$(for i in $(aws cloudfront list-distributions --query 'DistributionList.Items[].Id' --output text); do
+  [ "$(aws cloudfront list-tags-for-resource \
+    --resource arn:aws:cloudfront::${ACCOUNT}:distribution/$i \
+    --query "Tags.Items[?Key=='Name'].Value|[0]" --output text)" = "worldpay-cdn" ] && echo $i && break
+done)
+terraform import module.CloudFront.aws_cloudfront_distribution.this $DIST_ID
+```
+
+#### Pod Identity IAM Role (Book)
+```bash
+terraform import aws_iam_role.book_app worldpay-book-app-role
+```
+
+---
+
 # 수정 가이드 (대회 시 과제 변경 대응)
 
 ## 빠른 체크리스트 (시험 시작 시 확인 순서)

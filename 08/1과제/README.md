@@ -48,6 +48,45 @@ terraform apply -var="player_id=<비번호>" -auto-approve
 
 > CloudFront 배포 완료까지 최대 3분 소요.
 
+### 3-1. 409 에러 발생 시 (리소스 이미 존재)
+
+이전 apply 후 state 없이 재시작하면 `EntityAlreadyExists` / `OriginAccessControlAlreadyExists` 에러가 납니다.  
+아래 순서로 import 후 다시 apply하세요.
+
+```bash
+PID=<비번호>   # 본인 비번호로 변경
+
+# OAC import
+OAC_ID=$(aws cloudfront list-origin-access-controls \
+  --query "OriginAccessControlList.Items[?Name=='${PID}-s3-oac'].Id" \
+  --output text)
+terraform import -var="player_id=${PID}" aws_cloudfront_origin_access_control.s3 $OAC_ID
+
+# IAM Role import
+terraform import -var="player_id=${PID}" aws_iam_role.task_execution ${PID}-ecs-task-execution-role
+terraform import -var="player_id=${PID}" aws_iam_role.task              ${PID}-ecs-task-role
+
+# 다시 apply
+terraform apply -var="player_id=${PID}" -auto-approve
+```
+
+> 다른 리소스(VPC, ALB 등)도 같은 에러가 나면 아래 명령으로 리소스 ID를 확인 후 동일하게 import합니다.
+>
+> | 리소스 | ID 확인 명령 | import 주소 |
+> |--------|-------------|-------------|
+> | VPC | `aws ec2 describe-vpcs --filters Name=tag:Name,Values=${PID}-vpc --query Vpcs[0].VpcId --output text` | `aws_vpc.main` |
+> | Subnet 1 | `aws ec2 describe-subnets --filters Name=tag:Name,Values=${PID}-public-subnet-1 --query Subnets[0].SubnetId --output text` | `aws_subnet.public[0]` |
+> | Subnet 2 | `aws ec2 describe-subnets --filters Name=tag:Name,Values=${PID}-public-subnet-2 --query Subnets[0].SubnetId --output text` | `aws_subnet.public[1]` |
+> | IGW | `aws ec2 describe-internet-gateways --filters Name=tag:Name,Values=${PID}-igw --query InternetGateways[0].InternetGatewayId --output text` | `aws_internet_gateway.main` |
+> | Route Table | `aws ec2 describe-route-tables --filters Name=tag:Name,Values=${PID}-public-rt --query RouteTables[0].RouteTableId --output text` | `aws_route_table.public` |
+> | S3 버킷 | 버킷명 그대로 | `aws_s3_bucket.static` |
+> | ECR | `aws ecr describe-repositories --repository-names ${PID}-book-ecr --query repositories[0].repositoryArn --output text` | `aws_ecr_repository.book` |
+> | ALB | `aws elbv2 describe-load-balancers --names ${PID}-book-alb --query LoadBalancers[0].LoadBalancerArn --output text` | `aws_lb.book` |
+> | DynamoDB | 테이블명 그대로 | `aws_dynamodb_table.booking` |
+> | ECS Cluster | 클러스터명 그대로 | `aws_ecs_cluster.book` |
+> | ALB SG | `aws ec2 describe-security-groups --filters Name=group-name,Values=${PID}-alb-sg --query SecurityGroups[0].GroupId --output text` | `aws_security_group.alb` |
+> | ECS SG | `aws ec2 describe-security-groups --filters Name=group-name,Values=${PID}-ecs-sg --query SecurityGroups[0].GroupId --output text` | `aws_security_group.ecs` |
+
 ### 4. 동작 확인
 
 ```bash

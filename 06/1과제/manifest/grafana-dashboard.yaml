@@ -1,0 +1,125 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: unicorn-grafana-dashboard
+  namespace: monitoring
+  labels:
+    # kube-prometheus-stack Grafana 사이드카가 이 라벨을 가진 ConfigMap을
+    # 자동으로 대시보드로 import 한다.
+    grafana_dashboard: "1"
+data:
+  unicorn-grafana-dashboard.json: |
+    {
+      "annotations": { "list": [] },
+      "editable": true,
+      "fiscalYearStartMonth": 0,
+      "graphTooltip": 0,
+      "schemaVersion": 39,
+      "tags": ["unicorn"],
+      "time": { "from": "now-30m", "to": "now" },
+      "timezone": "browser",
+      "title": "unicorn-grafana-dashboard",
+      "uid": "unicorn-grafana-dashboard",
+      "version": 1,
+      "panels": [
+        {
+          "id": 1,
+          "title": "EKS Node CPU Usage (%)",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+          "fieldConfig": { "defaults": { "unit": "percent" }, "overrides": [] },
+          "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } },
+          "targets": [
+            {
+              "datasource": "Prometheus",
+              "expr": "100 - (avg by(instance)(rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)",
+              "legendFormat": "{{instance}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "title": "EKS Node Memory Usage (%)",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+          "fieldConfig": { "defaults": { "unit": "percent" }, "overrides": [] },
+          "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } },
+          "targets": [
+            {
+              "datasource": "Prometheus",
+              "expr": "(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100",
+              "legendFormat": "{{instance}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "title": "unicorn Namespace Pod Status",
+          "type": "stat",
+          "datasource": "Prometheus",
+          "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "options": {
+            "graphMode": "area",
+            "colorMode": "value",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "datasource": "Prometheus",
+              "expr": "sum by (phase) (kube_pod_status_phase{namespace=\"unicorn\"})",
+              "legendFormat": "{{phase}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "title": "Book App Ready Pods",
+          "type": "stat",
+          "datasource": "Prometheus",
+          "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "options": {
+            "graphMode": "none",
+            "colorMode": "value",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "datasource": "Prometheus",
+              "expr": "count(kube_pod_status_ready{namespace=\"unicorn\", condition=\"true\", pod=~\"unicorn-book-app.*\"} == 1)",
+              "legendFormat": "Ready",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "title": "Book App HTTP Request Duration",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
+          "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+          "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } },
+          "targets": [
+            {
+              "datasource": "Prometheus",
+              "expr": "quantile(0.95, rate(container_cpu_usage_seconds_total{namespace=\"unicorn\", container=\"book\"}[5m])) * 1000",
+              "legendFormat": "p95",
+              "refId": "A"
+            }
+          ]
+        }
+      ]
+    }

@@ -114,6 +114,9 @@ helm install unicorn-monitoring prometheus-community/kube-prometheus-stack \
   --set kubeEtcd.enabled=false \
   --wait --timeout 600s
 
+# --- 9-1. Grafana 대시보드 자동 import (사이드카가 ConfigMap 감지) ---
+kubectl apply -f grafana-dashboard.yaml
+
 # --- 10. Grafana ALB Target 등록 ---
 GTG_ARN=$(aws elbv2 describe-target-groups --names unicorn-grafana-tg --query "TargetGroups[0].TargetGroupArn" --output text)
 for id in $(kubectl get nodes -l unicorn=addon -o jsonpath='{.items[*].spec.providerID}' | grep -oP 'i-[a-z0-9]+'); do

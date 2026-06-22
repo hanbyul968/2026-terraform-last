@@ -56,14 +56,20 @@ aws s3 cp s3://$(aws s3 ls | grep unicorn-manifest | awk '{print $3}')/ ./ --rec
 | 7 | Pod Identity Association 생성 |
 | 8 | Pod 재기동 + ALB Target Group에 Pod IP 등록 |
 | 9 | Helm으로 Prometheus + Grafana 설치 (monitoring namespace) |
+| 9-1 | Grafana 대시보드 ConfigMap 자동 import (`unicorn-grafana-dashboard`) |
 | 10 | Grafana ALB Target Group에 addon 노드 등록 |
 | 11 | 노드 Role에 CloudWatchLogsFullAccess 부여 / 현재 IAM 유저에 Audit Role AssumeRole 권한 부여 |
 
 ---
 
-## Step 4 — Grafana 대시보드 생성 (수동)
+## Step 4 — Grafana 대시보드 (자동 생성)
 
-### 접속
+대시보드는 **`manifest/grafana-dashboard.yaml` ConfigMap**으로 자동 생성됩니다.
+kube-prometheus-stack의 Grafana 사이드카가 `grafana_dashboard: "1"` 라벨이 붙은
+ConfigMap을 감지해 자동 import 하며, apply.sh 9-1단계에서 `kubectl apply` 됩니다.
+**손으로 패널을 만들 필요가 없습니다.**
+
+### 접속 (확인용)
 
 브라우저 → `unicorn-grafana-alb` DNS 주소
 
@@ -71,9 +77,7 @@ aws s3 cp s3://$(aws s3 ls | grep unicorn-manifest | awk '{print $3}')/ ./ --rec
 |---|---|
 | `skills<비번호>` | `HelloKrSkills!<비번호>@` |
 
-### Dashboard 생성
-
-Dashboard Name: **`unicorn-grafana-dashboard`**
+로그인 후 Dashboards → **`unicorn-grafana-dashboard`** 에 아래 5개 패널이 있는지 확인:
 
 | # | Panel Name | Panel Type | PromQL |
 |---|:---|:---|:---|
@@ -81,9 +85,22 @@ Dashboard Name: **`unicorn-grafana-dashboard`**
 | 2 | EKS Node Memory Usage (%) | Time series | `(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100` |
 | 3 | unicorn Namespace Pod Status | Stat | `sum by (phase) ( kube_pod_status_phase{ namespace="unicorn" } )` |
 | 4 | Book App Ready Pods | Stat | `count( kube_pod_status_ready{ namespace="unicorn", condition="true", pod=~"unicorn-book-app.*" } == 1 )` |
-| 5 | Book App HTTP Request Duration | Time series | `quantile(0.<퍼센타일>, rate(container_cpu_usage_seconds_total{namespace="unicorn", container="book"}[5m])) * 1000` |
+| 5 | Book App HTTP Request Duration | Time series | `quantile(0.95, rate(container_cpu_usage_seconds_total{namespace="unicorn", container="book"}[5m])) * 1000` |
 
-> Panel 3은 Stat + graph 포함. 패널 순서, 이름 대소문자는 채점 시 무시.
+> **데이터 미표시(No Data) 시 = 오답.** 패널이 No Data면 datasource 매칭 문제이므로,
+> 각 패널 편집 → datasource를 `Prometheus`로 지정했는지 확인. (사이드카가 기본 datasource로
+> 연결하지만, 환경에 따라 수동 지정 필요할 수 있음)
+>
+> **수동 생성이 필요한 경우** (ConfigMap이 안 먹힐 때): 위 표대로 패널을 직접 만들면 됩니다.
+> Panel 3은 Stat + graph 포함. 표시되는 값과 색상, 이름 대소문자는 채점 시 무시.
+
+### 대시보드 패널 변경 시
+
+| 변경 항목 | 수정 위치 |
+|:---|:---|
+| 패널 PromQL / 제목 / 타입 | `manifest/grafana-dashboard.yaml` → `panels[].targets[].expr` / `title` / `type` |
+| 대시보드 이름 | `manifest/grafana-dashboard.yaml` → ConfigMap `metadata.name` + JSON `title` / `uid` |
+| HTTP Duration 퍼센타일 (현재 `0.95`) | `manifest/grafana-dashboard.yaml` → panel id 5 `quantile(0.95, ...)` |
 
 ---
 

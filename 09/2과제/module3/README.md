@@ -109,23 +109,45 @@ aws dynamodb scan --table-name order-records \
 aws s3 ls s3://wsc-msk-order-data-<비번호>-bucket/orders/ --recursive | head -5
 ```
 
-## 채점 시 변수 설정
+## 채점 스크립트(mark2-3.sh) 변수 채우기
 
-채점스크립트에서 아래 변수를 실제 값으로 채워야 합니다:
+채점 스크립트 상단에 아래 3개 플레이스홀더가 있음 — **안 채우면 3-2(MSK 연결)·3-4(토픽 list)의 SSM 명령이 실패**함:
+```
+APP_ID="<App EC2 인스턴스 ID 입력 (i-xxxxxxxxx)>"
+BOOTSTRAP_HOST="<MSK 부트스트랩 브로커 1개 호스트, 포트 제외>"
+BOOTSTRAP="<부트스트랩 브로커 주소 (포트 포함)>"
+```
 
+### 1) 값 추출 (스크립트와 같은 셸에서 실행)
 ```bash
-# EC2 ID 확인
+# App EC2 인스턴스 ID
 APP_ID=$(aws ec2 describe-instances --region ap-northeast-3 \
-  --filters "Name=tag:Name,Values=wsc-app-ec2" \
+  --filters "Name=tag:Name,Values=wsc-app-ec2" "Name=instance-state-name,Values=running" \
   --query "Reservations[0].Instances[0].InstanceId" --output text)
 
-# MSK 브로커 호스트 확인 (포트 제외)
+# MSK 부트스트랩 (포트 포함) + 호스트 1개(포트 제외)
 CLUSTER_ARN=$(aws kafka list-clusters --region ap-northeast-3 \
   --query "ClusterInfoList[?ClusterName=='msk-order-cluster'].ClusterArn" --output text)
 BOOTSTRAP=$(aws kafka get-bootstrap-brokers --cluster-arn $CLUSTER_ARN \
   --region ap-northeast-3 --query BootstrapBrokerString --output text)
 BOOTSTRAP_HOST=$(echo $BOOTSTRAP | cut -d',' -f1 | cut -d':' -f1)
+
+echo "APP_ID=$APP_ID"; echo "BOOTSTRAP_HOST=$BOOTSTRAP_HOST"; echo "BOOTSTRAP=$BOOTSTRAP"
 ```
+
+### 2) 스크립트에 자동 주입 (sed — `^`로 줄 시작 고정해야 플레이스홀더의 `<>`까지 치환됨)
+```bash
+sed -i "s|^APP_ID=.*|APP_ID=\"$APP_ID\"|" mark2-3.sh
+sed -i "s|^BOOTSTRAP_HOST=.*|BOOTSTRAP_HOST=\"$BOOTSTRAP_HOST\"|" mark2-3.sh
+sed -i "s|^BOOTSTRAP=.*|BOOTSTRAP=\"$BOOTSTRAP\"|" mark2-3.sh
+
+# 채워졌는지 확인 후 실행
+grep -E "^APP_ID=|^BOOTSTRAP" mark2-3.sh
+./mark2-3.sh
+```
+
+> ⚠️ `sed` 패턴은 반드시 `^APP_ID=.*` 처럼 줄 시작(`^`) 고정. (`APP_ID=".*"` 로 하면 플레이스홀더의 `<...>`가 따옴표 밖이라 치환 안 됨)
+> ⚠️ 3-4는 app EC2에서 `kafka-topics.sh`를 SSM으로 실행 → 그 EC2에 kafka CLI 다운로드가 끝나 있어야 함.
 
 ## 채점 정보
 

@@ -38,6 +38,14 @@ echo $BOOTSTRAP
 ```
 
 ### 3. MSK 토픽 생성
+
+> kafka CLI(`kafka_2.13-3.5.1`)는 user_data가 **백그라운드로** 받음 (archive.apache.org가 느려 setup을 막지 않게).
+> 채점 3-4도 이 CLI(`kafka-topics.sh --list`)를 쓰므로 **반드시 있어야 함**. 받아졌는지 먼저 확인:
+> ```bash
+> until [ -x /home/ec2-user/kafka_2.13-3.5.1/bin/kafka-topics.sh ]; do echo "kafka 다운로드 대기..."; sleep 10; done
+> echo "kafka 준비됨"
+> ```
+
 ```bash
 /home/ec2-user/kafka_2.13-3.5.1/bin/kafka-topics.sh --create \
   --bootstrap-server $BOOTSTRAP --topic order-events --partitions 3 --replication-factor 2

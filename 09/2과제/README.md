@@ -238,6 +238,9 @@ CLUSTER_ARN=$(aws kafka list-clusters --region ap-northeast-3 \
 BOOTSTRAP=$(aws kafka get-bootstrap-brokers --cluster-arn $CLUSTER_ARN \
   --region ap-northeast-3 --query BootstrapBrokerString --output text)
 
+# kafka CLI는 user_data가 백그라운드로 받음(채점 3-4도 사용) → 준비될 때까지 대기
+until [ -x /home/ec2-user/kafka_2.13-3.5.1/bin/kafka-topics.sh ]; do echo "kafka 대기..."; sleep 10; done
+
 # 토픽 생성
 /home/ec2-user/kafka_2.13-3.5.1/bin/kafka-topics.sh --create \
   --bootstrap-server $BOOTSTRAP --topic order-events --partitions 3 --replication-factor 2

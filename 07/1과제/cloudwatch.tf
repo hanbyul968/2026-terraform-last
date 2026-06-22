@@ -6,7 +6,7 @@ resource "aws_cloudwatch_log_group" "ecs" {
 resource "aws_cloudwatch_log_metric_filter" "f4xx" {
   name           = "skills-book-4xx-filter"
   log_group_name = aws_cloudwatch_log_group.ecs.name
-  pattern        = "[w1, date, dash, time, pipe, status=4??, ...]"
+  pattern        = "\"| 4\""
 
   metric_transformation {
     name      = "skills-book-4xx-count"
@@ -18,7 +18,7 @@ resource "aws_cloudwatch_log_metric_filter" "f4xx" {
 resource "aws_cloudwatch_log_metric_filter" "f5xx" {
   name           = "skills-book-5xx-filter"
   log_group_name = aws_cloudwatch_log_group.ecs.name
-  pattern        = "[w1, date, dash, time, pipe, status=5??, ...]"
+  pattern        = "\"| 5\""
 
   metric_transformation {
     name      = "skills-book-5xx-count"

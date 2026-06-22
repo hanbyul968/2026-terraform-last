@@ -35,6 +35,16 @@ terraform apply -var="bibunho=비번호" -auto-approve
 
 > CloudFront 배포 반영까지 **3~5분** 소요. 기다렸다가 검증.
 
+### Step 4-1. IAM Role 충돌 시 (EntityAlreadyExists 에러)
+
+이전 apply 잔재로 IAM Role이 남아 있을 때 발생. import 후 재apply:
+
+```bash
+terraform import aws_iam_role.ecs_execution skills-book-ecs-execution-role
+terraform import aws_iam_role.ecs_task skills-book-ecs-task-role
+terraform apply -var="bibunho=비번호" -auto-approve
+```
+
 ## 검증
 
 ```bash

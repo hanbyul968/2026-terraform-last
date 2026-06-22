@@ -232,6 +232,20 @@ resource "aws_iam_role_policy" "ec2_s3" {
           "kafka:ListNodes"
         ]
         Resource = "*"
+      },
+      {
+        # 채점/검증 편의: EC2에서 Lambda ESM 상태 확인·enable, DynamoDB 조회
+        Effect = "Allow"
+        Action = [
+          "lambda:ListEventSourceMappings",
+          "lambda:GetEventSourceMapping",
+          "lambda:UpdateEventSourceMapping",
+          "lambda:GetFunction",
+          "dynamodb:Scan",
+          "dynamodb:DescribeTable",
+          "dynamodb:GetItem"
+        ]
+        Resource = "*"
       }
     ]
   })

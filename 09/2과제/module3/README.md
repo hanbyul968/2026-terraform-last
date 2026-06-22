@@ -58,11 +58,12 @@ ls -la /home/ec2-user/ec2_consumer.py
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 aws s3 cp s3://wsc-msk-setup-${ACCOUNT_ID}/ec2_consumer.py . --region ap-northeast-3
 
-# 백그라운드 실행
+# 백그라운드 실행 (로그는 /tmp — home은 root 소유 파일 시 Permission denied)
 nohup python3 /home/ec2-user/ec2_consumer.py \
   --bootstrap-servers $BOOTSTRAP \
-  --bucket wsc-msk-order-data-<비번호>-bucket >> /home/ec2-user/consumer.log 2>&1 &
+  --bucket wsc-msk-order-data-<비번호>-bucket >> /tmp/consumer.log 2>&1 &
 echo "Consumer PID: $!"
+sleep 3 && cat /tmp/consumer.log
 ```
 
 ### 5. Lambda ESM 활성화 확인 및 Enable

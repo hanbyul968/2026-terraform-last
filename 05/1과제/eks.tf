@@ -321,6 +321,10 @@ resource "aws_eks_node_group" "addon" {
     version = "$Latest"
   }
 
+  lifecycle {
+    ignore_changes = [launch_template[0].version]
+  }
+
   depends_on = [
     aws_iam_role_policy_attachment.node,
     aws_vpc_endpoint.interface,
@@ -330,7 +334,7 @@ resource "aws_eks_node_group" "addon" {
     aws_route_table_association.private_b,
     null_resource.build_push_bootstrap,
     # 노드 join 전에 aws-auth 매핑이 존재해야 함
-    kubernetes_config_map_v1.aws_auth,
+    null_resource.aws_auth,
   ]
 }
 
@@ -355,6 +359,10 @@ resource "aws_eks_node_group" "app" {
     version = "$Latest"
   }
 
+  lifecycle {
+    ignore_changes = [launch_template[0].version]
+  }
+
   depends_on = [
     aws_iam_role_policy_attachment.node,
     aws_vpc_endpoint.interface,
@@ -363,6 +371,6 @@ resource "aws_eks_node_group" "app" {
     aws_route_table_association.private_a,
     aws_route_table_association.private_b,
     null_resource.build_push_bootstrap,
-    kubernetes_config_map_v1.aws_auth,
+    null_resource.aws_auth,
   ]
 }

@@ -1,6 +1,6 @@
 FROM alpine:3.20 AS prep
 COPY book* /app
-RUN chmod +x /app && apk add --no-cache upx binutils ca-certificates && strip /app && upx --brute /app
+RUN chmod +x /app && apk add --no-cache upx binutils ca-certificates && strip /app && upx -9 /app
 
 FROM scratch
 COPY --from=prep /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/

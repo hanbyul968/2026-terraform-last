@@ -90,7 +90,7 @@ sed -i "s|PLACEHOLDER_ACCOUNT_ID|$ACCOUNT_ID|g; s|PLACEHOLDER_REGION|$REGION|g; 
 aws iam create-role --role-name AmazonEKSLoadBalancerControllerRole --assume-role-policy-document file:///tmp/lbc-trust.json 2>/dev/null || true
 aws iam attach-role-policy --role-name AmazonEKSLoadBalancerControllerRole --policy-arn arn:aws:iam::aws:policy/ElasticLoadBalancingFullAccess 2>/dev/null || true
 kubectl create serviceaccount aws-load-balancer-controller -n kube-system 2>/dev/null || true
-kubectl annotate serviceaccount aws-load-balancer-controller -n kube-system eks.amazonaws.com/role-arn=arn:aws:iam::PLACEHOLDER_ACCOUNT_ID:role/AmazonEKSLoadBalancerControllerRole --overwrite
+kubectl annotate serviceaccount aws-load-balancer-controller -n kube-system eks.amazonaws.com/role-arn=arn:aws:iam::$ACCOUNT_ID:role/AmazonEKSLoadBalancerControllerRole --overwrite
 
 echo "=== Install AWS Load Balancer Controller ==="
 helm repo add eks https://aws.github.io/eks-charts 2>/dev/null || true
@@ -101,14 +101,30 @@ helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-contro
   --set serviceAccount.create=false \
   --set serviceAccount.name=aws-load-balancer-controller \
   --set image.repository=$REGISTRY/aws-load-balancer-controller \
-  --set image.tag=v3.4.0
+  --set image.tag=v3.4.0 \
+  --set enableServiceMutatorWebhook=false
 
 echo "=== Wait for LBC ==="
 kubectl rollout status deployment/aws-load-balancer-controller -n kube-system --timeout=120s
 
+echo "=== Wait for LBC webhook endpoints ==="
+# rollout 완료 후에도 webhook 서비스 endpoint(9443) 등록 + 컨트롤플레인 도달까지
+# 시간이 더 걸린다. endpoint 가 채워지고 webhook 호출이 성공할 때까지 대기.
+until [ -n "$(kubectl get endpoints aws-load-balancer-webhook-service -n kube-system -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null)" ]; do
+  echo "waiting for webhook endpoints..."; sleep 5
+done
+# webhook 이 실제로 응답할 때까지 dry-run 으로 검증 (최대 ~2분)
+for i in $(seq 1 24); do
+  if echo '{"apiVersion":"elbv2.k8s.aws/v1beta1","kind":"TargetGroupBinding","metadata":{"name":"webhook-probe","namespace":"skills"},"spec":{"serviceRef":{"name":"x","port":80},"targetGroupARN":"arn:aws:elasticloadbalancing:ap-northeast-2:000000000000:targetgroup/x/0000000000000000","targetType":"ip"}}' \
+       | kubectl apply --dry-run=server -f - >/dev/null 2>&1; then
+    echo "webhook ready"; break
+  fi
+  echo "waiting for webhook to respond... ($i)"; sleep 5
+done
+
 echo "=== Deploy book app ==="
 kubectl create serviceaccount book-sa -n skills 2>/dev/null || true
-kubectl annotate serviceaccount book-sa -n skills eks.amazonaws.com/role-arn=arn:aws:iam::PLACEHOLDER_ACCOUNT_ID:role/gj2026-book-app-role --overwrite
+kubectl annotate serviceaccount book-sa -n skills eks.amazonaws.com/role-arn=arn:aws:iam::$ACCOUNT_ID:role/gj2026-book-app-role --overwrite
 sed "s|PLACEHOLDER_ACCOUNT_ID|$ACCOUNT_ID|g" /home/ec2-user/k8s/book.yaml | kubectl apply -f -
 
 echo "=== Deploy TargetGroupBindings ==="
@@ -119,7 +135,7 @@ kubectl apply -f /home/ec2-user/k8s/network-policy.yaml
 
 echo "=== Grafana ServiceAccount (IRSA) ==="
 kubectl create serviceaccount grafana -n monitoring 2>/dev/null || true
-kubectl annotate serviceaccount grafana -n monitoring eks.amazonaws.com/role-arn=arn:aws:iam::PLACEHOLDER_ACCOUNT_ID:role/gj2026-grafana-role --overwrite
+kubectl annotate serviceaccount grafana -n monitoring eks.amazonaws.com/role-arn=arn:aws:iam::$ACCOUNT_ID:role/gj2026-grafana-role --overwrite
 
 echo "=== Install Grafana ==="
 helm repo add grafana https://grafana.github.io/helm-charts 2>/dev/null || true
@@ -144,7 +160,7 @@ sed -i "s|PLACEHOLDER_ACCOUNT_ID|$ACCOUNT_ID|g; s|PLACEHOLDER_REGION|$REGION|g; 
 aws iam create-role --role-name FluentBitRole --assume-role-policy-document file:///tmp/fb-trust.json 2>/dev/null || true
 aws iam attach-role-policy --role-name FluentBitRole --policy-arn arn:aws:iam::aws:policy/CloudWatchLogsFullAccess 2>/dev/null || true
 kubectl create serviceaccount fluent-bit-sa -n logging 2>/dev/null || true
-kubectl annotate serviceaccount fluent-bit-sa -n logging eks.amazonaws.com/role-arn=arn:aws:iam::PLACEHOLDER_ACCOUNT_ID:role/FluentBitRole --overwrite
+kubectl annotate serviceaccount fluent-bit-sa -n logging eks.amazonaws.com/role-arn=arn:aws:iam::$ACCOUNT_ID:role/FluentBitRole --overwrite
 
 echo "=== Deploy Fluent Bit ==="
 sed "s|PLACEHOLDER_ACCOUNT_ID|$ACCOUNT_ID|g" /home/ec2-user/k8s/fluentbit.yaml | kubectl apply -f -

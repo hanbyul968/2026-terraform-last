@@ -1,20 +1,36 @@
 ############################
-# Kubernetes provider (EKS 인증)
+# aws-auth ConfigMap
+#   - role 별로 username 을 다르게 매핑한다.
+#   - {{SessionName}} = EC2 인스턴스의 role 세션 이름 = instance-id.
+#     → username 이 bootstrap container 가 설정한 hostname-override
+#       (gj2026.<instance_id>.<role>.node) 와 정확히 일치 → NodeRestriction 통과.
+#   - kubernetes provider 는 클러스터가 없을 때 localhost:80 에 연결 시도해 에러.
+#     대신 null_resource + kubectl local-exec 으로 적용한다.
 ############################
 
-data "aws_eks_cluster_auth" "cluster" {
-  name = aws_eks_cluster.cluster.name
+locals {
+  aws_auth_maproles = yamlencode([
+    {
+      rolearn  = aws_iam_role.eks_node["addon"].arn
+      username = "system:node:gj2026.{{SessionName}}.addon.node"
+      groups   = ["system:bootstrappers", "system:nodes"]
+    },
+    {
+      rolearn  = aws_iam_role.eks_node["app"].arn
+      username = "system:node:gj2026.{{SessionName}}.app.node"
+      groups   = ["system:bootstrappers", "system:nodes"]
+    },
+  ])
+  aws_auth_manifest = yamlencode({
+    apiVersion = "v1"
+    kind       = "ConfigMap"
+    metadata   = { name = "aws-auth", namespace = "kube-system" }
+    data       = { mapRoles = local.aws_auth_maproles }
+  })
 }
 
-provider "kubernetes" {
-  host                   = aws_eks_cluster.cluster.endpoint
-  cluster_ca_certificate = base64decode(aws_eks_cluster.cluster.certificate_authority[0].data)
-  token                  = data.aws_eks_cluster_auth.cluster.token
-}
-
-# cluster 생성 직후 API endpoint 의 public DNS 전파가 지연되면 kubernetes
-# provider 가 "no such host" 로 실패한다. configmap 생성 전에 endpoint
-# hostname 이 해석될 때까지 대기. (Windows PowerShell 5.1 호환)
+# cluster 생성 직후 API endpoint 의 public DNS 전파가 지연되면 kubectl 이
+# "no such host" 로 실패한다. endpoint hostname 이 해석될 때까지 대기.
 resource "null_resource" "wait_for_cluster_api" {
   triggers = {
     endpoint = aws_eks_cluster.cluster.endpoint
@@ -45,45 +61,27 @@ resource "null_resource" "wait_for_cluster_api" {
   depends_on = [aws_eks_cluster.cluster]
 }
 
-############################
-# aws-auth ConfigMap
-#   - role 별로 username 을 다르게 매핑한다.
-#   - {{SessionName}} = EC2 인스턴스의 role 세션 이름 = instance-id.
-#     → username 이 bootstrap container 가 설정한 hostname-override
-#       (gj2026.<instance_id>.<role>.node) 와 정확히 일치 → NodeRestriction 통과.
-#   - access entry 로는 불가(STANDARD 타입은 system: 그룹 금지). 반드시 configmap.
-############################
-
-locals {
-  # role 별 커스텀 username 매핑.
-  aws_auth_maproles = yamlencode([
-    {
-      rolearn  = aws_iam_role.eks_node["addon"].arn
-      username = "system:node:gj2026.{{SessionName}}.addon.node"
-      groups   = ["system:bootstrappers", "system:nodes"]
-    },
-    {
-      rolearn  = aws_iam_role.eks_node["app"].arn
-      username = "system:node:gj2026.{{SessionName}}.app.node"
-      groups   = ["system:bootstrappers", "system:nodes"]
-    },
-  ])
-  aws_auth_manifest = yamlencode({
-    apiVersion = "v1"
-    kind       = "ConfigMap"
-    metadata   = { name = "aws-auth", namespace = "kube-system" }
-    data       = { mapRoles = local.aws_auth_maproles }
-  })
-}
-
-resource "kubernetes_config_map_v1" "aws_auth" {
-  metadata {
-    name      = "aws-auth"
-    namespace = "kube-system"
+# aws-auth ConfigMap 을 kubectl apply 로 적용한다.
+resource "null_resource" "aws_auth" {
+  triggers = {
+    maproles = local.aws_auth_maproles
+    cluster  = aws_eks_cluster.cluster.name
   }
 
-  data = {
-    mapRoles = local.aws_auth_maproles
+  provisioner "local-exec" {
+    interpreter = ["powershell", "-NoProfile", "-Command"]
+    environment = {
+      CLUSTER = aws_eks_cluster.cluster.name
+      REGION  = local.region
+      AWSAUTH = local.aws_auth_manifest
+    }
+    command = <<-EOT
+      $ErrorActionPreference = 'Stop'
+      aws eks update-kubeconfig --region $env:REGION --name $env:CLUSTER | Out-Null
+      $f = Join-Path ([System.IO.Path]::GetTempPath()) 'gj2026-aws-auth.yaml'
+      $env:AWSAUTH | Out-File -Encoding ascii $f
+      kubectl apply -f $f
+    EOT
   }
 
   depends_on = [null_resource.wait_for_cluster_api]
@@ -130,7 +128,6 @@ resource "null_resource" "strip_node_access_entries" {
 
   depends_on = [
     aws_eks_cluster.cluster,
-    kubernetes_config_map_v1.aws_auth,
+    null_resource.aws_auth,
   ]
 }
-

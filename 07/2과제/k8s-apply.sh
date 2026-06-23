@@ -32,7 +32,8 @@ helm repo update
 helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.4.0 --namespace karpenter \
   --set "settings.clusterName=$CLUSTER" \
   --set "settings.clusterEndpoint=$(aws eks describe-cluster --name $CLUSTER --region $REGION --query cluster.endpoint --output text)" \
-  --set "serviceAccount.annotations.eks\.amazonaws\.com/role-arn=$KARPENTER_ROLE"
+  --set "serviceAccount.annotations.eks\.amazonaws\.com/role-arn=$KARPENTER_ROLE" \
+  --set replicas=1   # Fargate에서 비리더 replica가 CrashLoop 나는 것 방지 (단일 리더로 운영)
 
 # Worker SA
 cat <<EOF | kubectl apply -f -

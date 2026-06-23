@@ -87,6 +87,55 @@ aws ec2 describe-security-groups --region ap-southeast-1 --filters Name=tag:Name
 # 모듈4
 aws eks update-kubeconfig --region us-west-2 --name skills-sqs-cluster
 kubectl get pod -n keda; kubectl get pod -n karpenter
+
+# 모듈4 스케일아웃 실증 (12개 발행 → Pod/EC2 노드 증가 → 큐 드레인)
+QUEUE_URL=$(terraform output -raw sqs_queue_url)
+for i in $(seq 1 12); do aws sqs send-message --region us-west-2 --queue-url "$QUEUE_URL" --message-body "judge-$i"; done
+watch -n5 'kubectl get pods -n skills-sqs -l app=sqs-worker -o wide; kubectl get nodes -l karpenter.sh/nodepool=skills-sqs-nodepool'
+```
+
+---
+
+## 트러블슈팅 (실전에서 겪은 것들)
+
+### ① kubectl `Bus error` / `curl: (23)` — CloudShell 홈(1GB) 꽉 참
+provider 캐시(`.terraform`, aws provider ~700MB)가 홈을 채우면 바이너리가 잘려 SIGBUS.
+```bash
+df -h ~
+rm -rf ~/2026-terraform/07/2과제/.terraform        # terraform output은 .terraform 없이도 동작
+curl -fsSL -o /tmp/kubectl "https://dl.k8s.io/release/v$(aws eks describe-cluster --region us-west-2 --name skills-sqs-cluster --query cluster.version --output text).0/bin/linux/amd64/kubectl"
+chmod +x /tmp/kubectl && sudo mv /tmp/kubectl /usr/local/bin/
+kubectl version --client
+# 재init 필요 시 캐시는 홈 밖으로: export TF_PLUGIN_CACHE_DIR=/tmp/tf-plugin-cache
+```
+
+### ② `kubectl`이 401 `the server has asked for the client to provide credentials` — EKS 접근권한 없음
+`module4.tf`가 **apply 실행 주체(=채점 주체)** 를 admin access entry로 자동 등록합니다. 그래도 안 되면(예: 클러스터를 다른 주체로 만들었을 때) 수동 등록:
+```bash
+PRINCIPAL=$(aws sts get-caller-identity --query Arn --output text)   # IAM User면 그대로, Assumed Role이면 role ARN으로
+aws eks create-access-entry --region us-west-2 --cluster-name skills-sqs-cluster --principal-arn "$PRINCIPAL" || true
+aws eks associate-access-policy --region us-west-2 --cluster-name skills-sqs-cluster \
+  --principal-arn "$PRINCIPAL" \
+  --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy --access-scope type=cluster
+aws eks update-kubeconfig --region us-west-2 --name skills-sqs-cluster
+```
+
+### ③ KEDA/Karpenter가 `STS/SQS lookup ... 53: connection refused` — CoreDNS가 Fargate에 안 떠서 DNS 죽음
+EKS-Fargate 고질 문제. CoreDNS Pod의 `eks.amazonaws.com/compute-type: ec2` 어노테이션을 제거해야 Fargate에 스케줄됩니다.
+`module4.tf`의 `null_resource.coredns_fargate`가 **apply 중 자동 패치**하지만, kubectl 미설치/권한 부족이면 건너뜁니다. 수동 패치:
+```bash
+kubectl patch deployment coredns -n kube-system --type=json \
+  -p='[{"op":"remove","path":"/spec/template/metadata/annotations/eks.amazonaws.com~1compute-type"}]'
+kubectl rollout restart deployment coredns -n kube-system
+kubectl rollout status deployment coredns -n kube-system
+kubectl get pods -n kube-system -l k8s-app=kube-dns -o wide   # Fargate에서 Running 확인
+```
+> **그래서 apply 전에 kubectl을 미리 설치**해 두는 것을 강력 권장합니다(섹션 1). 그래야 자동 패치가 한 번에 성공해 이 문제를 안 겪습니다.
+
+### ④ Karpenter `1/2` (비리더 replica CrashLoop)
+`k8s-apply.sh`에서 `--set replicas=1`로 단일 리더 운영하게 해뒀습니다. 이미 떠 있으면:
+```bash
+kubectl scale deployment karpenter -n karpenter --replicas=1
 ```
 
 ---

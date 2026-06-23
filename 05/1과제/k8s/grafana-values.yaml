@@ -3,6 +3,14 @@ image:
   repository: grafana
   tag: "12.3.1"
 
+# Private 노드는 docker.io 에 접근 불가. download-dashboards init 컨테이너
+# (기본 docker.io/curlimages/curl)도 ECR 이미지로 강제한다. 스크립트는
+# mkdir 만 수행하므로 /bin/sh 만 있으면 되어 grafana 이미지를 재사용한다.
+downloadDashboardsImage:
+  registry: PLACEHOLDER_ACCOUNT_ID.dkr.ecr.ap-northeast-2.amazonaws.com
+  repository: grafana
+  tag: "12.3.1"
+
 adminPassword: "Skills53#"
 
 "grafana.ini":

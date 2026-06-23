@@ -12,11 +12,11 @@ data "aws_ami" "al2023_sg" {
   most_recent = true
   owners      = ["amazon"]
   filter {
-    name = "name"
+    name   = "name"
     values = ["al2023-ami-2023*-x86_64"]
   }
   filter {
-    name = "state"
+    name   = "state"
     values = ["available"]
   }
 }
@@ -65,9 +65,9 @@ resource "aws_security_group" "m3_protected" {
   name     = "skills-ceh-protected-sg"
   # No inbound rules
   egress {
-    from_port = 0
-    to_port = 0
-    protocol = "-1"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
   tags = { Name = "skills-ceh-protected-sg" }
@@ -93,7 +93,7 @@ resource "aws_sns_topic" "m3" {
 resource "aws_iam_role" "m3_lambda" {
   name = "skills-ceh-lambda-role"
   assume_role_policy = jsonencode({
-    Version = "2012-10-17"
+    Version   = "2012-10-17"
     Statement = [{ Action = "sts:AssumeRole", Effect = "Allow", Principal = { Service = "lambda.amazonaws.com" } }]
   })
 }
@@ -152,15 +152,15 @@ resource "aws_s3_bucket_policy" "m3_trail" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid = "AWSCloudTrailAclCheck", Effect = "Allow"
+        Sid       = "AWSCloudTrailAclCheck", Effect = "Allow"
         Principal = { Service = "cloudtrail.amazonaws.com" }
-        Action = "s3:GetBucketAcl", Resource = aws_s3_bucket.m3_trail.arn
+        Action    = "s3:GetBucketAcl", Resource = aws_s3_bucket.m3_trail.arn
       },
       {
-        Sid = "AWSCloudTrailWrite", Effect = "Allow"
+        Sid       = "AWSCloudTrailWrite", Effect = "Allow"
         Principal = { Service = "cloudtrail.amazonaws.com" }
-        Action = "s3:PutObject"
-        Resource = "${aws_s3_bucket.m3_trail.arn}/AWSLogs/${data.aws_caller_identity.current.account_id}/*"
+        Action    = "s3:PutObject"
+        Resource  = "${aws_s3_bucket.m3_trail.arn}/AWSLogs/${data.aws_caller_identity.current.account_id}/*"
         Condition = { StringEquals = { "s3:x-amz-acl" = "bucket-owner-full-control" } }
       }
     ]
@@ -177,8 +177,8 @@ resource "aws_cloudtrail" "m3" {
 
 # EventBridge Rule
 resource "aws_cloudwatch_event_rule" "m3" {
-  provider     = aws.singapore
-  name         = "skills-ceh-sg-change-rule"
+  provider       = aws.singapore
+  name           = "skills-ceh-sg-change-rule"
   event_bus_name = "default"
   event_pattern = jsonencode({
     source      = ["aws.ec2"]

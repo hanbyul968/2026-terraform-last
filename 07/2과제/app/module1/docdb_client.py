@@ -111,12 +111,12 @@ def seed_data():
 
 
 def counts(database=None):
-    database = database or db()
+    database = database if database is not None else db()
     return {name: database[name].count_documents({}) for name in EXPECTED_COUNTS}
 
 
 def date_field_types(database=None):
-    database = database or db()
+    database = database if database is not None else db()
     result = {}
     for collection, fields in DATE_FIELDS.items():
         sample = database[collection].find_one({}, {field: 1 for field in fields}) or {}
@@ -125,7 +125,7 @@ def date_field_types(database=None):
 
 
 def indexes(database=None):
-    database = database or db()
+    database = database if database is not None else db()
     return {name: list(database[name].list_indexes()) for name in EXPECTED_COUNTS}
 
 

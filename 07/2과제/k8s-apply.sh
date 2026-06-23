@@ -12,13 +12,13 @@ kubectl create namespace keda --dry-run=client -o yaml | kubectl apply -f -
 kubectl create namespace karpenter --dry-run=client -o yaml | kubectl apply -f -
 kubectl create namespace skills-sqs --dry-run=client -o yaml | kubectl apply -f -
 
-# Get role ARNs from terraform output
-KEDA_ROLE=$(terraform -chdir=module4 output -raw keda_role_arn)
-KARPENTER_ROLE=$(terraform -chdir=module4 output -raw karpenter_role_arn)
-WORKER_ROLE=$(terraform -chdir=module4 output -raw worker_role_arn)
-NODE_ROLE=$(terraform -chdir=module4 output -raw node_role_arn)
-SQS_URL=$(terraform -chdir=module4 output -raw sqs_queue_url)
-NODE_PROFILE=$(terraform -chdir=module4 output -raw node_instance_profile)
+# Get role ARNs from terraform output (루트 단일 구성에서 실행)
+KEDA_ROLE=$(terraform output -raw keda_role_arn)
+KARPENTER_ROLE=$(terraform output -raw karpenter_role_arn)
+WORKER_ROLE=$(terraform output -raw worker_role_arn)
+NODE_ROLE=$(terraform output -raw node_role_arn)
+SQS_URL=$(terraform output -raw sqs_queue_url)
+NODE_PROFILE=$(terraform output -raw node_instance_profile)
 
 # Install KEDA via Helm
 helm repo add kedacore https://kedacore.github.io/charts

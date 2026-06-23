@@ -12,11 +12,11 @@ data "aws_ami" "al2023_seoul" {
   most_recent = true
   owners      = ["amazon"]
   filter {
-    name = "name"
+    name   = "name"
     values = ["al2023-ami-2023*-x86_64"]
   }
   filter {
-    name = "state"
+    name   = "state"
     values = ["available"]
   }
 }
@@ -68,21 +68,21 @@ resource "aws_security_group" "m1_ec2" {
   provider = aws.seoul
   vpc_id   = aws_vpc.m1.id
   ingress {
-    from_port = 8080
-    to_port = 8080
-    protocol = "tcp"
+    from_port   = 8080
+    to_port     = 8080
+    protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
   ingress {
-    from_port = 22
-    to_port = 22
-    protocol = "tcp"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
   egress {
-    from_port = 0
-    to_port = 0
-    protocol = "-1"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
 }
@@ -91,15 +91,15 @@ resource "aws_security_group" "m1_docdb" {
   provider = aws.seoul
   vpc_id   = aws_vpc.m1.id
   ingress {
-    from_port = 27017
-    to_port = 27017
-    protocol = "tcp"
+    from_port       = 27017
+    to_port         = 27017
+    protocol        = "tcp"
     security_groups = [aws_security_group.m1_ec2.id]
   }
   egress {
-    from_port = 0
-    to_port = 0
-    protocol = "-1"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
 }
@@ -171,7 +171,7 @@ resource "aws_secretsmanager_secret_version" "m1" {
 resource "aws_iam_role" "m1_ec2" {
   name = "skills-nosql-ec2-role"
   assume_role_policy = jsonencode({
-    Version = "2012-10-17"
+    Version   = "2012-10-17"
     Statement = [{ Action = "sts:AssumeRole", Effect = "Allow", Principal = { Service = "ec2.amazonaws.com" } }]
   })
 }
@@ -200,26 +200,42 @@ resource "aws_instance" "m1_client" {
   user_data = <<-USERDATA
 #!/bin/bash
 set -ex
-dnf install -y python3.11 python3.11-pip
-ln -sf /usr/bin/python3.11 /usr/bin/python3
+cd /home/ec2-user
 
-mkdir -p /opt/skills-nosql
-aws secretsmanager get-secret-value --secret-id skills-nosql-docdb-secret --region ap-northeast-2 --query SecretString --output text > /tmp/secret.json
-DOCDB_HOST=$(python3 -c "import json;print(json.load(open('/tmp/secret.json'))['host'])")
-DOCDB_USER=$(python3 -c "import json;print(json.load(open('/tmp/secret.json'))['username'])")
-DOCDB_PASS=$(python3 -c "import json;print(json.load(open('/tmp/secret.json'))['password'])")
+REPO_BASE="https://raw.githubusercontent.com/hnmly/2026-terraform/main/07/2%EA%B3%BC%EC%A0%9C/app/module1"
+for f in install_client_app.sh run_app.sh run_seed.sh run_validate.sh docdb_client.py retail_dataset.json requirements.txt; do
+  curl -fsSL "$REPO_BASE/$f" -o "/home/ec2-user/$f"
+done
+chmod +x *.sh
 
-cat > /opt/skills-nosql/env.sh <<ENVEOF
-export DOCDB_HOST=$DOCDB_HOST
-export DOCDB_USER=$DOCDB_USER
-export DOCDB_PASS=$DOCDB_PASS
+./install_client_app.sh
+
+# 환경변수 설정 (앱은 Secrets Manager에서 직접 읽지만 참조용)
+export DOCDB_HOST=$(aws secretsmanager get-secret-value --secret-id skills-nosql-docdb-secret --region ap-northeast-2 --query SecretString --output text | python3 -c "import json,sys;print(json.load(sys.stdin)['host'])")
+export DOCDB_USER=skillsadmin
 export DOCDB_PORT=27017
 export DOCDB_TLS=true
 export DOCDB_CA_PATH=/opt/skills-nosql/global-bundle.pem
-ENVEOF
 
-# App files are placed via S3 or manually
-# For now, create placeholder - actual files uploaded separately
+# 앱 실행 후 seed
+cd /opt/skills-nosql
+nohup ./run_app.sh > /home/ec2-user/nohup.out 2>&1 &
+sleep 5
+./run_seed.sh || /opt/skills-nosql/.venv/bin/python3 /opt/skills-nosql/docdb_client.py seed
+
+# 인덱스 생성
+/opt/skills-nosql/.venv/bin/python3 -c "
+from docdb_client import db, ASCENDING, DESCENDING
+d = db()
+d.orders.create_index([('orderId', ASCENDING)], unique=True, name='orderId_1')
+d.orders.create_index([('customerId', ASCENDING), ('createdAt', DESCENDING)], name='customerId_1_createdAt_-1')
+d.orders.create_index([('status', ASCENDING), ('dueAt', ASCENDING)], name='status_1_dueAt_1')
+d.products.create_index([('productId', ASCENDING)], unique=True, name='productId_1')
+d.products.create_index([('warehouseId', ASCENDING), ('stock', ASCENDING)], name='warehouseId_1_stock_1')
+d.sessions.create_index([('sessionId', ASCENDING)], unique=True, name='sessionId_1')
+d.sessions.create_index([('expiresAt', ASCENDING)], expireAfterSeconds=0, name='expiresAt_1')
+d.sessions.create_index([('customerId', ASCENDING), ('lastSeen', DESCENDING)], name='customerId_1_lastSeen_-1')
+"
 USERDATA
 
   tags = { Name = "skills-nosql-client-ec2" }

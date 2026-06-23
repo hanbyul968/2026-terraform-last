@@ -12,11 +12,11 @@ data "aws_ami" "al2023_tokyo" {
   most_recent = true
   owners      = ["amazon"]
   filter {
-    name = "name"
+    name   = "name"
     values = ["al2023-ami-2023*-x86_64"]
   }
   filter {
-    name = "state"
+    name   = "state"
     values = ["available"]
   }
 }
@@ -118,15 +118,15 @@ resource "aws_security_group" "m2_client" {
   provider = aws.tokyo
   vpc_id   = aws_vpc.m2_client.id
   ingress {
-    from_port = 80
-    to_port = 80
-    protocol = "tcp"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
   egress {
-    from_port = 0
-    to_port = 0
-    protocol = "-1"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
 }
@@ -135,15 +135,15 @@ resource "aws_security_group" "m2_service" {
   provider = aws.tokyo
   vpc_id   = aws_vpc.m2_service.id
   ingress {
-    from_port = 8080
-    to_port = 8080
-    protocol = "tcp"
+    from_port       = 8080
+    to_port         = 8080
+    protocol        = "tcp"
     prefix_list_ids = [data.aws_ec2_managed_prefix_list.lattice.id]
   }
   egress {
-    from_port = 0
-    to_port = 0
-    protocol = "-1"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
 }
@@ -152,7 +152,7 @@ resource "aws_security_group" "m2_service" {
 resource "aws_iam_role" "m2_client" {
   name = "skills-lattice-client-role"
   assume_role_policy = jsonencode({
-    Version = "2012-10-17"
+    Version   = "2012-10-17"
     Statement = [{ Action = "sts:AssumeRole", Effect = "Allow", Principal = { Service = "ec2.amazonaws.com" } }]
   })
 }
@@ -161,7 +161,7 @@ resource "aws_iam_role_policy" "m2_client_lattice" {
   name = "lattice-list"
   role = aws_iam_role.m2_client.id
   policy = jsonencode({
-    Version = "2012-10-17"
+    Version   = "2012-10-17"
     Statement = [{ Effect = "Allow", Action = ["vpc-lattice:ListServices", "vpc-lattice:GetService"], Resource = "*" }]
   })
 }
@@ -200,7 +200,7 @@ resource "aws_instance" "m2_client" {
 
   user_data = file("${path.module}/app/module2/client/lattice-client-userdata.sh")
 
-  tags     = { Name = "skills-lattice-client-ec2" }
+  tags = { Name = "skills-lattice-client-ec2" }
 }
 
 # VPC Lattice
@@ -214,24 +214,24 @@ resource "aws_security_group" "m2_lattice_assoc" {
   provider = aws.tokyo
   vpc_id   = aws_vpc.m2_client.id
   ingress {
-    from_port = 80
-    to_port = 80
-    protocol = "tcp"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
     cidr_blocks = ["10.61.0.0/16"]
   }
   egress {
-    from_port = 0
-    to_port = 0
-    protocol = "-1"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
 }
 
 resource "aws_vpclattice_service_network_vpc_association" "m2_client" {
-  provider           = aws.tokyo
-  vpc_identifier     = aws_vpc.m2_client.id
+  provider                   = aws.tokyo
+  vpc_identifier             = aws_vpc.m2_client.id
   service_network_identifier = aws_vpclattice_service_network.m2.id
-  security_group_ids = [aws_security_group.m2_lattice_assoc.id]
+  security_group_ids         = [aws_security_group.m2_lattice_assoc.id]
 }
 
 resource "aws_vpclattice_target_group" "m2" {
@@ -239,9 +239,9 @@ resource "aws_vpclattice_target_group" "m2" {
   name     = "skills-lattice-order-tg"
   type     = "INSTANCE"
   config {
-    port             = 8080
-    protocol         = "HTTP"
-    vpc_identifier   = aws_vpc.m2_service.id
+    port           = 8080
+    protocol       = "HTTP"
+    vpc_identifier = aws_vpc.m2_service.id
     health_check {
       path     = "/health"
       protocol = "HTTP"
@@ -251,7 +251,7 @@ resource "aws_vpclattice_target_group" "m2" {
 }
 
 resource "aws_vpclattice_target_group_attachment" "m2" {
-  provider             = aws.tokyo
+  provider                = aws.tokyo
   target_group_identifier = aws_vpclattice_target_group.m2.id
   target {
     id   = aws_instance.m2_service.id

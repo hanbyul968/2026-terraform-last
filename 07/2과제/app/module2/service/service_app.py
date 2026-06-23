@@ -1,10 +1,3 @@
-#!/usr/bin/env bash
-set -euo pipefail
-
-install -d -m 0755 /opt/skills-lattice/service
-
-# === 제공 배포파일 service_app.py (수정 없이 그대로 배포) ===
-cat > /opt/skills-lattice/service/service_app.py <<'PYAPP'
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -36,27 +29,3 @@ class ServiceHandler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     server = ThreadingHTTPServer(("0.0.0.0", 8080), ServiceHandler)
     server.serve_forever()
-PYAPP
-
-chmod 0644 /opt/skills-lattice/service/service_app.py
-
-cat > /etc/systemd/system/lattice-order-service-app.service <<'UNIT'
-[Unit]
-Description=Skills VPC Lattice Order Service
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/python3 /opt/skills-lattice/service/service_app.py
-Restart=always
-RestartSec=2
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-systemctl daemon-reload
-systemctl enable --now lattice-order-service-app.service

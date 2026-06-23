@@ -2,6 +2,11 @@
 
 **반드시 CloudShell에서 실행하세요.**
 
+> 📍 **어디서 실행?** 모든 명령은 **AWS Console 우측 상단의 CloudShell 아이콘**(`>_`)을 눌러 연 터미널에서 칩니다.
+> 2번에서 `cd 2026-terraform/08/2과제` 로 이동한 뒤, **3~7번은 전부 이 `2과제` 디렉터리 안에서** 실행하세요.
+> (`bash files/...`, `terraform output` 이 상대경로·state를 참조하므로 디렉터리를 벗어나면 안 됩니다.)
+> 디렉터리 확인: `pwd` → `.../2026-terraform/08/2과제` 인지 확인.
+
 ---
 
 ## 실행 순서
@@ -32,12 +37,16 @@ terraform apply -var="team_id=<비번호>" -auto-approve
 
 ### 4. Module 1 - result.json 생성 (채점 필수)
 
+> 📍 CloudShell, `2과제` 디렉터리에서 실행 (apply 완료 후).
+
 ```bash
 bash files/nosql/query.sh electronics
 cat ~/result.json
 ```
 
 ### 5. Module 3 - Step Functions 실행 (채점 필수)
+
+> 📍 CloudShell, `2과제` 디렉터리. `<비번호>`는 본인 번호로 바꿔 입력.
 
 ```bash
 SFN_ARN=$(aws stepfunctions list-state-machines \
@@ -61,6 +70,8 @@ aws dynamodb scan \
 > Count >= 1 이면 정상
 
 ### 6. 동작 확인
+
+> 📍 CloudShell, `2과제` 디렉터리 (`terraform output` 사용 때문).
 
 ```bash
 # Module 2: X-Custom-Header 확인

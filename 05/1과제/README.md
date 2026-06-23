@@ -145,13 +145,27 @@ echo "https://$CF_DOMAIN/grafana"
 # admin / Skills53#
 ```
 
+### 3-1. 채점 직전 DynamoDB 비우기 (필수)
+
+스펙: "채점 전에 어떠한 데이터 항목이 있어도 안됩니다."
+동작 확인용 POST나 직전 채점 실행으로 쌓인 데이터를 비운다.
+
+```bash
+bash clean-books.sh
+# 마지막 줄이 "남은 항목 수: 0" 이어야 함
+```
+
+> 채점 중 nginx-test(NetworkPolicy 4-5) 파드가 skills 네임스페이스에 남아 있으면
+> 다음 채점 실행의 `kubectl run nginx-test` 가 실패하므로 함께 정리:
+> `kubectl delete pod nginx-test -n skills --ignore-not-found`
+
 ---
 
 ## 주의사항
 
 - `terraform destroy` 시 EKS 노드그룹, ECR 이미지, S3 객체가 모두 삭제됩니다.
-- 채점 전 DynamoDB 테이블에 데이터가 없어야 합니다 (setup.sh는 데이터를 건드리지 않음).
-- `bi_number` 는 S3 버킷 이름(`gj2026-static-<비번호>`)에 사용됩니다.
+- 채점 전 DynamoDB 테이블에 데이터가 없어야 합니다 → `bash clean-books.sh` (setup.sh는 데이터를 건드리지 않음).
+- `bi_number` 는 S3 버킷 이름(`gj2026-static-<비번호>`)에 사용됩니다. mark.sh 의 `<비번호>` 도 동일 값으로 채워야 6·8·9번이 채점됩니다.
 
 ---
 

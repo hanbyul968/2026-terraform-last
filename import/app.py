@@ -134,13 +134,15 @@ def type_of(addr):
     return m.group(1) if m else None
 
 
-def build(block, number=None):
+def build(block, var_name=None, var_value=None):
     addr = block["addr"]
     name = block["name"]
     rtype = type_of(addr)
     spec = TYPE_SPECS.get(rtype)
 
-    var = f' -var="number={number}"' if number and number != "<비번호>" else ""
+    var = ""
+    if var_name and var_value:
+        var = f' -var="{var_name}={var_value}"'
     tf = f"terraform import{var}"
 
     lines = []
@@ -213,9 +215,10 @@ TEMPLATE = """
    "이미 존재함" 에러를 통째로 붙여넣으세요. 어느 terraform 프로젝트든 동작합니다.</p>
 <form method="post">
   <div class="row">
-    <label>(선택) 변수: <code>-var="number=</code>
-      <input type="text" name="number" value="{{ number }}" size="8"><code>"</code></label>
-    <span class="hint">※ var 가 필요한 프로젝트면 입력, 아니면 비워두세요.</span>
+    <label>(선택) 변수: <code>-var="</code>
+      <input type="text" name="var_name" value="{{ var_name }}" size="12" placeholder="변수명"><code>=</code>
+      <input type="text" name="var_value" value="{{ var_value }}" size="12" placeholder="값"><code>"</code></label>
+    <span class="hint">※ var 가 필요한 프로젝트면 변수명과 값을 모두 입력, 아니면 비워두세요.</span>
   </div>
   <textarea name="error" placeholder="여기에 terraform 에러 전체를 붙여넣기...">{{ error_text }}</textarea>
   <br>
@@ -251,22 +254,24 @@ TEMPLATE = """
 @app.route("/", methods=["GET", "POST"])
 def index():
     error_text = ""
-    number = ""
+    var_name = ""
+    var_value = ""
     results = None
     all_commands = ""
     if request.method == "POST":
         error_text = request.form.get("error", "")
-        number = request.form.get("number", "").strip()
+        var_name = request.form.get("var_name", "").strip()
+        var_value = request.form.get("var_value", "").strip()
         blocks = parse_blocks(error_text)
         results = []
         cmd_blocks = []
         for b in blocks:
-            built = build(b, number)
+            built = build(b, var_name, var_value)
             results.append(built)
             cmd_blocks.append(built["commands"])
         all_commands = "\n\n".join(cmd_blocks)
     return render_template_string(
-        TEMPLATE, error_text=error_text, number=number,
+        TEMPLATE, error_text=error_text, var_name=var_name, var_value=var_value,
         results=results, all_commands=all_commands,
     )
 

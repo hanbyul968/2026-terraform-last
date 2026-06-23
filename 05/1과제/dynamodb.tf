@@ -35,9 +35,11 @@ resource "aws_dynamodb_resource_policy" "books" {
       Principal = "*"
       Action    = ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:BatchWriteItem"]
       Resource  = aws_dynamodb_table.books.arn
+      # 스펙: 쓰기는 book 애플리케이션(IRSA gj2026-book-app-role)만 허용.
+      # 그 외 모든 principal(bastion/노드/CloudShell 등)은 명시적 Deny.
       Condition = {
         ArnNotLike = {
-          "aws:PrincipalArn" = "arn:aws:iam::${local.account_id}:role/gj2026-*"
+          "aws:PrincipalArn" = "arn:aws:iam::${local.account_id}:role/gj2026-book-app-role"
         }
       }
     }]

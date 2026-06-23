@@ -191,6 +191,15 @@ resource "aws_iam_openid_connect_provider" "m4" {
 
 locals {
   oidc_issuer = replace(aws_eks_cluster.m4.identity[0].oidc[0].issuer, "https://", "")
+
+  # terraform을 실행한 주체(채점도 동일 주체)를 EKS access entry에 등록.
+  # IAM User → 그대로 사용. Assumed Role(arn:aws:sts::...:assumed-role/ROLE/session) → role ARN으로 변환.
+  caller_arn = data.aws_caller_identity.m4.arn
+  admin_principal_arn = can(regex(":assumed-role/", local.caller_arn)) ? format(
+    "arn:aws:iam::%s:role/%s",
+    data.aws_caller_identity.m4.account_id,
+    regex(":assumed-role/([^/]+)/", local.caller_arn)[0]
+  ) : local.caller_arn
 }
 
 # IRSA: keda-operator
@@ -324,16 +333,17 @@ data "aws_caller_identity" "m4" {}
 resource "aws_eks_access_entry" "m4_admin" {
   provider      = aws.oregon
   cluster_name  = aws_eks_cluster.m4.name
-  principal_arn = "arn:aws:iam::${data.aws_caller_identity.m4.account_id}:root"
+  principal_arn = local.admin_principal_arn
   type          = "STANDARD"
 }
 
 resource "aws_eks_access_policy_association" "m4_admin" {
   provider      = aws.oregon
   cluster_name  = aws_eks_cluster.m4.name
-  principal_arn = "arn:aws:iam::${data.aws_caller_identity.m4.account_id}:root"
+  principal_arn = local.admin_principal_arn
   policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
   access_scope { type = "cluster" }
+  depends_on    = [aws_eks_access_entry.m4_admin]
 }
 
 # CoreDNS를 Fargate에서 실행하도록 패치 (EC2 nodeSelector annotation 제거)

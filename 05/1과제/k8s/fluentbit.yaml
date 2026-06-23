@@ -39,7 +39,6 @@ data:
         log_group_name    /eks/book-svc/access
         log_stream_name   /book-svc/ap-northeast-2a
         auto_create_group true
-        log_key           log
 
     [OUTPUT]
         Name              cloudwatch_logs
@@ -48,7 +47,6 @@ data:
         log_group_name    /eks/book-svc/access
         log_stream_name   /book-svc/ap-northeast-2b
         auto_create_group true
-        log_key           log
 
   parsers.conf: |
     [PARSER]

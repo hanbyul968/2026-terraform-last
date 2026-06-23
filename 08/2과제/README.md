@@ -84,6 +84,79 @@ terraform destroy -var="team_id=<비번호>" -auto-approve
 
 ---
 
+## 주의사항
+
+- **반드시 CloudShell(Linux)에서 실행하세요.** Windows에서 실행하면 `null_resource.sfn_execute`의 `/bin/bash`를 찾지 못해 실패합니다.
+- **`insert.sh`를 따로 실행하지 마세요.** 이 테라폼이 `aws_dynamodb_table_item`으로 20건을 직접 삽입합니다. 같이 돌리면 `ConditionalCheckFailedException`(중복 삽입) 충돌이 납니다. apply 후에는 `query.sh`만 실행해 `result.json`을 만드세요.
+- apply가 중간에 실패한 뒤 재실행하면 state와 실제 AWS 리소스가 어긋나 `already exists`(409) 충돌이 날 수 있습니다. 아래 트러블슈팅 참고.
+
+---
+
+## 트러블슈팅 — `already exists` / `ConditionalCheckFailed` 충돌
+
+이전 apply가 중간에 깨져 리소스는 AWS에 남았지만 state에는 없는 경우 발생합니다. **고아 리소스를 정리한 뒤 재배포**합니다.
+
+### 1. state에 있는 것 먼저 정리
+
+```bash
+terraform destroy -var="team_id=<비번호>" -auto-approve
+```
+
+### 2. destroy가 못 지운 고아 리소스 수동 삭제 (리전별)
+
+```bash
+# --- ap-northeast-2 : DynamoDB 테이블 (아이템 포함 삭제) ---
+aws dynamodb delete-table --table-name nosql-products --region ap-northeast-2
+
+# --- us-east-1 : CloudFront OAC ---
+OAC_ID=$(aws cloudfront list-origin-access-controls \
+  --query "OriginAccessControlList.Items[?Name=='cdn-oac'].Id | [0]" --output text)
+if [ "$OAC_ID" != "None" ] && [ -n "$OAC_ID" ]; then
+  ETAG=$(aws cloudfront get-origin-access-control --id $OAC_ID --query ETag --output text)
+  aws cloudfront delete-origin-access-control --id $OAC_ID --if-match $ETAG
+fi
+
+# --- us-east-1 : CloudFront Function ---
+FN_ETAG=$(aws cloudfront describe-function --name cdn-add-security-header --query ETag --output text 2>/dev/null)
+[ -n "$FN_ETAG" ] && aws cloudfront delete-function --name cdn-add-security-header --if-match $FN_ETAG
+
+# --- ap-southeast-1 : Lambda ---
+aws lambda delete-function --function-name workflow-transform --region ap-southeast-1
+
+# --- ap-northeast-3 : Aurora (서브넷 그룹보다 먼저 삭제해야 함) ---
+aws rds delete-db-instance --db-instance-identifier rds-aurora-cluster-instance-1 \
+  --skip-final-snapshot --region ap-northeast-3
+aws rds wait db-instance-deleted --db-instance-identifier rds-aurora-cluster-instance-1 --region ap-northeast-3
+aws rds delete-db-cluster --db-cluster-identifier rds-aurora-cluster \
+  --skip-final-snapshot --region ap-northeast-3
+aws rds wait db-cluster-deleted --db-cluster-identifier rds-aurora-cluster --region ap-northeast-3
+aws rds delete-db-subnet-group --db-subnet-group-name rds-aurora-subnet-group --region ap-northeast-3
+aws secretsmanager delete-secret --secret-id rds/aurora/admin \
+  --force-delete-without-recovery --region ap-northeast-3
+```
+
+> `DBSubnetGroupAlreadyExists` 삭제 시 `InvalidDBSubnetGroupStateFault`가 나면 Aurora 인스턴스/클러스터가 아직 살아있는 것입니다. 위 순서대로 인스턴스 → 클러스터 → 서브넷 그룹 순으로 삭제하세요.
+
+### 3. 중복 VPC 확인 (감점 예방)
+
+VPC/서브넷은 이름 충돌이 안 나 재apply 시 **중복 생성**될 수 있습니다.
+
+```bash
+aws ec2 describe-vpcs --region ap-northeast-3 \
+  --filters "Name=tag:Name,Values=rds-aurora-vpc" \
+  --query "Vpcs[].VpcId" --output text
+```
+
+2개 이상이면 고아 VPC를 삭제하세요 (state에 없는 것).
+
+### 4. 깨끗하게 재배포
+
+```bash
+terraform apply -var="team_id=<비번호>" -auto-approve
+```
+
+---
+
 ## 모듈 구성
 
 | 모듈 | 리전 | 리소스 |

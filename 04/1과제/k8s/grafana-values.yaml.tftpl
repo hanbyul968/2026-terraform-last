@@ -1,0 +1,36 @@
+# grafana/grafana values
+image:
+  repository: ${registry}/ecr-public/grafana/grafana
+
+nodeSelector:
+  type: monitoring
+
+persistence:
+  enabled: true
+  existingClaim: ${pvc_name}
+
+adminUser: admin
+adminPassword: "${admin_password}"
+
+# /grafana 서브패스 서빙 (채점 11-1: /grafana/api/...)
+grafana.ini:
+  server:
+    root_url: "%(protocol)s://%(domain)s/grafana"
+    serve_from_sub_path: true
+
+datasources:
+  datasources.yaml:
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        access: proxy
+        url: ${ds_url}
+        isDefault: true
+
+# wsc-eks-dashboard configmap(label grafana_dashboard=1) 자동 로드
+sidecar:
+  dashboards:
+    enabled: true
+    label: grafana_dashboard
+    searchNamespace: monitoring

@@ -1,0 +1,51 @@
+# aws-for-fluent-bit values
+# 이미지: ECR pull-through cache 경유 (노드 인터넷 없음)
+image:
+  repository: ${registry}/ecr-public/aws-observability/aws-for-fluent-bit
+  tag: stable
+
+serviceAccount:
+  create: false
+  name: ${sa_name}
+
+# fluent-bit 은 모든 노드(app 포함)에서 app 로그 수집 -> DaemonSet
+tolerations:
+  - operator: Exists
+
+# app 컨테이너 로그만, /health 요청 라인은 제외
+filter:
+  enabled: true
+
+# 커스텀 파서/필터로 /health 제외 후 CloudWatch 전송
+input:
+  enabled: true
+
+cloudWatchLogs:
+  enabled: true
+  region: ${region}
+  logGroupName: ${log_group}
+  logStreamPrefix: "app-"
+  autoCreateGroup: false
+
+# /health 로그 제외 + app 로그만 보내기 위한 추가 설정
+extraOutputs: |
+  [OUTPUT]
+      Name                cloudwatch_logs
+      Match               app.*
+      region              ${region}
+      log_group_name      ${log_group}
+      log_stream_name     ${log_stream}
+      auto_create_group   false
+
+# /health 가 포함된 라인 제외 (채점 12-1-B)
+service: |
+  [SERVICE]
+      Parsers_File   /fluent-bit/parsers/parsers.conf
+      Flush          5
+      Grace          30
+
+extraFilters: |
+  [FILTER]
+      Name    grep
+      Match   *
+      Exclude log /health

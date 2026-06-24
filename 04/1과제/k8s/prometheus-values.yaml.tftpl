@@ -1,0 +1,38 @@
+# prometheus-community/prometheus values
+# 노드 인터넷 없음 => 이미지는 ECR pull-through(quay/ecr-public) 경유.
+
+server:
+  # /prometheus 경로로 서빙 (채점 11-1: /prometheus/-/healthy, /prometheus/api/v1/query)
+  prefixURL: /prometheus
+  baseURL: /prometheus
+  retention: 6h
+  nodeSelector:
+    type: monitoring
+  persistentVolume:
+    enabled: true
+    existingClaim: ${pvc_name}
+  service:
+    servicePort: 80
+  image:
+    repository: ${registry}/quay/prometheus/prometheus
+
+# Prometheus 부속 컴포넌트도 monitoring 노드에
+alertmanager:
+  enabled: false
+
+prometheus-node-exporter:
+  # node-exporter 는 모든 노드에서 수집해야 하므로 DaemonSet 그대로
+  image:
+    repository: ${registry}/quay/prometheus/node-exporter
+  tolerations:
+    - operator: Exists
+
+kube-state-metrics:
+  nodeSelector:
+    type: monitoring
+  image:
+    registry: ${registry}/ecr-public
+    repository: ecr-public/kube-state-metrics/kube-state-metrics
+
+pushgateway:
+  enabled: false

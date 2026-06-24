@@ -37,7 +37,10 @@ terraform apply -var pin=<비번호> -var alarm_email=<이메일주소>
 ```
 
 - `pin`: CDN S3 버킷 이름 `gj2026-cdn-bucket-<비번호>`에 사용 (필수)
-- `alarm_email`: Module 3 SNS 이메일 알림 (선택, 미입력 시 구독 생략)
+- `alarm_email`: Module 3 SNS 이메일 알림 주소 — **채점 3-8(SNS 이메일 알림 수신, 1.0점)** 용
+  - CloudWatch Alarm이 `ALARM`으로 전환될 때 이메일 알림이 수신되는지 채점함
+  - 미입력 시 SNS 구독 생략 → 3-8 점수 못 받음
+  - 입력 시 **apply 후 해당 메일함의 "Confirm subscription" 클릭 필수** (AWS SNS 이메일 구독은 수동 확인 필요)
 - `keycloak_admin_password`: 기본값 `admin1234!` (선택)
 
 apply 한 번으로 자동 처리되는 것:

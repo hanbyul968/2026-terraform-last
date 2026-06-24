@@ -354,6 +354,44 @@ curl -s -u "skills<번호>:GoodJob!Skills<번호>^^" \
   "http://$GRAFANA_ALB/api/dashboards/uid/log-overview" | jq -r '.dashboard.title'
 ```
 
+#### 4-5 로그 파이프라인 확인 (Loki 포트포워딩)
+
+> ⚠️ **각 명령을 한 줄씩 따로 실행**하세요. 여러 줄을 한 줄로 붙여 넣으면
+> `kubectl port-forward` 가 다른 명령과 뭉쳐 바로 종료(`Done`)되어 `localhost:3100` 연결이 끊기고
+> 이후 조회가 전부 빈 결과가 됩니다. 줄 끝 백슬래시(`\ `)도 넣지 마세요.
+
+```bash
+# 1) 에러 로그 3건 생성
+ALB=$(aws elbv2 describe-load-balancers --names o11y-app-alb --query 'LoadBalancers[0].DNSName' --output text --region ap-northeast-1)
+curl -s "http://$ALB/log?level=error&count=3"; echo
+```
+
+```bash
+# 2) Loki 포트포워딩 (이 줄만 단독 실행 → 백그라운드로 유지)
+kubectl port-forward -n monitoring svc/o11y-loki 3100:3100 >/dev/null 2>&1 &
+#   2~3초 기다려 포워딩이 수립된 뒤 3) 으로 진행. 살아있는지 확인: jobs
+```
+
+```bash
+# 3) Loki 조회 (백슬래시 없이 한 줄)
+curl -s -G http://localhost:3100/loki/api/v1/query_range --data-urlencode 'query={k8s_namespace_name="o11y"}' --data-urlencode "start=$(date -d '5 minutes ago' +%s)000000000" --data-urlencode "end=$(date +%s)000000000" --data-urlencode 'limit=20' | jq -r '.data.result[].values[][1]'
+#   → {"ts":...,"level":"ERROR","msg":"log generated",...} 라인이 나오면 4-5 득점
+```
+
+```bash
+# 4) 확인 후 포트포워딩 종료
+kill %1 2>/dev/null
+```
+
+**조회가 비어 있을 때 점검** (포워딩이 살아있는 상태에서):
+```bash
+jobs                                                                          # 포워딩 프로세스 살아있는지
+curl -s 'http://localhost:3100/loki/api/v1/label/k8s_namespace_name/values' | jq   # o11y 라벨이 들어왔는지
+kubectl logs -n monitoring ds/o11y-otel --tail=50                             # OTel Collector export 에러 여부
+```
+- 라벨 값에 `o11y` 가 보이면 파이프라인 정상 → 조회 쿼리 시간범위만 맞추면 됩니다.
+- otel 로그에 `404 / connection refused` 가 보이면 export 경로 문제입니다.
+
 ---
 
 ### 리소스 정리 (Teardown)

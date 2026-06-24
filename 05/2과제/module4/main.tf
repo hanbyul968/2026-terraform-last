@@ -337,21 +337,31 @@ resource "null_resource" "oidc_provider" {
     interpreter = ["bash", "-c"]
     command     = <<-SCRIPT
       set -e
-      echo "Keycloak 기동 대기 (3분)..."
-      sleep 180
 
       IP=$(aws ec2 describe-instances \
         --instance-ids ${aws_instance.keycloak.id} \
         --query 'Reservations[0].Instances[0].PublicIpAddress' \
         --output text --region eu-central-1)
-
       echo "Keycloak IP: $IP"
 
-      # HTTPS 인증서 thumbprint (SHA1)
-      THUMBPRINT=$(echo | openssl s_client -connect "$IP:443" -showcerts 2>/dev/null \
-        | openssl x509 -fingerprint -noout -sha1 \
-        | cut -d= -f2 | tr -d ':' | tr '[:upper:]' '[:lower:]')
-      echo "Thumbprint: $THUMBPRINT"
+      # HTTPS(nginx) + Keycloak realm 준비될 때까지 대기 (최대 ~10분)
+      echo "Keycloak HTTPS 준비 대기..."
+      for i in $(seq 1 60); do
+        THUMBPRINT=$(echo | openssl s_client -connect "$IP:443" -servername "$IP" -showcerts 2>/dev/null \
+          | openssl x509 -fingerprint -noout -sha1 2>/dev/null \
+          | cut -d= -f2 | tr -d ':' | tr '[:upper:]' '[:lower:]')
+        if [ -n "$THUMBPRINT" ]; then
+          echo "Thumbprint 획득: $THUMBPRINT (시도 $i)"
+          break
+        fi
+        echo "  대기 중... ($i/60)"
+        sleep 10
+      done
+
+      if [ -z "$THUMBPRINT" ]; then
+        echo "ERROR: HTTPS 인증서를 가져오지 못했습니다. EC2 부팅/nginx 상태를 확인하세요."
+        exit 1
+      fi
 
       EXISTING=$(aws iam list-open-id-connect-providers --query 'OpenIDConnectProviderList[*].Arn' --output text | grep "$IP/realms/team" || true)
       if [ -z "$EXISTING" ]; then

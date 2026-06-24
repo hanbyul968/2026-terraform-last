@@ -134,14 +134,48 @@ resource "aws_instance" "keycloak" {
 
   user_data = <<-USEREOF
 #!/bin/bash
-set -e
+# set -e 제거: 한 단계 실패가 전체 부팅 스크립트를 중단시키지 않도록
 
 PUBLIC_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)
 
-# Java 21
-dnf install -y java-21-amazon-corretto nginx
+############################################
+# 1) nginx + 자체서명 인증서를 가장 먼저 기동
+#    → OIDC thumbprint를 빠르게 확보 (Keycloak 다운로드와 무관)
+############################################
+dnf install -y nginx openssl
 
-# Keycloak 26.0.0 설치
+openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+  -keyout /etc/nginx/ssl.key \
+  -out /etc/nginx/ssl.crt \
+  -subj "/CN=$PUBLIC_IP/O=GJ2026" \
+  -addext "subjectAltName=IP:$PUBLIC_IP"
+
+cat > /etc/nginx/conf.d/keycloak.conf << 'NGINXEOF'
+server {
+    listen 443 ssl;
+    server_name _;
+
+    ssl_certificate     /etc/nginx/ssl.crt;
+    ssl_certificate_key /etc/nginx/ssl.key;
+
+    location / {
+        proxy_pass         http://localhost:8080;
+        proxy_set_header   Host $host;
+        proxy_set_header   X-Real-IP $remote_addr;
+        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto https;
+    }
+}
+NGINXEOF
+
+systemctl enable nginx
+systemctl restart nginx
+
+############################################
+# 2) Java + Keycloak 설치/기동
+############################################
+dnf install -y java-21-amazon-corretto
+
 KEYCLOAK_VERSION="26.0.0"
 cd /opt
 wget -q "https://github.com/keycloak/keycloak/releases/download/$KEYCLOAK_VERSION/keycloak-$KEYCLOAK_VERSION.tar.gz"
@@ -151,7 +185,6 @@ rm "keycloak-$KEYCLOAK_VERSION.tar.gz"
 useradd -r -s /sbin/nologin keycloak || true
 chown -R keycloak:keycloak /opt/keycloak*
 
-# Keycloak 환경 설정 (HTTP, 프록시 뒤에서 동작)
 cat > /opt/keycloak/conf/keycloak.conf << 'KCEOF'
 http-enabled=true
 http-port=8080
@@ -159,11 +192,6 @@ hostname-strict=false
 proxy=edge
 KCEOF
 
-# 초기 관리자 계정
-export KEYCLOAK_ADMIN=admin
-export KEYCLOAK_ADMIN_PASSWORD=${var.keycloak_admin_password}
-
-# systemd 서비스
 cat > /etc/systemd/system/keycloak.service << 'SVCEOF'
 [Unit]
 Description=Keycloak
@@ -185,40 +213,6 @@ SVCEOF
 systemctl daemon-reload
 systemctl enable keycloak
 systemctl start keycloak
-
-# Self-signed 인증서 생성 (nginx용)
-openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
-  -keyout /etc/nginx/ssl.key \
-  -out /etc/nginx/ssl.crt \
-  -subj "/CN=$PUBLIC_IP/O=GJ2026" \
-  -addext "subjectAltName=IP:$PUBLIC_IP"
-
-# nginx HTTPS reverse proxy 설정
-cat > /etc/nginx/conf.d/keycloak.conf << 'NGINXEOF'
-server {
-    listen 443 ssl;
-    server_name _;
-
-    ssl_certificate     /etc/nginx/ssl.crt;
-    ssl_certificate_key /etc/nginx/ssl.key;
-
-    location / {
-        proxy_pass         http://localhost:8080;
-        proxy_set_header   Host $host;
-        proxy_set_header   X-Real-IP $remote_addr;
-        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header   X-Forwarded-Proto https;
-    }
-}
-
-server {
-    listen 80;
-    return 301 https://$host$request_uri;
-}
-NGINXEOF
-
-systemctl enable nginx
-systemctl start nginx
 
 # Keycloak 준비 대기 후 Realm/Users/Clients 구성 스크립트
 cat > /usr/local/bin/keycloak-setup.sh << 'SETUPEOF'

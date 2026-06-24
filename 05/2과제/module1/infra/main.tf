@@ -8,12 +8,11 @@ terraform {
       source  = "hashicorp/archive"
       version = "~> 2.0"
     }
+    null = {
+      source  = "hashicorp/null"
+      version = "~> 3.0"
+    }
   }
-}
-
-# Lambda@Edge는 반드시 us-east-1
-provider "aws" {
-  region = "us-east-1"
 }
 
 data "aws_caller_identity" "current" {}
@@ -37,6 +36,15 @@ resource "aws_s3_bucket_public_access_block" "cdn" {
   block_public_policy     = true
   ignore_public_acls      = true
   restrict_public_buckets = true
+}
+
+# 배포파일 dog.png 자동 업로드 (images/ prefix)
+resource "aws_s3_object" "dog" {
+  bucket       = aws_s3_bucket.cdn.id
+  key          = "images/dog.png"
+  source       = "${path.module}/../../files/dog.png"
+  etag         = filemd5("${path.module}/../../files/dog.png")
+  content_type = "image/png"
 }
 
 # CloudFront OAC (S3 직접 접근 차단, CloudFront 경유만 허용)
@@ -101,12 +109,24 @@ resource "aws_iam_role_policy" "lambda_s3" {
 
 # ─────────────────────────────────────────────
 # Lambda: gj2026-cdn-rotate (Origin 함수)
-# 사전 준비: bash build.sh 실행 후 lambda/rotate_pkg/ 생성 필요
+# Pillow 패키지를 apply 시점에 자동 빌드 (CloudShell/Linux 기준)
 # ─────────────────────────────────────────────
+resource "null_resource" "pillow_build" {
+  triggers = {
+    rotate_py = filemd5("${path.module}/lambda/rotate.py")
+  }
+  provisioner "local-exec" {
+    interpreter = ["bash", "-c"]
+    command     = "bash ${path.module}/build.sh"
+  }
+}
+
+# null_resource에 depends_on → archive를 apply 시점에 읽음 (빌드 후)
 data "archive_file" "rotate" {
   type        = "zip"
   output_path = "${path.module}/lambda/rotate.zip"
   source_dir  = "${path.module}/lambda/rotate_pkg"
+  depends_on  = [null_resource.pillow_build]
 }
 
 resource "aws_lambda_function" "rotate" {

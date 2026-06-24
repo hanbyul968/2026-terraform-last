@@ -15,10 +15,6 @@ terraform {
   }
 }
 
-provider "aws" {
-  region = "eu-central-1"
-}
-
 data "aws_caller_identity" "current" {}
 
 variable "keycloak_admin_password" {

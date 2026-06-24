@@ -4,17 +4,20 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+    null = {
+      source  = "hashicorp/null"
+      version = "~> 3.0"
+    }
   }
 }
 
-provider "aws" {
-  region = "ap-southeast-1"
-}
-
 data "aws_caller_identity" "current" {}
+data "aws_region" "current" {}
 
 locals {
   name = "gj2026-data"
+  # 배포파일 app.py (채점 2-2 SHA256 검증 → 바이트 그대로 배치)
+  app_py_b64 = filebase64("${path.module}/../files/data-app.py")
 }
 
 # ─────────────────────────────────────────────
@@ -121,21 +124,28 @@ resource "aws_instance" "kafka" {
   vpc_security_group_ids = [aws_security_group.kafka.id]
   iam_instance_profile   = aws_iam_instance_profile.ec2.name
 
-  user_data = <<-'EOF'
+  user_data = <<-EOF
 #!/bin/bash
 set -e
 
 # Java 설치 (Kafka 의존성)
-dnf install -y java-21-amazon-corretto
+dnf install -y java-21-amazon-corretto python3-pip
+
+# 배포 app.py 배치 (바이트 보존 - 채점 2-2 SHA256 검증)
+echo "${local.app_py_b64}" | base64 -d > /home/ec2-user/app.py
+chown ec2-user:ec2-user /home/ec2-user/app.py
+
+# Kafka 클라이언트 (app.py 의존성)
+pip3 install kafka-python
 
 # Kafka 설치
 KAFKA_VERSION="3.9.0"
 SCALA_VERSION="2.13"
 cd /opt
-wget -q "https://downloads.apache.org/kafka/${KAFKA_VERSION}/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz"
-tar -xzf "kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz"
-ln -s "kafka_${SCALA_VERSION}-${KAFKA_VERSION}" kafka
-rm "kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz"
+wget -q "https://downloads.apache.org/kafka/$${KAFKA_VERSION}/kafka_$${SCALA_VERSION}-$${KAFKA_VERSION}.tgz"
+tar -xzf "kafka_$${SCALA_VERSION}-$${KAFKA_VERSION}.tgz"
+ln -s "kafka_$${SCALA_VERSION}-$${KAFKA_VERSION}" kafka
+rm "kafka_$${SCALA_VERSION}-$${KAFKA_VERSION}.tgz"
 
 # KRaft 모드 설정
 CLUSTER_ID=$(/opt/kafka/bin/kafka-storage.sh random-uuid)
@@ -146,7 +156,7 @@ process.roles=broker,controller
 node.id=1
 controller.quorum.voters=1@localhost:9093
 listeners=INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:9094,CONTROLLER://0.0.0.0:9093
-advertised.listeners=INTERNAL://localhost:9092,EXTERNAL://${PUBLIC_IP}:9094
+advertised.listeners=INTERNAL://localhost:9092,EXTERNAL://$${PUBLIC_IP}:9094
 listener.security.protocol.map=INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
 inter.broker.listener.name=INTERNAL
 controller.listener.names=CONTROLLER
@@ -193,8 +203,9 @@ sleep 30
 /opt/kafka/bin/kafka-topics.sh --create --topic high-latency --partitions 1 --replication-factor 1 --bootstrap-server localhost:9092
 /opt/kafka/bin/kafka-topics.sh --create --topic anomaly      --partitions 1 --replication-factor 1 --bootstrap-server localhost:9092
 
-# 앱 로그 디렉터리
+# 앱 로그 디렉터리 (app.py가 ec2-user로 실행되어 기록)
 mkdir -p /var/log/app
+chown -R ec2-user:ec2-user /var/log/app
 EOF
 
   tags = { Name = "gj2026-data-ec2" }
@@ -298,29 +309,40 @@ resource "aws_iam_role_policy" "flink" {
 }
 
 # ─────────────────────────────────────────────
-# Managed Apache Flink: Zeppelin Notebook
+# Managed Apache Flink: Zeppelin Studio Notebook
+# (Terraform aws provider가 Zeppelin Studio 미지원 → AWS CLI로 생성)
+# Glue Database를 메타스토어로 연결. 3개 쿼리는 노트북에서 수동 작성.
 # ─────────────────────────────────────────────
-resource "aws_kinesisanalyticsv2_application" "zeppelin" {
-  name                   = "${local.name}-zeppelin"
-  runtime_environment    = "ZEPPELIN-FLINK-3_0"
-  service_execution_role = aws_iam_role.flink.arn
-  application_mode       = "INTERACTIVE"
-
-  application_configuration {
-    zeppelin_application_configuration {
-      catalog_configuration {
-        glue_data_catalog_configuration {
-          database_arn = "arn:aws:glue:ap-southeast-1:${data.aws_caller_identity.current.account_id}:database/real_time_analytics"
-        }
-      }
-
-      monitoring_configuration {
-        log_level = "INFO"
-      }
-    }
+resource "null_resource" "zeppelin" {
+  triggers = {
+    region = data.aws_region.current.name
+    name   = "${local.name}-zeppelin"
   }
 
-  depends_on = [aws_glue_catalog_database.analytics]
+  provisioner "local-exec" {
+    interpreter = ["bash", "-c"]
+    command     = <<-CMD
+      aws kinesisanalyticsv2 create-application \
+        --region ${data.aws_region.current.name} \
+        --application-name ${local.name}-zeppelin \
+        --runtime-environment ZEPPELIN-FLINK-3_0 \
+        --application-mode INTERACTIVE \
+        --service-execution-role ${aws_iam_role.flink.arn} \
+        --application-configuration '{"FlinkApplicationConfiguration":{"ParallelismConfiguration":{"ConfigurationType":"CUSTOM","Parallelism":1,"ParallelismPerKPU":1}},"ZeppelinApplicationConfiguration":{"MonitoringConfiguration":{"LogLevel":"INFO"},"CatalogConfiguration":{"GlueDataCatalogConfiguration":{"DatabaseARN":"arn:aws:glue:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:database/real_time_analytics"}}}}' \
+        || echo "[WARN] create-application 실패 (이미 존재 가능)"
+    CMD
+  }
+
+  provisioner "local-exec" {
+    when        = destroy
+    interpreter = ["bash", "-c"]
+    command     = <<-CMD
+      TS=$(aws kinesisanalyticsv2 describe-application --region ${self.triggers.region} --application-name ${self.triggers.name} --query 'ApplicationDetail.CreateTimestamp' --output text 2>/dev/null) \
+      && aws kinesisanalyticsv2 delete-application --region ${self.triggers.region} --application-name ${self.triggers.name} --create-timestamp "$TS" || true
+    CMD
+  }
+
+  depends_on = [aws_iam_role_policy.flink, aws_glue_catalog_database.analytics]
 }
 
 output "kafka_ec2_public_ip" {
@@ -332,5 +354,5 @@ output "nlb_dns" {
 }
 
 output "zeppelin_app_name" {
-  value = aws_kinesisanalyticsv2_application.zeppelin.name
+  value = "${local.name}-zeppelin"
 }

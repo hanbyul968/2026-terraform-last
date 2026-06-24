@@ -11,16 +11,18 @@ terraform {
   }
 }
 
-provider "aws" {
-  region = "ap-northeast-2"
-}
-
 data "aws_caller_identity" "current" {}
+data "aws_region" "current" {}
 
 variable "alarm_email" {
   description = "SNS 이메일 알림 수신 주소 (채점항목 3-8)"
   type        = string
   default     = ""
+}
+
+locals {
+  # 배포파일 app.py (Cloud event handling)
+  app_py_b64 = filebase64("${path.module}/../../files/event-app.py")
 }
 
 # ─────────────────────────────────────────────
@@ -145,7 +147,7 @@ resource "aws_instance" "event" {
   vpc_security_group_ids = [aws_security_group.event.id]
   iam_instance_profile   = aws_iam_instance_profile.ec2.name
 
-  user_data = <<-'EOF'
+  user_data = <<-EOF
 #!/bin/bash
 set -e
 
@@ -153,26 +155,8 @@ set -e
 dnf install -y python3 python3-pip
 pip3 install fastapi uvicorn
 
-# FastAPI 앱 작성
-cat > /home/ec2-user/app.py << 'APPEOF'
-from fastapi import FastAPI
-from datetime import datetime
-import uvicorn
-
-app = FastAPI()
-
-@app.get("/")
-def root():
-    return {"status": "ok", "message": "WorldSkills 2026", "time": datetime.now().isoformat()}
-
-@app.get("/health")
-def health():
-    return {"status": "healthy"}
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8080)
-APPEOF
-
+# 배포 app.py 배치 (Cloud event handling 배포파일)
+echo "${local.app_py_b64}" | base64 -d > /home/ec2-user/app.py
 chown ec2-user:ec2-user /home/ec2-user/app.py
 
 # 앱 로그 디렉터리

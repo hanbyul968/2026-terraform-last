@@ -14,6 +14,51 @@
 > ⚠️ 모든 이름·태그·변수는 **대소문자를 구분**합니다. 문제지에 명시된 리소스 이름을 그대로 사용하세요.
 > ⚠️ 과제 종료 전 모든 부하 주입을 중지하고, module3 은 **Pod 1개 / Node 1대** 상태로 되돌려야 합니다.
 
+> 📦 **App/Lambda/HTML 등 소스코드는 공식 배포파일(v1)을 그대로 사용**합니다.
+> (`module1/{app.py,lambda.py}`, `module2/index_{a,b}.html`, `module3/app/*`, `module4/manifest/app.py` 등)
+> 단, **module4 Dockerfile** 은 배포 원본에 `flask` 설치 라인이 빠져 있어 컨테이너가 기동되지 않으므로
+> `RUN pip install --no-cache-dir flask` 한 줄을 추가했습니다.
+
+---
+
+## 🚀 All-in-One 배포 (apply 한 번에 1~4 모듈 전부)
+
+최상위 디렉터리(`2과제/`)에 **오케스트레이터 루트**(`main.tf`)가 있습니다.
+여기서 `terraform apply` **한 번**이면 module1~4 를 순서대로 `init + apply` 하고,
+module4 는 `setup.sh`(이미지 빌드/Helm/대시보드)까지 자동 실행합니다.
+
+```powershell
+# 최상위(2과제) 디렉터리에서
+cd "C:\Users\competitor\2026-terraform\06\2과제"
+terraform init
+terraform apply -var="competitor_number=<선수등번호>"
+```
+
+- 내부 동작: `null_resource` + `local-exec` 가 각 모듈 디렉터리에서 `terraform -chdir=moduleN apply` 를 호출합니다.
+  각 모듈은 **자체 state 를 그대로 유지**하므로, 개별 `cd moduleN && terraform apply` 도 계속 가능합니다.
+- 실행 순서: module1 → module2 → module3 → module4 (docker/kubeconfig 충돌 방지를 위해 3·4는 순차).
+- **사전 조건**: docker 동작 환경 + `aws/terraform/kubectl/helm/jq/bash(Git Bash)`. CloudShell 불가.
+
+| 변수 | 설명 | 기본값 |
+|------|------|--------|
+| `competitor_number` | 선수등번호 (필수) | — |
+| `git_bash_path` | module4 `setup.sh` 실행용 bash 경로 | `C:\Program Files\Git\bin\bash.exe` |
+| `run_module4_setup` | `false` 면 module4 의 setup.sh 자동 실행을 건너뜀 | `true` |
+
+```powershell
+# setup.sh 자동 실행을 끄고 인프라까지만 (setup.sh 는 수동으로 따로 실행)
+terraform apply -var="competitor_number=<번호>" -var="run_module4_setup=false"
+```
+
+**전체 정리(역순 destroy)**:
+```powershell
+terraform destroy -var="competitor_number=<선수등번호>"
+# module4 Helm 릴리스 제거 → module4/3/2/1 순으로 각 모듈 destroy 까지 자동 수행
+```
+
+> ℹ️ 오케스트레이터는 매 apply 마다 각 모듈을 다시 호출(`timestamp()` 트리거)합니다.
+> 특정 모듈만 다시 돌리고 싶으면 아래 **개별 실행법**을 사용하세요.
+
 ---
 
 ## ⚡ 대회 30% 변경 시 수정 포인트 가이드

@@ -3,34 +3,99 @@
 2026 전국기능경기대회 클라우드컴퓨팅 제1과제(`과제지_v2`)를 Terraform 으로 구성한다.
 EKS(컨테이너) 기반 콘서트 예약 REST API + 정적 웹 + 모니터링/로깅 인프라.
 
-> ⚠️ 이 코드는 **이 환경에서 `terraform apply` 검증을 하지 못했다**(AWS 자격증명 없음).
-> `terraform init/validate` 까지만 통과 확인됨. 실제 대회/연습 시 apply 하며
-> 아래 **§4 apply 후 반드시 검증할 항목**을 손으로 확인할 것.
+> ⚠️ `terraform init` / `terraform validate` 통과 확인됨. `apply` 는 AWS 자격증명이 없는
+> 작성 환경에서 실행하지 못했으므로, 실제 apply 시 **§1 의 2단계 절차**를 그대로 따르고
+> **§4 의 수동 검증 항목**을 확인할 것.
 
 ---
 
-## 0. 사전 준비
+## 0. 새 컴퓨터에서 처음 실행할 때 — 설치
 
-- AWS 자격증명 (Admin 권한), 리전 `ap-northeast-2`
-- 로컬에 `terraform`, `aws` CLI, **`docker` 데몬 실행 중**, `kubectl`, `helm`
-- 배포파일(`files/book`, `files/index.html`, `files/main.jpeg`)은 이미 배치됨
+필요한 도구: **terraform, aws CLI, docker(데몬 실행), kubectl, helm, git**.
 
-## 1. 배포 순서
+### 0-A. Windows (PowerShell 관리자 권한)
+
+winget 기준(권장). winget 이 없으면 0-C 의 choco 사용.
+
+```powershell
+# 패키지 매니저로 일괄 설치
+winget install -e --id HashiCorp.Terraform
+winget install -e --id Amazon.AWSCLI
+winget install -e --id Kubernetes.kubectl
+winget install -e --id Helm.Helm
+winget install -e --id Git.Git
+winget install -e --id Docker.DockerDesktop   # 설치 후 Docker Desktop 실행(데몬 켜기) 필수
+
+# 새 PowerShell 창을 열어 PATH 반영 후 버전 확인
+terraform -version; aws --version; kubectl version --client; helm version; docker version; git --version
+```
+
+### 0-B. AWS 자격증명 설정
+
+```powershell
+aws configure
+#   AWS Access Key ID     : <발급키>
+#   AWS Secret Access Key : <발급시크릿>
+#   Default region name   : ap-northeast-2
+#   Default output format : json
+aws sts get-caller-identity   # 정상 출력되면 OK (Admin 권한 계정이어야 함)
+```
+
+### 0-C. Windows (choco 대안)
+
+```powershell
+Set-ExecutionPolicy Bypass -Scope Process -Force
+iex ((New-Object Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+choco install -y terraform awscli kubernetes-cli kubernetes-helm git docker-desktop
+```
+
+### 0-D. Linux(예: Bastion/CloudShell 대안, Amazon Linux/dnf)
+
+```bash
+sudo dnf install -y git docker
+sudo systemctl enable --now docker
+# terraform
+sudo dnf install -y dnf-plugins-core
+sudo dnf config-manager --add-repo https://rpm.releases.hashicorp.com/AmazonLinux/hashicorp.repo
+sudo dnf install -y terraform
+# aws cli v2
+curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip && unzip -q awscliv2.zip && sudo ./aws/install
+# kubectl
+curl -fsSLO "https://dl.k8s.io/release/v1.35.0/bin/linux/amd64/kubectl" && sudo install kubectl /usr/local/bin/kubectl
+# helm
+curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+```
+
+- 배포파일(`files/book`, `files/index.html`, `files/main.jpeg`)은 이미 배치되어 있음.
+
+## 1. 배포 순서 (정확한 절차)
 
 ```powershell
 cd "C:\Users\competitor\2026-terraform\04\1과제"
 terraform init
-# 1단계: EKS 퍼블릭 엔드포인트 ON 상태로 전체 생성 (Windows 에서 helm/k8s apply 위해)
+
+# [1단계] EKS 퍼블릭 엔드포인트 ON 으로 전체 생성.
+#   - Windows 로컬에서 helm/kubernetes provider 가 클러스터에 접속하려면
+#     apply 동안 퍼블릭 엔드포인트가 반드시 켜져 있어야 한다. (이 단계는 필수)
 terraform apply -var="eks_public_access=true"
-# 2단계: 채점 요건(public=False) 으로 전환
+
+# [2단계] 채점 요건(endpointPublicAccess=False, PrivateAccess=True)으로 전환.
+#   - 이 단계도 반드시 실행해야 채점 6-1-A(False True)를 통과한다.
 terraform apply -var="eks_public_access=false"
 ```
 
-- 이미지 빌드(`null_resource.build_push_book`)는 docker 가 필요하며 빌드 단계에서
-  인터넷으로 static curl/upx 를 받는다.
-- ALB SG 규칙(`app_lb_from_cf`)은 CloudFront VPC Origin 의 관리형 SG
-  (`CloudFront-VPCOrigins-Service-SG`)가 **생성된 뒤**에 조회되므로,
-  VPC Origin 이 처음 만들어진 직후 apply 가 한 번 더 필요할 수 있다.
+> **이 2단계는 "필요할 수도 있는" 것이 아니라 항상 둘 다 실행해야 한다.**
+> 1단계만 하면 채점(public=False) 불합격, 2단계부터 시작하면 Windows 에서
+> helm/k8s 리소스 생성이 실패한다.
+
+### 단일 apply 로 끝나는 것 (추가 apply 불필요)
+
+- **CloudFront VPC Origin SG 규칙(`app_lb_from_cf`)** — `data.aws_security_group.cf_vpc_origin`
+  이 `aws_cloudfront_vpc_origin.app_lb` 에 `depends_on` 으로 묶여 있어, Terraform 이
+  데이터 조회를 **apply 시점(=VPC Origin 생성 후)** 으로 미룬다. 즉 위 1단계 apply
+  한 번 안에서 SG 생성 → 조회 → 규칙 적용이 순서대로 끝난다. 별도 apply 불필요.
+- **이미지 빌드(`null_resource.build_push_book`)** — apply 중 docker 로 빌드·푸시.
+  **Docker 데몬이 켜져 있어야 한다.** 빌드 단계에서 인터넷으로 static curl/upx 를 받는다.
 
 ## 2. 파일 구성
 
@@ -118,7 +183,6 @@ terraform apply -var="eks_public_access=false"
    apply 2단계 후 `aws eks describe-cluster ... endpointPublicAccess` 가 False 인지 확인.
 2. **app-lb 직접 접근 차단(7-1-B)** — `app_lb_from_cf` 규칙으로 CloudFront VPC Origin SG 만
    허용. Bastion 에서 `curl http://<app-lb-dns>/health` 가 **timeout** 이어야 정답.
-   (만약 VPC Origin SG 조회 실패 시 규칙을 직접 만들어야 함)
 3. **워크로드 노드 S3 도달** — workload RTB 경로 0 제약 때문에 ECR 레이어(S3)는
    S3 **Interface** Endpoint 로 받는다. 노드가 이미지 pull 실패하면 `aws_vpc_endpoint.interface["s3"]`
    private DNS 동작을 확인.

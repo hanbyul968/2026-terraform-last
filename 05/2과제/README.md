@@ -28,12 +28,7 @@
 # 0) Terraform 설치 (CloudShell, 한 줄) - 설치돼 있으면 생략
 sudo yum install -y yum-utils && sudo yum-config-manager --add-repo https://rpm.releases.hashicorp.com/AmazonLinux/hashicorp.repo && sudo yum -y install terraform
 
-# 1) 기본 VPC 생성 (없으면 apply 실패: "no matching EC2 VPC found")
-aws ec2 create-default-vpc --region ap-southeast-1
-aws ec2 create-default-vpc --region ap-northeast-2
-aws ec2 create-default-vpc --region eu-central-1
-
-# 2) 클론 & 배포 (CloudShell/Linux에서 실행)
+# 1) 클론 & 배포 (CloudShell/Linux에서 실행)
 cd ~
 git clone https://github.com/hnmly/2026-terraform.git
 cd ~/2026-terraform/05/2과제
@@ -42,6 +37,7 @@ terraform apply -var pin=<비번호> -var alarm_email=<이메일주소>
 # ⏱ ~10~15분
 ```
 
+> 기본 VPC는 terraform이 자동 생성/채택(`aws_default_vpc`)하므로 별도 작업 불필요.
 > 로컬(Windows) 설치 명령어 및 상세는 [../../사전준비/README.md](../../사전준비/README.md) 참고
 
 - `pin`: CDN S3 버킷 이름 `gj2026-cdn-bucket-<비번호>`에 사용 (필수)

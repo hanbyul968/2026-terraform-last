@@ -24,21 +24,18 @@ variable "keycloak_admin_password" {
 }
 
 # ─────────────────────────────────────────────
-# Default VPC
+# Default VPC (없으면 자동 생성, 있으면 채택)
 # ─────────────────────────────────────────────
-data "aws_vpc" "default" {
-  default = true
+resource "aws_default_vpc" "default" {}
+
+data "aws_availability_zones" "available" {
+  state = "available"
 }
 
-data "aws_subnets" "default" {
-  filter {
-    name   = "vpc-id"
-    values = [data.aws_vpc.default.id]
-  }
-}
-
-data "aws_subnet" "first" {
-  id = tolist(data.aws_subnets.default.ids)[0]
+resource "aws_default_subnet" "az" {
+  count             = 2
+  availability_zone = data.aws_availability_zones.available.names[count.index]
+  depends_on        = [aws_default_vpc.default]
 }
 
 # ─────────────────────────────────────────────
@@ -46,7 +43,7 @@ data "aws_subnet" "first" {
 # ─────────────────────────────────────────────
 resource "aws_security_group" "keycloak" {
   name   = "gj2026-keycloak-sg"
-  vpc_id = data.aws_vpc.default.id
+  vpc_id = aws_default_vpc.default.id
 
   ingress {
     from_port   = 22
@@ -131,7 +128,7 @@ data "aws_ami" "al2023" {
 resource "aws_instance" "keycloak" {
   ami                    = data.aws_ami.al2023.id
   instance_type          = "t3.small"
-  subnet_id              = data.aws_subnet.first.id
+  subnet_id              = aws_default_subnet.az[0].id
   vpc_security_group_ids = [aws_security_group.keycloak.id]
   iam_instance_profile   = aws_iam_instance_profile.ec2.name
 

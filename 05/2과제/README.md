@@ -109,7 +109,7 @@ terraform output
 ## 주의사항
 
 - **반드시 CloudShell/Linux에서 실행**: Module 1 Pillow 빌드, Module 2/4의 AWS CLI provisioner가 bash 기반
-- **Module 2 Zeppelin**: Studio 노트북 셸만 자동 생성됨. 3개 Flink SQL 쿼리는 노트북에서 수동 작성 (채점 2-3~2-5)
+- **Module 2 Zeppelin**: Studio 앱은 terraform이 생성·자동시작. 노트북 SQL(소스/싱크 테이블 + 3쿼리)만 콘솔에서 붙여넣기 → **[module2/FLINK-NOTEBOOK.md](module2/FLINK-NOTEBOOK.md)** 절차 그대로 (채점 2-3~2-5)
 - **Module 4**: EC2 재시작으로 Public IP가 바뀌면 `terraform apply -target=module.keycloak` 재실행
 - **Lambda Runtime**: PDF 명세는 `python3.14`이나 현재 `python3.12` → AWS 지원 시 각 `main.tf`의 `runtime` 값 변경
 - **AWS CLI 인증 스크립트**(`~/.aws/gj2026-keycloak-creds.sh`)는 terraform 외부 - Keycloak EC2에서 직접 작성 (채점 4-3)

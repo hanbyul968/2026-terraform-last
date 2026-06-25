@@ -84,6 +84,28 @@ terraform output
 
 ---
 
+## 트러블슈팅
+
+### `no matching EC2 VPC found`
+- 기본 VPC가 없는 리전. 최신 코드는 `aws_default_vpc`로 자동 생성하므로 `git pull` 후 재apply.
+
+### Module 4 `local-exec ... ERROR: HTTPS 인증서를 가져오지 못했습니다`
+- Keycloak EC2의 nginx(443)가 안 떠서 OIDC thumbprint를 못 가져온 경우.
+- 최신 코드는 **nginx+인증서를 Keycloak보다 먼저 기동**하도록 수정됨 → `git pull` 후 재apply.
+- 재apply 시 `user_data`가 바뀌면 keycloak EC2가 **교체(replace)**되고 새 IP로 nginx가 먼저 뜸 (정상).
+- 그래도 실패하면 새 인스턴스에 SSM 접속해 상태 확인:
+  ```bash
+  sudo systemctl status nginx
+  sudo tail -50 /var/log/cloud-init-output.log
+  curl -k https://localhost/realms/master   # Keycloak 응답 확인
+  ```
+
+### 중간 실패 후 재실행
+- 특정 모듈만: `terraform apply -target=module.<cdn|data|event|keycloak> -var pin=<비번호>`
+- Keycloak IP가 바뀌면 OIDC Provider/IAM Role도 새 IP로 재생성됨 (`null_resource` 자동 재실행).
+
+---
+
 ## 변경 가능 항목 수정 위치
 
 ### Module 1

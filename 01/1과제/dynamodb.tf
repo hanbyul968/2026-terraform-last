@@ -12,7 +12,7 @@ resource "aws_dynamodb_table" "wsc" {
     type = "S"
   }
 
-  # enabled=true (kms_key_arn ????? => AWS ????? ??aws/dynamodb (SSEType KMS)
+  # kms_key_arn 미지정 => AWS 관리형 키(aws/dynamodb), SSEType=KMS (채점 4-1 기대값)
   server_side_encryption {
     enabled = true
   }
@@ -25,7 +25,8 @@ resource "aws_dynamodb_table" "wsc" {
 }
 
 ############################
-# EFS - automatic backup ?????? 'aws/efs/automatic-backup-vault' ??? ???
+# EFS - automatic backup 정책으로 'aws/efs/automatic-backup-vault' 볼트를 시드 생성
+#   (이 볼트에 DynamoDB 백업을 저장한다 - 과제 요구사항)
 ############################
 resource "aws_efs_file_system" "backup_seed" {
   creation_token = "wsc-backup-seed"
@@ -67,8 +68,8 @@ resource "aws_iam_role_policy_attachment" "backup_restore" {
 
 ############################
 # Backup plan + selection -> aws/efs/automatic-backup-vault
-#   provider ?? ???????? vault ?????????????AWS CLI ?????.
+#   EFS 가 자동 생성하는 vault 는 terraform 으로 직접 관리할 수 없어
+#   AWS CLI(null_resource)로 plan/selection 을 생성한다.
 #   plan: wsc-dynamo-backup-plan, cron(0 0 * * ? *), cold 30 / delete 120
+#   => 실제 구현은 dynamodb_backup.tf 참고
 ############################
-# TEMPORARILY DISABLED - backup plan creation
-# 

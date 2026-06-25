@@ -15,11 +15,12 @@ resource "null_resource" "dynamo_backup" {
     command = <<-EOT
       $ErrorActionPreference = 'Stop'
 
-      # ??? ??????????? (???)
+      # 이미 백업 플랜이 있으면 스킵 (멱등성)
       $existing = aws backup list-backup-plans --region $env:REGION --query "BackupPlansList[?BackupPlanName=='wsc-dynamo-backup-plan'].BackupPlanId | [0]" --output text
       if ($existing -and $existing -ne 'None') { Write-Host "backup plan exists: $existing"; exit 0 }
 
-      # EFS ??? ??? ??? ??? ????      $ok = $false
+      # EFS 자동 백업이 vault 를 생성할 때까지 대기
+      $ok = $false
       for ($i=0; $i -lt 30; $i++) {
         aws backup describe-backup-vault --region $env:REGION --backup-vault-name $env:VAULT 2>$null | Out-Null
         if ($LASTEXITCODE -eq 0) { $ok = $true; break }

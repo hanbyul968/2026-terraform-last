@@ -134,15 +134,16 @@ def type_of(addr):
     return m.group(1) if m else None
 
 
-def build(block, var_name=None, var_value=None):
+def build(block, var_pairs=None):
     addr = block["addr"]
     name = block["name"]
     rtype = type_of(addr)
     spec = TYPE_SPECS.get(rtype)
 
     var = ""
-    if var_name and var_value:
-        var = f' -var="{var_name}={var_value}"'
+    for v_name, v_value in (var_pairs or []):
+        if v_name and v_value:
+            var += f' -var="{v_name}={v_value}"'
     tf = f"terraform import{var}"
 
     lines = []
@@ -207,6 +208,11 @@ TEMPLATE = """
   .row { display:flex; gap:16px; align-items:center; margin-bottom:8px; flex-wrap:wrap; }
   label { font-size:13px; }
   .hint { color:#8b949e; font-size:12px; }
+  .rm { background:#6e2c2c; padding:4px 10px; margin:0; font-size:12px; }
+  .rm:hover { background:#8b3a3a; }
+  #addVar { background:#30363d; padding:6px 14px; font-size:13px; }
+  #addVar:hover { background:#3c444d; }
+  .var-row { margin-bottom:6px; }
 </style>
 </head>
 <body>
@@ -215,11 +221,20 @@ TEMPLATE = """
    "이미 존재함" 에러를 통째로 붙여넣으세요. 어느 terraform 프로젝트든 동작합니다.</p>
 <form method="post">
   <div class="row">
-    <label>(선택) 변수: <code>-var="</code>
-      <input type="text" name="var_name" value="{{ var_name }}" size="12" placeholder="변수명"><code>=</code>
-      <input type="text" name="var_value" value="{{ var_value }}" size="12" placeholder="값"><code>"</code></label>
+    <label>(선택) 변수 — 여러 개 추가 가능</label>
     <span class="hint">※ var 가 필요한 프로젝트면 변수명과 값을 모두 입력, 아니면 비워두세요.</span>
   </div>
+  <div id="vars">
+    {% for vp in var_pairs %}
+    <div class="row var-row">
+      <code>-var="</code>
+      <input type="text" name="var_name" value="{{ vp[0] }}" size="12" placeholder="변수명"><code>=</code>
+      <input type="text" name="var_value" value="{{ vp[1] }}" size="12" placeholder="값"><code>"</code>
+      <button type="button" class="rm" onclick="this.closest('.var-row').remove()">✕</button>
+    </div>
+    {% endfor %}
+  </div>
+  <button type="button" id="addVar" onclick="addVarRow()">+ 변수 추가</button>
   <textarea name="error" placeholder="여기에 terraform 에러 전체를 붙여넣기...">{{ error_text }}</textarea>
   <br>
   <button type="submit">Import 명령어 생성</button>
@@ -246,6 +261,20 @@ TEMPLATE = """
   {% endif %}
 {% endif %}
 
+<script>
+function addVarRow() {
+  var wrap = document.getElementById('vars');
+  var div = document.createElement('div');
+  div.className = 'row var-row';
+  div.innerHTML = '<code>-var="</code>' +
+    '<input type="text" name="var_name" size="12" placeholder="변수명"><code>=</code>' +
+    '<input type="text" name="var_value" size="12" placeholder="값"><code>"</code>' +
+    '<button type="button" class="rm" onclick="this.closest(\\'.var-row\\').remove()">✕</button>';
+  wrap.appendChild(div);
+}
+// 변수 입력 행이 하나도 없으면 빈 행 하나 추가
+if (!document.querySelector('.var-row')) addVarRow();
+</script>
 </body>
 </html>
 """
@@ -254,24 +283,28 @@ TEMPLATE = """
 @app.route("/", methods=["GET", "POST"])
 def index():
     error_text = ""
-    var_name = ""
-    var_value = ""
+    var_pairs = []
     results = None
     all_commands = ""
     if request.method == "POST":
         error_text = request.form.get("error", "")
-        var_name = request.form.get("var_name", "").strip()
-        var_value = request.form.get("var_value", "").strip()
+        names = request.form.getlist("var_name")
+        values = request.form.getlist("var_value")
+        # 입력된 (변수명, 값) 쌍을 모두 수집 (둘 다 채워진 것만 사용)
+        var_pairs = [(n.strip(), v.strip())
+                     for n, v in zip(names, values)
+                     if n.strip() or v.strip()]
+        used_pairs = [(n, v) for n, v in var_pairs if n and v]
         blocks = parse_blocks(error_text)
         results = []
         cmd_blocks = []
         for b in blocks:
-            built = build(b, var_name, var_value)
+            built = build(b, used_pairs)
             results.append(built)
             cmd_blocks.append(built["commands"])
         all_commands = "\n\n".join(cmd_blocks)
     return render_template_string(
-        TEMPLATE, error_text=error_text, var_name=var_name, var_value=var_value,
+        TEMPLATE, error_text=error_text, var_pairs=var_pairs,
         results=results, all_commands=all_commands,
     )
 

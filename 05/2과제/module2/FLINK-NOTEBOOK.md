@@ -76,10 +76,11 @@ CREATE TABLE sink_anomaly (
 
 ## 3. 두 번째 셀 — 3개 쿼리 단일 잡 (STATEMENT SET)
 
+> ⚠️ `%flink.ssql`은 셀 맨 첫 줄(앞에 공백/빈 줄 없게). statement set은 `BEGIN STATEMENT SET; ... END;` 문법.
+
 ```sql
 %flink.ssql
-EXECUTE STATEMENT SET
-BEGIN
+BEGIN STATEMENT SET;
 -- Query 1: 에러 비율 (2분 HOP, 30초 슬라이드)
 INSERT INTO sink_error_stats
 SELECT HOP_START(ts,INTERVAL '30' SECOND,INTERVAL '2' MINUTE),

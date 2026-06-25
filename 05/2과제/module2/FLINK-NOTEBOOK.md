@@ -131,25 +131,32 @@ END;
 
 ## 4. 데이터 전송 → 채점
 
-EC2(gj2026-data-ec2)에서:
+`mark.sh`가 내부에서 app.py를 1번 돌려 order-logs에 10000건을 보냅니다.
+**즉 EC2(gj2026-data-ec2)에서 `./mark.sh` 한 번이면 데이터 생성 + 채점이 같이 됩니다.** (app.py 따로 실행 불필요)
+
 ```bash
-# (선택) 토픽 초기화 — 이전에 app.py를 돌린 적 있으면 10000을 넘으므로 리셋
+# 그냥 채점 (app.py 자동 실행 → 10000건 → Flink 처리 → 2-3~2-5)
+./mark.sh
+```
+
+⚠️ **단, order-logs가 이미 오염됐을 때만** 먼저 리셋 (이전에 app.py/mark.sh를 여러 번 돌려 10000을 초과한 경우):
+```bash
+# 현재 건수 확인 (10000 아니면 리셋 필요)
+/opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic order-logs --time -1 | awk -F: '{s+=$NF} END{print s}'
+
+# 리셋
 /opt/kafka/bin/kafka-topics.sh --delete --topic order-logs --bootstrap-server localhost:9092
 /opt/kafka/bin/kafka-topics.sh --create --topic order-logs --partitions 2 --replication-factor 1 --bootstrap-server localhost:9092
-
-# 로그 10000건 생성·전송
-python3 /home/ec2-user/app.py
-
-# 30초쯤 후 채점 (error-stats/high-latency/anomaly 토픽 소비)
-./mark.sh        # 또는 채점기준표 2-3/2-4/2-5 명령
 ```
 
 ---
 
 ## 순서 요약
-1. Studio `RUNNING` 확인 → 노트북 열기
-2. 2번 셀(DDL) 실행 → 3번 셀(쿼리 잡) 실행
-3. EC2에서 `app.py` 1회 (order-logs에 10000건)
-4. 30초 후 채점 → 2-3/2-4/2-5 결과 확인
+1. Studio `RUNNING` 확인 → Zeppelin 노트북 열기
+2. **셀1(TEMPORARY 테이블 DDL)** 실행 → **셀2(BEGIN STATEMENT SET 쿼리 잡)** 실행 → 잡 RUNNING
+3. (order-logs가 10000 초과로 오염됐을 때만) 토픽 리셋
+4. EC2에서 **`./mark.sh`** → app.py 자동 10000건 + 채점 한 번에 (2-3/2-4/2-5)
+
+> Flink 잡(셀2)이 먼저 RUNNING이어야 합니다. earliest-offset이라 mark.sh가 보낸 10000건을 잡이 처음부터 읽어 집계합니다.
 
 > 예상 출력(예: `error_rate:19.36`, `total_count:9000`)과 숫자가 1~2 차이 나면 윈도우/워터마크/반올림 미세조정이 필요할 수 있습니다.

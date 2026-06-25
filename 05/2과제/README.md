@@ -27,10 +27,14 @@
 > ⚠️ **CloudShell은 홈 용량이 1GB라 provider(약 700MB)+state 저장 중 `no space left on device`로 터집니다.
 > 반드시 로컬(Windows)에서 실행하세요.**
 
-### 로컬(Windows) 실행 — Git Bash에서
+### 로컬(Windows) 실행 — 반드시 "Git Bash" 앱에서
 
-provisioner가 bash/openssl/aws/pip를 쓰므로 **PowerShell 말고 Git Bash 터미널**에서 실행합니다.
-사전 설치(터미널 새로 열기): Terraform, AWS CLI, Python — [../../사전준비/README.md](../../사전준비/README.md) 참고.
+provisioner가 bash/openssl/aws/pip를 씁니다. 셸 선택이 중요합니다:
+- ❌ **PowerShell**: `bash`/`rm -f` 등이 안 됨
+- ❌ **그냥 `bash` 명령**: Windows에선 `bash`가 **WSL**로 잡혀 aws/terraform이 안 보임(`command not found`)
+- ✅ **"Git Bash" 앱**을 직접 실행 (시작 메뉴 → Git Bash). Windows PATH를 그대로 써서 aws/terraform/python/openssl이 모두 잡히고 `bash`도 Git bash로 동작.
+
+사전 설치(설치 후 Git Bash 새로 열기): Terraform, AWS CLI, Python — [../../사전준비/README.md](../../사전준비/README.md) 참고.
 
 ```bash
 # Git Bash에서

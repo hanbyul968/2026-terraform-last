@@ -147,16 +147,13 @@ rm "kafka_$${SCALA_VERSION}-$${KAFKA_VERSION}.tgz"
 
 # KRaft 모드 설정
 CLUSTER_ID=$(/opt/kafka/bin/kafka-storage.sh random-uuid)
-# AL2023은 IMDSv2(토큰) 필요
-IMDS_TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
-PUBLIC_IP=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4)
-
+# 외부 advertised는 NLB DNS 사용 (Flink가 NLB:9094로 접속) - IMDS 불필요
 cat > /opt/kafka/config/kraft/server.properties << KAFKAEOF
 process.roles=broker,controller
 node.id=1
 controller.quorum.voters=1@localhost:9093
 listeners=INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:9094,CONTROLLER://0.0.0.0:9093
-advertised.listeners=INTERNAL://localhost:9092,EXTERNAL://$${PUBLIC_IP}:9094
+advertised.listeners=INTERNAL://localhost:9092,EXTERNAL://${aws_lb.data.dns_name}:9094
 listener.security.protocol.map=INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
 inter.broker.listener.name=INTERNAL
 controller.listener.names=CONTROLLER

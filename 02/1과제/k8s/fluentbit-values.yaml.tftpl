@@ -1,0 +1,15 @@
+# aws-for-fluent-bit values — Pod 로그를 CloudWatch Logs 로 전송 (과제 12)
+serviceAccount:
+  create: false
+  name: ${sa_name}
+
+# 모든 노드의 Pod 로그 수집 (DaemonSet)
+tolerations:
+  - operator: Exists
+
+cloudWatchLogs:
+  enabled: true
+  region: ${region}
+  logGroupName: ${log_group}
+  logStreamPrefix: "pod-"
+  autoCreateGroup: false

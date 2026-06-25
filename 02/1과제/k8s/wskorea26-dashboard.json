@@ -1,0 +1,62 @@
+{
+  "uid": "wskorea26",
+  "title": "wskorea26-monitoring",
+  "tags": ["wskorea26"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-30m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Container CPU Usage",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{container!=\"\"}[5m]))", "legendFormat": "{{pod}}" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Container Memory Usage",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "sum by (pod) (container_memory_usage_bytes{container!=\"\"})", "legendFormat": "{{pod}}" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Running Pod Count",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "sum(kube_pod_status_phase{phase=\"Running\"})" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Container Restarts",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "sum by (pod) (kube_pod_container_status_restarts_total)", "legendFormat": "{{pod}}" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Container Network Receive",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "sum by (pod) (rate(container_network_receive_bytes_total[5m]))", "legendFormat": "{{pod}}" }
+      ]
+    }
+  ]
+}

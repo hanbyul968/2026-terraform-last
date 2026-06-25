@@ -1,0 +1,42 @@
+# grafana/grafana values
+# addon 노드 배치, 인터넷 LB(wskorea26-grafana-alb) HTTP 80 노출.
+# 대시보드 URL: http://<lb>/d/wskorea26/wskorea26-monitoring (루트 서빙)
+
+nodeSelector:
+  node-type: addon
+
+persistence:
+  enabled: true
+  existingClaim: ${pvc_name}
+
+adminUser: "${admin_user}"
+adminPassword: "${admin_password}"
+
+# Service 를 LB controller 기반 인터넷 LB 로 노출 (HTTP 80 -> 3000)
+service:
+  type: LoadBalancer
+  port: 80
+  targetPort: 3000
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: external
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+    service.beta.kubernetes.io/aws-load-balancer-name: wskorea26-grafana-alb
+
+datasources:
+  datasources.yaml:
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        uid: prometheus
+        access: proxy
+        url: ${ds_url}
+        isDefault: true
+
+# wskorea26-dashboard configmap(label grafana_dashboard=1) 자동 로드
+sidecar:
+  dashboards:
+    enabled: true
+    label: grafana_dashboard
+    searchNamespace: monitoring

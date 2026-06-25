@@ -1,0 +1,28 @@
+# prometheus-community/prometheus values
+# 노드는 NAT egress 가 있으므로 이미지를 기본 레지스트리에서 그대로 pull.
+# 모든 모니터링 컴포넌트는 addon 노드(node-type=addon)에 배치.
+
+server:
+  retention: 6h
+  nodeSelector:
+    node-type: addon
+  persistentVolume:
+    enabled: true
+    existingClaim: ${pvc_name}
+  service:
+    servicePort: 80
+
+alertmanager:
+  enabled: false
+
+pushgateway:
+  enabled: false
+
+# 컨테이너 메트릭(container_*)은 kubelet/cAdvisor 에서 수집(기본 scrape)
+prometheus-node-exporter:
+  tolerations:
+    - operator: Exists
+
+kube-state-metrics:
+  nodeSelector:
+    node-type: addon

@@ -178,7 +178,8 @@ dnf install -y java-21-amazon-corretto
 
 KEYCLOAK_VERSION="26.0.0"
 cd /opt
-wget -q "https://github.com/keycloak/keycloak/releases/download/$KEYCLOAK_VERSION/keycloak-$KEYCLOAK_VERSION.tar.gz"
+# AL2023엔 wget이 없으므로 curl 사용 (github redirect → -L)
+curl -fsSLO "https://github.com/keycloak/keycloak/releases/download/$KEYCLOAK_VERSION/keycloak-$KEYCLOAK_VERSION.tar.gz"
 tar -xzf "keycloak-$KEYCLOAK_VERSION.tar.gz"
 ln -s "keycloak-$KEYCLOAK_VERSION" keycloak
 rm "keycloak-$KEYCLOAK_VERSION.tar.gz"

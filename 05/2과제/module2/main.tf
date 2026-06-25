@@ -139,7 +139,8 @@ pip3 install kafka-python
 KAFKA_VERSION="3.9.0"
 SCALA_VERSION="2.13"
 cd /opt
-wget -q "https://downloads.apache.org/kafka/$${KAFKA_VERSION}/kafka_$${SCALA_VERSION}-$${KAFKA_VERSION}.tgz"
+# AL2023엔 wget이 없으므로 curl 사용 (archive.apache.org는 모든 버전 보관)
+curl -fsSLO "https://archive.apache.org/dist/kafka/$${KAFKA_VERSION}/kafka_$${SCALA_VERSION}-$${KAFKA_VERSION}.tgz"
 tar -xzf "kafka_$${SCALA_VERSION}-$${KAFKA_VERSION}.tgz"
 ln -s "kafka_$${SCALA_VERSION}-$${KAFKA_VERSION}" kafka
 rm "kafka_$${SCALA_VERSION}-$${KAFKA_VERSION}.tgz"

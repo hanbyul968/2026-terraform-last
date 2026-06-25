@@ -38,13 +38,15 @@ choco install docker-desktop terraform awscli -y
 
 ---
 
-## 2. AWS CloudShell (Amazon Linux 2023)
+## 2. AWS CloudShell (Amazon Linux 2023) — ⚠️ 비권장
 
-### Terraform 설치 (한 줄)
+CloudShell은 홈 용량이 **1GB**라 provider(약 700MB)+state 저장 중
+`no space left on device`로 apply가 실패합니다. **로컬(Windows)에서 실행하세요.**
+
+(참고용) CloudShell Terraform 설치 한 줄:
 ```bash
 sudo yum install -y yum-utils && sudo yum-config-manager --add-repo https://rpm.releases.hashicorp.com/AmazonLinux/hashicorp.repo && sudo yum -y install terraform
 ```
-> AWS CLI는 CloudShell에 기본 설치되어 있음. 확인: `terraform -version`
 
 ---
 
@@ -55,14 +57,15 @@ sudo yum install -y yum-utils && sudo yum-config-manager --add-repo https://rpm.
 
 ---
 
-## 4. 배포 순서 요약
+## 4. 배포 순서 요약 (로컬 Windows / Git Bash)
+
+provisioner가 bash/openssl/aws/pip 기반이라 **Git Bash 터미널**에서 실행.
 
 ```bash
-# 1) 리포지토리 클론
+aws configure                                   # 자격증명 1회 설정
 cd ~ && git clone https://github.com/hnmly/2026-terraform.git
-# 2) 2과제 전체 배포 (기본 VPC 자동 생성 포함)
 cd ~/2026-terraform/05/2과제
 terraform init
 terraform apply -var pin=<비번호> -var alarm_email=<이메일>
 ```
-> 상세 내용은 [05/2과제/README.md](../05/2과제/README.md) 참고.
+> 상세/트러블슈팅은 [05/2과제/README.md](../05/2과제/README.md) 참고.

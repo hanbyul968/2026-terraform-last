@@ -24,21 +24,39 @@
 
 ## 실행 (한 번에 전체 apply)
 
-```bash
-# 0) Terraform 설치 (CloudShell, 한 줄) - 설치돼 있으면 생략
-sudo yum install -y yum-utils && sudo yum-config-manager --add-repo https://rpm.releases.hashicorp.com/AmazonLinux/hashicorp.repo && sudo yum -y install terraform
+> ⚠️ **CloudShell은 홈 용량이 1GB라 provider(약 700MB)+state 저장 중 `no space left on device`로 터집니다.
+> 반드시 로컬(Windows)에서 실행하세요.**
 
-# 1) 클론 & 배포 (CloudShell/Linux에서 실행)
-cd ~
-git clone https://github.com/hnmly/2026-terraform.git
-cd ~/2026-terraform/05/2과제
+### 로컬(Windows) 실행 — Git Bash에서
+
+provisioner가 bash/openssl/aws/pip를 쓰므로 **PowerShell 말고 Git Bash 터미널**에서 실행합니다.
+사전 설치(터미널 새로 열기): Terraform, AWS CLI, Python — [../../사전준비/README.md](../../사전준비/README.md) 참고.
+
+```bash
+# Git Bash에서
+aws configure          # 자격증명 1회 설정 (안 했으면)
+
+cd ~/2026-terraform/05/2과제      # 또는 repo를 클론한 위치
 terraform init
 terraform apply -var pin=<비번호> -var alarm_email=<이메일주소>
 # ⏱ ~10~15분
 ```
 
 > 기본 VPC는 terraform이 자동 생성/채택(`aws_default_vpc`)하므로 별도 작업 불필요.
-> 로컬(Windows) 설치 명령어 및 상세는 [../../사전준비/README.md](../../사전준비/README.md) 참고
+> `python3`가 없다는 오류 시: `aws cloudfront` 정리 스크립트만 해당 → 본 배포엔 영향 없음.
+
+### state가 유실됐거나 `AlreadyExists` 충돌이 날 때
+
+CloudShell에서 용량 터져 state가 날아가면, 이미 만들어진 리소스가 남아 재apply가 충돌합니다.
+이름이 채점용으로 고정이라 바꿀 수 없으므로 **고아 리소스를 먼저 정리**하고 다시 apply:
+
+```bash
+bash cleanup.sh <비번호>      # 4개 리전 gj2026-* 리소스 일괄 삭제 (best-effort)
+rm -f terraform.tfstate*      # 깨진 로컬 state 초기화
+terraform init
+terraform apply -var pin=<비번호> -var alarm_email=<이메일주소>
+```
+> CloudFront/Lambda@Edge는 삭제에 시간이 걸립니다(수분~수시간). 충돌나면 잠시 후 재실행.
 
 - `pin`: CDN S3 버킷 이름 `gj2026-cdn-bucket-<비번호>`에 사용 (필수)
 - `alarm_email`: Module 3 SNS 이메일 알림 주소 — **채점 3-8(SNS 이메일 알림 수신, 1.0점)** 용

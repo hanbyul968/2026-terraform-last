@@ -126,11 +126,12 @@ data "aws_ami" "al2023" {
 # Keycloak 26.x + HTTPS (nginx reverse proxy + self-signed cert)
 # ─────────────────────────────────────────────
 resource "aws_instance" "keycloak" {
-  ami                    = data.aws_ami.al2023.id
-  instance_type          = "t3.small"
-  subnet_id              = aws_default_subnet.az[0].id
-  vpc_security_group_ids = [aws_security_group.keycloak.id]
-  iam_instance_profile   = aws_iam_instance_profile.ec2.name
+  ami                         = data.aws_ami.al2023.id
+  instance_type               = "t3.small"
+  subnet_id                   = aws_default_subnet.az[0].id
+  vpc_security_group_ids      = [aws_security_group.keycloak.id]
+  iam_instance_profile        = aws_iam_instance_profile.ec2.name
+  user_data_replace_on_change = true
 
   user_data = <<-USEREOF
 #!/bin/bash

@@ -115,33 +115,36 @@ data "aws_ami" "al2023" {
 # EC2: gj2026-data-ec2 (Kafka KRaft + App)
 # ─────────────────────────────────────────────
 resource "aws_instance" "kafka" {
-  ami                    = data.aws_ami.al2023.id
-  instance_type          = "t3.small"
-  subnet_id              = aws_default_subnet.az[0].id
-  vpc_security_group_ids = [aws_security_group.kafka.id]
-  iam_instance_profile   = aws_iam_instance_profile.ec2.name
+  ami                         = data.aws_ami.al2023.id
+  instance_type               = "t3.small"
+  subnet_id                   = aws_default_subnet.az[0].id
+  vpc_security_group_ids      = [aws_security_group.kafka.id]
+  iam_instance_profile        = aws_iam_instance_profile.ec2.name
+  user_data_replace_on_change = true # userdata 바뀌면 인스턴스 교체(새 userdata 실행 보장)
 
   user_data = <<-EOF
 #!/bin/bash
-set -e
+# 진단용 로그 + set -e 제거(한 단계 실패가 전체 중단되지 않게)
+exec > /var/log/userdata.log 2>&1
+set -x
 
-# Java 설치 (Kafka 의존성)
-dnf install -y java-21-amazon-corretto python3-pip
-
-# 배포 app.py 배치 (바이트 보존 - 채점 2-2 SHA256 검증)
+# 배포 app.py + 로그 디렉터리 먼저 배치 (느린 설치와 무관하게 항상 존재)
 echo "${local.app_py_b64}" | base64 -d > /home/ec2-user/app.py
 chown ec2-user:ec2-user /home/ec2-user/app.py
+mkdir -p /var/log/app
+chown -R ec2-user:ec2-user /var/log/app
 
-# Kafka 클라이언트 (app.py 의존성)
+# Java + pip + Kafka 클라이언트
+dnf install -y java-21-amazon-corretto python3-pip
 pip3 install kafka-python
 
-# Kafka 설치
+# Kafka 다운로드 (archive: EC2(AWS망)에선 충분히 빠름)
 KAFKA_VERSION="3.9.0"
 SCALA_VERSION="2.13"
+KT="kafka_$${SCALA_VERSION}-$${KAFKA_VERSION}.tgz"
 cd /opt
-# AL2023엔 wget이 없으므로 curl 사용 (archive.apache.org는 모든 버전 보관)
-curl -fsSLO "https://archive.apache.org/dist/kafka/$${KAFKA_VERSION}/kafka_$${SCALA_VERSION}-$${KAFKA_VERSION}.tgz"
-tar -xzf "kafka_$${SCALA_VERSION}-$${KAFKA_VERSION}.tgz"
+curl -fsSL --retry 5 --retry-delay 3 -o "$KT" "https://archive.apache.org/dist/kafka/$${KAFKA_VERSION}/$KT"
+tar -xzf "$KT"
 ln -s "kafka_$${SCALA_VERSION}-$${KAFKA_VERSION}" kafka
 rm "kafka_$${SCALA_VERSION}-$${KAFKA_VERSION}.tgz"
 

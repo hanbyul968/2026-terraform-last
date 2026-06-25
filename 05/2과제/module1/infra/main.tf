@@ -153,6 +153,15 @@ resource "aws_lambda_function_url" "rotate" {
   authorization_type = "NONE"
 }
 
+# Function URL 퍼블릭 호출 허용 (NONE auth라도 권한 명시 필요, 없으면 403)
+resource "aws_lambda_permission" "rotate_url" {
+  statement_id           = "AllowPublicFunctionUrl"
+  action                 = "lambda:InvokeFunctionUrl"
+  function_name          = aws_lambda_function.rotate.function_name
+  principal              = "*"
+  function_url_auth_type = "NONE"
+}
+
 # ─────────────────────────────────────────────
 # Lambda@Edge: gj2026-cdn-request (viewer-request)
 # ─────────────────────────────────────────────

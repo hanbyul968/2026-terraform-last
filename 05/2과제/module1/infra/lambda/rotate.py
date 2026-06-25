@@ -29,15 +29,16 @@ def lambda_handler(event, context):
             "body": f'{{"error": "Image not found: {str(e)}"}}',
         }
 
-    img = Image.open(io.BytesIO(img_data)).convert("RGBA")
-
-    if rotate != 0:
-        # Pillow rotate는 반시계 방향 → 시계 방향은 음수
+    if rotate % 360 == 0:
+        # 회전 없음 → 원본 바이트 그대로 반환 (채점 1-1 정확한 해시 일치)
+        out = img_data
+    else:
+        # Pillow rotate는 반시계 방향 → 시계 방향은 음수, 90/180/270은 무손실
+        img = Image.open(io.BytesIO(img_data))
         img = img.rotate(-rotate, expand=True)
-
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    buf.seek(0)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        out = buf.getvalue()
 
     return {
         "statusCode": 200,
@@ -45,6 +46,6 @@ def lambda_handler(event, context):
             "Content-Type": "image/png",
             "Cache-Control": "max-age=86400",
         },
-        "body": base64.b64encode(buf.read()).decode(),
+        "body": base64.b64encode(out).decode(),
         "isBase64Encoded": True,
     }

@@ -147,7 +147,9 @@ rm "kafka_$${SCALA_VERSION}-$${KAFKA_VERSION}.tgz"
 
 # KRaft 모드 설정
 CLUSTER_ID=$(/opt/kafka/bin/kafka-storage.sh random-uuid)
-PUBLIC_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)
+# AL2023은 IMDSv2(토큰) 필요
+IMDS_TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+PUBLIC_IP=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4)
 
 cat > /opt/kafka/config/kraft/server.properties << KAFKAEOF
 process.roles=broker,controller

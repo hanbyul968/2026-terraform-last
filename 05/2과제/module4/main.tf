@@ -136,19 +136,17 @@ resource "aws_instance" "keycloak" {
 #!/bin/bash
 # set -e 제거: 한 단계 실패가 전체 부팅 스크립트를 중단시키지 않도록
 
-PUBLIC_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)
-
 ############################################
 # 1) nginx + 자체서명 인증서를 가장 먼저 기동
 #    → OIDC thumbprint를 빠르게 확보 (Keycloak 다운로드와 무관)
+#    인증서 SAN은 thumbprint에 불필요하므로 IP 의존 제거(고정 CN)
 ############################################
 dnf install -y nginx openssl
 
 openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
   -keyout /etc/nginx/ssl.key \
   -out /etc/nginx/ssl.crt \
-  -subj "/CN=$PUBLIC_IP/O=GJ2026" \
-  -addext "subjectAltName=IP:$PUBLIC_IP"
+  -subj "/CN=keycloak/O=GJ2026"
 
 cat > /etc/nginx/conf.d/keycloak.conf << 'NGINXEOF'
 server {

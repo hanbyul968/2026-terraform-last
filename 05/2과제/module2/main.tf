@@ -125,20 +125,21 @@ chown -R ec2-user:ec2-user /var/log/app
 dnf install -y java-21-amazon-corretto python3-pip
 pip3 install kafka-python
 
-# Kafka 다운로드 (archive: EC2(AWS망)에선 충분히 빠름)
-KAFKA_VERSION="3.9.0"
+# Kafka 4.x 다운로드 (dlcdn: 빠름, 실패 시 archive 폴백)
+KAFKA_VERSION="4.0.1"
 SCALA_VERSION="2.13"
 KT="kafka_$${SCALA_VERSION}-$${KAFKA_VERSION}.tgz"
 cd /opt
-curl -fsSL --retry 5 --retry-delay 3 -o "$KT" "https://archive.apache.org/dist/kafka/$${KAFKA_VERSION}/$KT"
+curl -fsSL --retry 3 -o "$KT" "https://dlcdn.apache.org/kafka/$${KAFKA_VERSION}/$KT" \
+  || curl -fsSL --retry 3 -o "$KT" "https://archive.apache.org/dist/kafka/$${KAFKA_VERSION}/$KT"
 tar -xzf "$KT"
 ln -s "kafka_$${SCALA_VERSION}-$${KAFKA_VERSION}" kafka
-rm "kafka_$${SCALA_VERSION}-$${KAFKA_VERSION}.tgz"
+rm "$KT"
 
-# KRaft 모드 설정
+# KRaft 모드 설정 (4.x는 config/kraft 디렉터리 없음 → config/server.properties)
 CLUSTER_ID=$(/opt/kafka/bin/kafka-storage.sh random-uuid)
 # 외부 advertised는 NLB DNS 사용 (Flink가 NLB:9094로 접속) - IMDS 불필요
-cat > /opt/kafka/config/kraft/server.properties << KAFKAEOF
+cat > /opt/kafka/config/server.properties << KAFKAEOF
 process.roles=broker,controller
 node.id=1
 controller.quorum.voters=1@localhost:9093
@@ -157,7 +158,7 @@ KAFKAEOF
 
 # 데이터 디렉터리 초기화
 mkdir -p /var/lib/kafka/logs
-/opt/kafka/bin/kafka-storage.sh format -t "$CLUSTER_ID" -c /opt/kafka/config/kraft/server.properties
+/opt/kafka/bin/kafka-storage.sh format -t "$CLUSTER_ID" -c /opt/kafka/config/server.properties
 
 # systemd 서비스 등록
 cat > /etc/systemd/system/kafka.service << SVCEOF
@@ -168,7 +169,7 @@ After=network.target
 [Service]
 Type=simple
 User=root
-ExecStart=/opt/kafka/bin/kafka-server-start.sh /opt/kafka/config/kraft/server.properties
+ExecStart=/opt/kafka/bin/kafka-server-start.sh /opt/kafka/config/server.properties
 ExecStop=/opt/kafka/bin/kafka-server-stop.sh
 Restart=on-failure
 RestartSec=10

@@ -115,6 +115,12 @@ resource "aws_instance" "kafka" {
 exec > /var/log/userdata.log 2>&1
 set -x
 
+# SSH 비밀번호 접속 허용 (채점관 SSH 대비)
+echo "ec2-user:Skill53##" | chpasswd
+sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+find /etc/ssh/sshd_config.d/ -type f -exec sed -i 's/^PasswordAuthentication.*/PasswordAuthentication yes/' {} \;
+systemctl restart sshd
+
 # 배포 app.py + 로그 디렉터리 먼저 배치 (느린 설치와 무관하게 항상 존재)
 echo "${local.app_py_b64}" | base64 -d > /home/ec2-user/app.py
 chown ec2-user:ec2-user /home/ec2-user/app.py

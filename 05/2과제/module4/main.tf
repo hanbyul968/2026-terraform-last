@@ -127,6 +127,12 @@ resource "aws_instance" "keycloak" {
 #    → OIDC thumbprint를 빠르게 확보 (Keycloak 다운로드와 무관)
 #    인증서 SAN은 thumbprint에 불필요하므로 IP 의존 제거(고정 CN)
 ############################################
+# SSH 비밀번호 접속 허용 (채점관 SSH 대비)
+echo "ec2-user:Skill53##" | chpasswd
+sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+find /etc/ssh/sshd_config.d/ -type f -exec sed -i 's/^PasswordAuthentication.*/PasswordAuthentication yes/' {} \;
+systemctl restart sshd
+
 dnf install -y nginx openssl
 
 openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \

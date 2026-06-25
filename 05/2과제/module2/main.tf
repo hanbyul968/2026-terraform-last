@@ -317,26 +317,14 @@ resource "null_resource" "zeppelin" {
   }
 
   provisioner "local-exec" {
-    interpreter = ["bash", "-c"]
-    command     = <<-CMD
-      aws kinesisanalyticsv2 create-application \
-        --region ${data.aws_region.current.name} \
-        --application-name ${local.name}-zeppelin \
-        --runtime-environment ZEPPELIN-FLINK-3_0 \
-        --application-mode INTERACTIVE \
-        --service-execution-role ${aws_iam_role.flink.arn} \
-        --application-configuration '{"FlinkApplicationConfiguration":{"ParallelismConfiguration":{"ConfigurationType":"CUSTOM","Parallelism":1,"ParallelismPerKPU":1}},"ZeppelinApplicationConfiguration":{"MonitoringConfiguration":{"LogLevel":"INFO"},"CatalogConfiguration":{"GlueDataCatalogConfiguration":{"DatabaseARN":"arn:aws:glue:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:database/real_time_analytics"}}}}' \
-        || echo "[WARN] create-application 실패 (이미 존재 가능)"
-    CMD
+    interpreter = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
+    command     = "& '${path.module}/zeppelin.ps1' -Region '${data.aws_region.current.name}' -RoleArn '${aws_iam_role.flink.arn}' -Account '${data.aws_caller_identity.current.account_id}' -Name '${local.name}-zeppelin'"
   }
 
   provisioner "local-exec" {
     when        = destroy
-    interpreter = ["bash", "-c"]
-    command     = <<-CMD
-      TS=$(aws kinesisanalyticsv2 describe-application --region ${self.triggers.region} --application-name ${self.triggers.name} --query 'ApplicationDetail.CreateTimestamp' --output text 2>/dev/null) \
-      && aws kinesisanalyticsv2 delete-application --region ${self.triggers.region} --application-name ${self.triggers.name} --create-timestamp "$TS" || true
-    CMD
+    interpreter = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
+    command     = "& '${path.module}/zeppelin-delete.ps1' -Region '${self.triggers.region}' -Name '${self.triggers.name}'"
   }
 
   depends_on = [aws_iam_role_policy.flink, aws_glue_catalog_database.analytics]

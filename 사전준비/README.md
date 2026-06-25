@@ -57,14 +57,14 @@ sudo yum install -y yum-utils && sudo yum-config-manager --add-repo https://rpm.
 
 ---
 
-## 4. 배포 순서 요약 (로컬 Windows / Git Bash)
+## 4. 배포 순서 요약 (로컬 Windows PowerShell)
 
-provisioner가 bash/openssl/aws/pip 기반이라 **Git Bash 터미널**에서 실행.
+provisioner가 PowerShell 전용이라 **Windows PowerShell**에서 실행 (bash 불필요).
 
-```bash
+```powershell
 aws configure                                   # 자격증명 1회 설정
-cd ~ && git clone https://github.com/hnmly/2026-terraform.git
-cd ~/2026-terraform/05/2과제
+git clone https://github.com/hnmly/2026-terraform.git
+cd .\2026-terraform\05\2과제
 terraform init
 terraform apply -var pin=<비번호> -var alarm_email=<이메일>
 ```

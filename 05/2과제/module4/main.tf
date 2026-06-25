@@ -328,46 +328,8 @@ resource "null_resource" "oidc_provider" {
   }
 
   provisioner "local-exec" {
-    interpreter = ["bash", "-c"]
-    command     = <<-SCRIPT
-      set -e
-
-      IP=$(aws ec2 describe-instances \
-        --instance-ids ${aws_instance.keycloak.id} \
-        --query 'Reservations[0].Instances[0].PublicIpAddress' \
-        --output text --region eu-central-1)
-      echo "Keycloak IP: $IP"
-
-      # HTTPS(nginx) + Keycloak realm 준비될 때까지 대기 (최대 ~10분)
-      echo "Keycloak HTTPS 준비 대기..."
-      for i in $(seq 1 60); do
-        THUMBPRINT=$(echo | openssl s_client -connect "$IP:443" -servername "$IP" -showcerts 2>/dev/null \
-          | openssl x509 -fingerprint -noout -sha1 2>/dev/null \
-          | cut -d= -f2 | tr -d ':' | tr '[:upper:]' '[:lower:]')
-        if [ -n "$THUMBPRINT" ]; then
-          echo "Thumbprint 획득: $THUMBPRINT (시도 $i)"
-          break
-        fi
-        echo "  대기 중... ($i/60)"
-        sleep 10
-      done
-
-      if [ -z "$THUMBPRINT" ]; then
-        echo "ERROR: HTTPS 인증서를 가져오지 못했습니다. EC2 부팅/nginx 상태를 확인하세요."
-        exit 1
-      fi
-
-      EXISTING=$(aws iam list-open-id-connect-providers --query 'OpenIDConnectProviderList[*].Arn' --output text | grep "$IP/realms/team" || true)
-      if [ -z "$EXISTING" ]; then
-        aws iam create-open-id-connect-provider \
-          --url "https://$IP/realms/team" \
-          --client-id-list gj2026-keycloak-dev gj2026-keycloak-sec \
-          --thumbprint-list "$THUMBPRINT"
-        echo "OIDC Provider 생성 완료"
-      else
-        echo "OIDC Provider 이미 존재: $EXISTING"
-      fi
-    SCRIPT
+    interpreter = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
+    command     = "& '${path.module}/oidc.ps1' -InstanceId '${aws_instance.keycloak.id}' -Region 'eu-central-1'"
   }
 }
 
@@ -459,45 +421,8 @@ resource "null_resource" "iam_roles" {
   }
 
   provisioner "local-exec" {
-    interpreter = ["bash", "-c"]
-    command     = <<-SCRIPT
-      set -e
-
-      IP=$(aws ec2 describe-instances \
-        --instance-ids ${aws_instance.keycloak.id} \
-        --query 'Reservations[0].Instances[0].PublicIpAddress' \
-        --output text --region eu-central-1)
-
-      ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-      OIDC_ARN="arn:aws:iam::$ACCOUNT_ID:oidc-provider/$IP/realms/team"
-      OIDC_URL="$IP/realms/team"
-
-      DEV_POLICY_ARN="${aws_iam_policy.dev.arn}"
-      SEC_POLICY_ARN="${aws_iam_policy.sec.arn}"
-
-      create_role() {
-        local ROLE_NAME=$1 CLIENT=$2 TEAM=$3 POLICY_ARN=$4
-        local TRUST="{
-          \"Version\": \"2012-10-17\",
-          \"Statement\": [{
-            \"Effect\": \"Allow\",
-            \"Principal\": {\"Federated\": \"$OIDC_ARN\"},
-            \"Action\": \"sts:AssumeRoleWithWebIdentity\",
-            \"Condition\": {
-              \"StringEquals\": {\"$OIDC_URL:aud\": \"$CLIENT\"}
-            }
-          }]
-        }"
-        aws iam create-role --role-name "$ROLE_NAME" --assume-role-policy-document "$TRUST" 2>/dev/null || \
-          aws iam update-assume-role-policy --role-name "$ROLE_NAME" --policy-document "$TRUST"
-        aws iam attach-role-policy --role-name "$ROLE_NAME" --policy-arn "$POLICY_ARN" 2>/dev/null || true
-      }
-
-      create_role "gj2026-keycloak-dev-role" "gj2026-keycloak-dev" "dev-team" "$DEV_POLICY_ARN"
-      create_role "gj2026-keycloak-sec-role" "gj2026-keycloak-sec" "sec-team" "$SEC_POLICY_ARN"
-
-      echo "IAM 역할 생성 완료"
-    SCRIPT
+    interpreter = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
+    command     = "& '${path.module}/iam-roles.ps1' -InstanceId '${aws_instance.keycloak.id}' -Region 'eu-central-1' -DevPolicyArn '${aws_iam_policy.dev.arn}' -SecPolicyArn '${aws_iam_policy.sec.arn}'"
   }
 }
 

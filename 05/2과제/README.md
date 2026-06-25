@@ -22,45 +22,37 @@
 
 ---
 
-## 실행 (한 번에 전체 apply)
+## 실행 (Windows PowerShell, 한 번에 전체 apply)
 
-> ⚠️ **CloudShell은 홈 용량이 1GB라 provider(약 700MB)+state 저장 중 `no space left on device`로 터집니다.
-> 반드시 로컬(Windows)에서 실행하세요.**
+> ⚠️ **CloudShell 쓰지 마세요.** 홈 용량 1GB라 provider(약 700MB)+state 저장 중 `no space left on device`로 터집니다.
+> 모든 provisioner는 **Windows PowerShell 전용**으로 작성됨 (bash/Git Bash/WSL 불필요).
 
-### 로컬(Windows) 실행 — 반드시 "Git Bash" 앱에서
+사전 설치(설치 후 PowerShell 새로 열기): Terraform, AWS CLI, Python — [../../사전준비/README.md](../../사전준비/README.md) 참고.
 
-provisioner가 bash/openssl/aws/pip를 씁니다. 셸 선택이 중요합니다:
-- ❌ **PowerShell**: `bash`/`rm -f` 등이 안 됨
-- ❌ **그냥 `bash` 명령**: Windows에선 `bash`가 **WSL**로 잡혀 aws/terraform이 안 보임(`command not found`)
-- ✅ **"Git Bash" 앱**을 직접 실행 (시작 메뉴 → Git Bash). Windows PATH를 그대로 써서 aws/terraform/python/openssl이 모두 잡히고 `bash`도 Git bash로 동작.
+```powershell
+# Windows PowerShell 에서
+aws configure                                  # 자격증명 1회 설정 (안 했으면)
 
-사전 설치(설치 후 Git Bash 새로 열기): Terraform, AWS CLI, Python — [../../사전준비/README.md](../../사전준비/README.md) 참고.
-
-```bash
-# Git Bash에서
-aws configure          # 자격증명 1회 설정 (안 했으면)
-
-cd ~/2026-terraform/05/2과제      # 또는 repo를 클론한 위치
+cd C:\Users\competitor\2026-terraform\05\2과제   # repo 클론 위치
 terraform init
 terraform apply -var pin=<비번호> -var alarm_email=<이메일주소>
 # ⏱ ~10~15분
 ```
 
 > 기본 VPC는 terraform이 자동 생성/채택(`aws_default_vpc`)하므로 별도 작업 불필요.
-> `python3`가 없다는 오류 시: `aws cloudfront` 정리 스크립트만 해당 → 본 배포엔 영향 없음.
 
 ### state가 유실됐거나 `AlreadyExists` 충돌이 날 때
 
-CloudShell에서 용량 터져 state가 날아가면, 이미 만들어진 리소스가 남아 재apply가 충돌합니다.
-이름이 채점용으로 고정이라 바꿀 수 없으므로 **고아 리소스를 먼저 정리**하고 다시 apply:
+이미 만들어진 리소스가 남아 재apply가 충돌하면, 이름이 채점용 고정이라 **고아 리소스를 먼저 정리**:
 
-```bash
-bash cleanup.sh <비번호>      # 4개 리전 gj2026-* 리소스 일괄 삭제 (best-effort)
-rm -f terraform.tfstate*      # 깨진 로컬 state 초기화
+```powershell
+powershell -ExecutionPolicy Bypass -File cleanup.ps1 <비번호>   # 4개 리전 gj2026-* 일괄 삭제
+Remove-Item terraform.tfstate*                                  # 깨진 state 초기화
 terraform init
 terraform apply -var pin=<비번호> -var alarm_email=<이메일주소>
 ```
-> CloudFront/Lambda@Edge는 삭제에 시간이 걸립니다(수분~수시간). 충돌나면 잠시 후 재실행.
+> CloudFront/Lambda@Edge는 삭제에 1~3시간 걸립니다. CDN(module1) 재생성이 `gj2026-cdn-request/response` 충돌나면:
+> `powershell -ExecutionPolicy Bypass -File delete-edge-lambdas.ps1` 를 가끔 실행해 "둘 다 정리됨" 뜬 뒤 apply.
 
 - `pin`: CDN S3 버킷 이름 `gj2026-cdn-bucket-<비번호>`에 사용 (필수)
 - `alarm_email`: Module 3 SNS 이메일 알림 주소 — **채점 3-8(SNS 이메일 알림 수신, 1.0점)** 용
@@ -70,7 +62,7 @@ terraform apply -var pin=<비번호> -var alarm_email=<이메일주소>
 - `keycloak_admin_password`: 기본값 `admin1234!` (선택)
 
 apply 한 번으로 자동 처리되는 것:
-- Module 1: Pillow 패키지 빌드(`build.sh` 자동 실행) → Lambda 배포 → **dog.png S3 자동 업로드**
+- Module 1: Pillow 패키지 빌드(`build.ps1` 자동 실행) → Lambda 배포 → **dog.png S3 자동 업로드**
 - Module 2: Kafka 자동 설치/토픽 생성 + app.py 배치 + Zeppelin Studio 생성(AWS CLI)
 - Module 3: FastAPI 배치 + CloudWatch Agent + EventBridge 복구 파이프라인
 - Module 4: Keycloak 기동 → OIDC Provider + IAM Role 자동 생성

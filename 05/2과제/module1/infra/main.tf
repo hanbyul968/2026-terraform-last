@@ -116,8 +116,8 @@ resource "null_resource" "pillow_build" {
     rotate_py = filemd5("${path.module}/lambda/rotate.py")
   }
   provisioner "local-exec" {
-    interpreter = ["bash", "-c"]
-    command     = "bash ${path.module}/build.sh"
+    interpreter = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]
+    command     = "${path.module}/build.ps1"
   }
 }
 

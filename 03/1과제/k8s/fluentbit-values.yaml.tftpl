@@ -1,0 +1,54 @@
+# aws-for-fluent-bit values  (과제 11)
+#   - DaemonSet 으로 모든 노드에서 app 로그 수집
+#   - /health 등 실제 API 요청이 아닌 로그 제외
+#   - JSON 로그를 method/path/status/duration 필드로 구조화
+serviceAccount:
+  create: false
+  name: ${sa_name}
+
+# 모든 노드(application 포함)에서 수집
+tolerations:
+  - operator: Exists
+
+cloudWatchLogs:
+  enabled: true
+  region: ${region}
+  logGroupName: ${log_group}
+  logStreamPrefix: "app-"
+  autoCreateGroup: false
+
+# 커스텀 파서: book 앱 로그( 'INFO {json}' )에서 JSON 추출 후 키 구조화
+extraParsers: |
+  [PARSER]
+      Name         book_json
+      Format       regex
+      Regex        ^[A-Z]+\s+(?<payload>\{.*\})$
+  [PARSER]
+      Name         book_fields
+      Format       json
+
+extraFilters: |
+  # 1) JSON 부분 추출
+  [FILTER]
+      Name         parser
+      Match        *
+      Key_Name     log
+      Parser       book_json
+      Reserve_Data On
+  # 2) JSON -> method/path/status/duration 필드
+  [FILTER]
+      Name         parser
+      Match        *
+      Key_Name     payload
+      Parser       book_fields
+      Reserve_Data On
+  # 3) 실제 API 요청 로그만 (path 가 있는 라인만 유지)
+  [FILTER]
+      Name         grep
+      Match        *
+      Regex        path \/.*
+  # 4) /health 헬스체크 로그 제외
+  [FILTER]
+      Name         grep
+      Match        *
+      Exclude      path /health

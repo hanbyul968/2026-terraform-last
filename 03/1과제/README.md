@@ -1,22 +1,168 @@
-# Terraform 사용법
+# WSC2026 제1과제 Terraform (인천기능경기대회 v2)
 
-## 실행
+문제지(`과제지_v2.pdf`) + 채점기준표(`채점기준표_v2.pdf`) 기준으로 작성.
+모든 리소스는 **ap-northeast-2(서울)**. CloudFront/WAF 만 us-east-1.
 
+---
+
+## 0. 디렉터리
+
+| 파일 | 내용 |
+|---|---|
+| `versions.tf` / `providers.tf` | provider 버전, aws(서울/us-east-1), kubernetes/helm |
+| `variables.tf` | **대회 중 바뀌는 값의 변수 모음** (region, az, 비번호, 버전, 도메인, grafana pw, kms admin) |
+| `locals.tf` | **이름/CIDR/서브넷 등 고정값 모음** (대부분의 이름 변경은 여기) |
+| `vpc.tf` | VPC, 4서브넷(hub/app), IGW, NAT×2, RTB×3 |
+| `kms.tf` | CMK 5종 (db/ecr/eks/bucket/function) — root·kms:* 금지 최소권한 |
+| `dynamodb.tf` | 테이블 + GSI + PITR + 삭제방지 + 리소스정책 |
+| `ecr.tf` | ECR(MUTABLE_WITH_EXCLUSION v1*) + 이미지 빌드/푸시 |
+| `eks.tf` | 클러스터(Fully Private) + addon(coredns 도메인 등) |
+| `eks_nodegroups.tf` | addon / workload 노드그룹 |
+| `iam_app.tf` | book-pod-role(PutItem), book-function-role(Query) |
+| `lambda.tf` | GET Lambda + Function URL + CMK env |
+| `s3.tf` | 정적 버킷(SSE-KMS) + OAC 정책 |
+| `alb.tf` | ALB SG(CloudFront only) + 생성된 ALB 조회 |
+| `k8s_app.tf` | ns/configmap/deploy/svc/pdb/sa/ingress + LB Controller |
+| `waf.tf` | SQLi/XSS/RateLimit |
+| `cloudfront.tf` | CDN 3-origin(S3/ALB/Lambda) + /booking→/v1/book |
+| `logging.tf` | Fluent Bit → CloudWatch |
+| `monitoring.tf` + `k8s/kps-values.yaml.tftpl` | Prometheus/Alertmanager/Grafana |
+| `bastion.tf` | (선택) Private EKS 작업용 점프호스트 |
+| `files/` | book 바이너리, index.html, main.jpeg, Dockerfile, lambda, 정책 |
+
+---
+
+## 1. 적용 순서
+
+> EKS 가 **Fully Private** 라서, 채점 시점엔 `endpoint_public_access=false` 여야 한다(채점 4-1).
+> 하지만 로컬(Windows)에서 k8s/helm 을 apply 하려면 apply 동안엔 endpoint 가 열려 있어야 한다.
+
+**방법 A — 로컬에서 2단계 apply (권장 X, 간단)**
 ```bash
 terraform init
-terraform apply --auto-approve"
-비번호 입력
+# 1) 퍼블릭 켜고 전체 생성 (기본값 eks_public_access=true)
+terraform apply -auto-approve -var="bi_number=<비번호>" -var="bucket_rand=<영문4>"
+# 2) 채점 전 퍼블릭 끄기
+terraform apply -auto-approve -var="eks_public_access=false" -var="bi_number=<비번호>" -var="bucket_rand=<영문4>"
 ```
 
-## 생성 후 EC2에서
+**방법 B — Bastion 에서 apply (권장)**
+`bastion.tf` 로 점프호스트 생성 → SSH 접속 → 그 안에서 `terraform apply`.
+VPC 내부라 endpoint 가 private(false) 여도 k8s/helm 적용 가능 → 1번에 끝.
 
+> docker 빌드/푸시(`ecr.tf`)는 docker 데몬 + 인터넷이 필요하다. Bastion 에서 할 경우 docker 설치 필요.
+
+적용 후 확인:
 ```bash
-bash setup.sh
+terraform output cloudfront_domain   # 채점 진입점
 ```
 
-setup.sh가 자동으로:
-1. book 이미지 빌드 & ECR push
-2. grafana, fluent-bit, LBC 이미지 ECR push
-3. kubectl apply (namespace, book, TGB, network-policy)
-4. helm install (LBC, grafana)
-5. fluent-bit daemonset 배포
+---
+
+## 2. ⭐ 변경 매핑표 (값이 바뀌면 어디를 고치나)
+
+대회에서 과제가 최대 30% 수정될 수 있다. 아래 표대로 **해당 위치만** 고치면 된다.
+대부분은 `locals.tf` / `variables.tf` 한 곳에서 끝나도록 묶어두었다.
+
+### 2-1. 네트워크 (Reference01)
+
+| 바뀌는 값 | 고칠 파일 | 위치 |
+|---|---|---|
+| VPC CIDR (192.168.0.0/16) | `locals.tf` | `vpc_cidr` |
+| VPC 이름 (wsc2026-skills-vpc) | `vpc.tf` | `aws_vpc.this` 의 `tags.Name` |
+| 서브넷 CIDR/이름/AZ | `locals.tf` | `subnets` 맵의 각 항목 (`cidr`,`name`,`az`,`public`) |
+| 서브넷 개수 변경 | `vpc.tf` | `aws_subnet.*` + RTB association 추가/삭제 |
+| AZ (a/b → 다른 조합) | `variables.tf` | `azs` 기본값 |
+| IGW 이름 | `vpc.tf` | `aws_internet_gateway.this.tags.Name` |
+| NAT 이름 | `vpc.tf` | `aws_nat_gateway.a/b.tags.Name` |
+| RTB 이름 (hub-rtb / app-rtb-a/b) | `vpc.tf` | `aws_route_table.hub/app_a/app_b.tags.Name` |
+| hub(public)↔app(private) 매핑 | `vpc.tf` | RTB association + NAT subnet_id |
+
+### 2-2. 이름/리전 공통
+
+| 바뀌는 값 | 파일 | 위치 |
+|---|---|---|
+| 리전 | `variables.tf` | `region` |
+| EKS 클러스터 이름 | `locals.tf` | `cluster_name` |
+| EKS 버전 (1.35) | `variables.tf` | `cluster_version` |
+| 내부 도메인 (wsc2026.skills.local) | `variables.tf` | `cluster_dns_domain` (coredns 는 `eks.tf` 가 자동 반영) |
+| ECR 이름 | `locals.tf` | `ecr_repo` |
+| 이미지 태그 (v1.0.0) | `locals.tf` | `image_tag` |
+| DynamoDB 테이블 이름 | `locals.tf` | `table_name` |
+| 테이블 PK (client_id) | `dynamodb.tf` | `hash_key` + `attribute` |
+| GSI 키 (booking_id) | `dynamodb.tf` | `global_secondary_index` (+ `iam_app.tf`, `lambda.tf` 의 index 이름) |
+| S3 버킷 임의4자리/비번호 | `variables.tf` | `bucket_rand`, `bi_number` |
+
+### 2-3. CMK 이름 (alias)
+
+| 바뀌는 값 | 파일 | 위치 |
+|---|---|---|
+| db/ecr/eks/bucket/function CMK 이름 | `locals.tf` | `kms_db`,`kms_ecr`,`kms_eks`,`kms_bucket`,`kms_function` |
+| CMK 관리 주체(assumed-role 로 apply 시) | `variables.tf` | `kms_admin_arn` 에 **role ARN** 지정 |
+
+> ⚠️ CMK 정책엔 `root` 와 `kms:*` 가 들어가면 채점 FAIL(check_kms). 관리 권한은
+> `kms.tf` 의 `kms_admin_actions`(구체 액션 나열)로만 부여한다. 새 CMK 추가 시 동일 패턴 사용.
+
+### 2-4. Deployment / 앱 (과제 8)
+
+| 바뀌는 값 | 파일 | 위치 |
+|---|---|---|
+| Deployment/Service/Ingress/PDB/SA 이름 | `locals.tf` | `deploy_name` 등 |
+| 네임스페이스 (wsc2026) | `locals.tf` | `app_namespace` |
+| ConfigMap 이름 (book-config) | `k8s_app.tf` | `kubernetes_config_map_v1.book` (채점이 `book-config` 로 조회) |
+| replica 수 | `k8s_app.tf` | `kubernetes_deployment_v1.book` `replicas` |
+| CPU/Mem (256m/512Mi) | `k8s_app.tf` | `resources.requests/limits` |
+| Probe 경로/포트 (/health:8080) | `k8s_app.tf` | `*_probe.http_get` |
+| 노드 라벨 (wsc2026/node) | `eks_nodegroups.tf` `labels` + `k8s_app.tf` `node_selector` |
+| Pod Identity 역할 권한 | `iam_app.tf` | `aws_iam_policy.book_pod` (※ Action 에 `*` 절대 금지) |
+
+### 2-5. Lambda (과제 10)
+
+| 바뀌는 값 | 파일 | 위치 |
+|---|---|---|
+| 함수 이름/런타임(py3.12) | `lambda.tf` | `aws_lambda_function.book_get` |
+| 환경변수 | `lambda.tf` | `environment.variables` |
+| 응답 컬럼 순서/날짜포맷 | `files/lambda_function.py` | `out` dict / `_fmt_created_at` |
+| IAM role/policy 이름 | `locals.tf` | `func_role_name`,`func_policy` (※ Action 에 `*` 금지) |
+
+### 2-6. CloudFront / WAF / ALB
+
+| 바뀌는 값 | 파일 | 위치 |
+|---|---|---|
+| POST 경로 (/booking) | `cloudfront.tf` | `ordered_cache_behavior` path + `aws_cloudfront_function.rewrite_booking` |
+| GET 경로 (/v1/book) | `cloudfront.tf` | `ordered_cache_behavior` + `files/lambda_function.py` |
+| 캐시 정책(S3 on / ALB·Lambda off) | `cloudfront.tf` | 각 behavior 의 `cache_policy_id` |
+| WAF Rate 임계 (200/1분) | `waf.tf` | `rate_based_statement.limit` / `evaluation_window_sec` |
+| WAF 룰(SQLi/XSS) | `waf.tf` | `rule` 블록 |
+| ALB 이름/스킴/SG | `locals.tf`(`alb_name`,`alb_sg_name`) + `k8s_app.tf` ingress annotations |
+| CDN/WAF 이름 | `locals.tf` | `cdn_name`,`waf_name` |
+
+### 2-7. Observability (과제 11)
+
+| 바뀌는 값 | 파일 | 위치 |
+|---|---|---|
+| Grafana admin pw | `variables.tf` | `grafana_admin_password` |
+| 보존기간(7일) | `k8s/kps-values.yaml.tftpl` | `prometheus.prometheusSpec.retention` |
+| Alert 규칙(5종) | `k8s/kps-values.yaml.tftpl` | `additionalPrometheusRulesMap` |
+| Datasource(prometheus/alertmanager/cloudwatch) | `k8s/kps-values.yaml.tftpl` | `grafana.additionalDataSources` |
+| 대시보드 이름/패널 | `locals.tf`(`dashboard_name`) + `k8s/wsc-eks-dashboard.json` |
+| Fluent Bit 필터/파서 | `k8s/fluentbit-values.yaml.tftpl` | `extraFilters`/`extraParsers` |
+| 로그그룹 이름 | `logging.tf` | `aws_cloudwatch_log_group.app.name` |
+
+---
+
+## 3. 적용 후 직접 손봐야 할 가능성이 있는 부분 (검증 필수)
+
+테라폼 plan/apply 는 통과하지만, 라이브 환경에서 다음은 **채점 전 반드시 확인**:
+
+1. **Grafana 대시보드** (`k8s/wsc-eks-dashboard.json`) — 채점지 사진의 패널 구성/임계치 색상
+   (CPU 80%↑ 빨강, 60~80% 노랑, Pod restart≥1 경고)에 맞게 패널을 보강해야 할 수 있다.
+2. **Fluent Bit 파싱** — book 앱 실제 로그 형식에 맞춰 `extraParsers` 정규식 조정.
+   (`INFO {json}` 가정. 형식이 다르면 Regex 수정)
+3. **Alert 규칙 expr** — `HighErrorRate`/`HighLatency` 는 앱이 http 메트릭을 노출해야 발화.
+   메트릭 미노출 시 사진처럼 발화시키려면 expr 또는 메트릭 소스 조정.
+4. **EKS 채점자 접근** — 채점은 Cloudshell(`wsc2026-skills-app-sub-a`+mark-sg)에서 kubectl.
+   채점자 자격증명이 클러스터 access entry 에 없으면 `eks.tf` 에 access entry 추가 필요.
+5. **CloudFront ↔ ALB** — ALB SG 가 CloudFront origin-facing prefix list 만 허용(직접 접근 BLOCKED).
+   `/booking`→`/v1/book` rewrite 동작 확인.
+6. **이미지 취약점 0** — `files/Dockerfile` 은 scratch 기반. 스캔 COMPLETE/취약점 0 확인.

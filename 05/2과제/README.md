@@ -41,6 +41,24 @@ terraform apply -var pin=<비번호> -var alarm_email=<이메일주소>
 
 > 기본 VPC는 terraform이 자동 생성/채택(`aws_default_vpc`)하므로 별도 작업 불필요.
 
+### CDN Function URL 접근 모드 (`cdn_public_url`)
+
+채점 1-1은 `AuthType=NONE`(공개)을 기대하므로 **기본값 `true`(NONE)** 입니다.
+그런데 일부 계정(조직 RCP)은 **익명 공개 Lambda Function URL 호출을 차단**해 CDN이 403이 납니다.
+이때만 아래로 우회 (CloudFront가 SigV4 서명 → `AWS_IAM`):
+
+```powershell
+# 대회 기본(공개 허용 계정): 그냥 두면 NONE
+terraform apply -var pin=<비번호> -var alarm_email=<이메일>
+
+# 공개가 막힌 계정(403 발생 시): IAM+OAC로 우회
+terraform apply -var pin=<비번호> -var alarm_email=<이메일> -var cdn_public_url=false
+```
+
+판별법: apply 후 CloudFront `/images?image=dog&rotate=0`가 403/빈응답이면 `cdn_public_url=false`로 재apply.
+- `true`  → 1-1 AuthType이 `NONE` (공개 허용 계정에서 채점 정답)
+- `false` → CDN은 정상 동작하지만 1-1 AuthType은 `AWS_IAM`으로 표시(그 줄만 불일치)
+
 ### state가 유실됐거나 `AlreadyExists` 충돌이 날 때
 
 이미 만들어진 리소스가 남아 재apply가 충돌하면, 이름이 채점용 고정이라 **고아 리소스를 먼저 정리**:

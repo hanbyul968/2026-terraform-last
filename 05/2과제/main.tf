@@ -63,10 +63,17 @@ variable "keycloak_admin_password" {
   default     = "admin1234!"
 }
 
+variable "cdn_public_url" {
+  description = "CDN Lambda Function URL: true=공개(NONE, 대회 기본), false=AWS_IAM+OAC(공개 차단 계정 우회)"
+  type        = bool
+  default     = true
+}
+
 # ─── Module 1: CDN (us-east-1) ───
 module "cdn" {
-  source = "./module1/infra"
-  pin    = var.pin
+  source         = "./module1/infra"
+  pin            = var.pin
+  cdn_public_url = var.cdn_public_url
   providers = {
     aws     = aws.useast1
     archive = archive

@@ -150,16 +150,37 @@ resource "aws_lambda_function" "rotate" {
 
 resource "aws_lambda_function_url" "rotate" {
   function_name      = aws_lambda_function.rotate.function_name
-  authorization_type = "NONE"
+  authorization_type = var.cdn_public_url ? "NONE" : "AWS_IAM"
 }
 
-# Function URL 퍼블릭 호출 허용 (NONE auth라도 권한 명시 필요, 없으면 403)
-resource "aws_lambda_permission" "rotate_url" {
+# [공개 모드] 익명 퍼블릭 호출 허용 (NONE auth라도 권한 명시 필요)
+resource "aws_lambda_permission" "rotate_url_public" {
+  count                  = var.cdn_public_url ? 1 : 0
   statement_id           = "AllowPublicFunctionUrl"
   action                 = "lambda:InvokeFunctionUrl"
   function_name          = aws_lambda_function.rotate.function_name
   principal              = "*"
   function_url_auth_type = "NONE"
+}
+
+# [IAM 모드] CloudFront가 SigV4 서명으로 호출하도록 허용 (공개 차단 계정 우회)
+resource "aws_lambda_permission" "rotate_url_cf" {
+  count                  = var.cdn_public_url ? 0 : 1
+  statement_id           = "AllowCloudFrontInvoke"
+  action                 = "lambda:InvokeFunctionUrl"
+  function_name          = aws_lambda_function.rotate.function_name
+  principal              = "cloudfront.amazonaws.com"
+  function_url_auth_type = "AWS_IAM"
+  source_arn             = aws_cloudfront_distribution.cdn.arn
+}
+
+# [IAM 모드] CloudFront → Lambda Function URL 서명용 OAC
+resource "aws_cloudfront_origin_access_control" "lambda" {
+  count                             = var.cdn_public_url ? 0 : 1
+  name                              = "gj2026-cdn-lambda-oac"
+  origin_access_control_origin_type = "lambda"
+  signing_behavior                  = "always"
+  signing_protocol                  = "sigv4"
 }
 
 # ─────────────────────────────────────────────
@@ -247,6 +268,8 @@ resource "aws_cloudfront_distribution" "cdn" {
   origin {
     domain_name = local.rotate_domain
     origin_id   = "lambda-rotate"
+    # IAM 모드일 때만 OAC로 SigV4 서명, 공개 모드면 null
+    origin_access_control_id = var.cdn_public_url ? null : aws_cloudfront_origin_access_control.lambda[0].id
 
     custom_origin_config {
       http_port              = 80

@@ -76,7 +76,7 @@ resource "aws_security_group" "bastion" {
   vpc_id      = data.aws_vpc.default.id
 
   egress {
-    description = "All outbound (SSM, ECR, docker pull 등)"
+    description = "All outbound (SSM, ECR, docker pull, etc)"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"

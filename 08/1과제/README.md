@@ -1,29 +1,115 @@
 # 1과제 테라폼 — 배포 가이드 & 대회 당일 수정 지침
 
-## 배포 방법
+## 배포 방법 (Windows 로컬 → Bastion EC2)
 
-### 0. Terraform 설치 (CloudShell 최초 1회)
+> **흐름**: Windows(PowerShell)에서 Bastion EC2를 먼저 만든다 → SSM으로 Bastion에 접속 →
+> Bastion(Linux) 안에서 main terraform apply + docker build/push 를 수행한다.
+>
+> Bastion은 별도 폴더(`bastion/`)·별도 state로 관리하므로, **채점 전에 Bastion만 destroy**하면
+> 채점 대상 리소스에는 영향이 없다. (채점 8-2: 불필요 리소스 감점 방지)
+
+### 흐름 요약
+
+```
+[Windows PowerShell]                        [Bastion EC2 (Amazon Linux)]
+ aws configure                               git clone / 지급파일 배치
+ cd bastion                                  cd 2026-terraform/08/1과제
+ terraform init / apply        ── SSM ──▶    terraform init / apply
+ (Bastion 생성)                              (main 인프라 생성 + docker push)
+ aws ssm start-session ──────────────────▶   동작 확인 (curl)
+        │
+        ▼ (채점 직전)
+ cd bastion; terraform destroy   ◀── Bastion만 제거, 채점 대상은 유지
+```
+
+---
+
+### 0. Windows 로컬 사전 준비 (PowerShell)
+
+```powershell
+# AWS CLI v2 + Session Manager 플러그인 설치 (winget)
+winget install -e --id Amazon.AWSCLI
+winget install -e --id Amazon.SessionManagerPlugin
+
+# 자격증명 설정 (대회 계정의 AccessKey)
+aws configure
+#   AWS Access Key ID     : ...
+#   AWS Secret Access Key : ...
+#   Default region name   : ap-northeast-2
+
+# Terraform 설치 (winget 또는 choco)
+winget install -e --id Hashicorp.Terraform
+
+# 코드 받기
+git clone https://github.com/hnmly/2026-terraform.git
+cd 2026-terraform\08\1과제
+```
+
+> Windows에는 **Docker가 필요 없다.** docker build/push는 Bastion에서 수행한다.
+
+---
+
+### 1. Bastion EC2 생성 (Windows PowerShell)
+
+```powershell
+cd bastion
+terraform init
+terraform apply -var="player_id=<비번호>" -auto-approve
+
+# 접속 명령 출력
+terraform output ssm_connect_command
+```
+
+> PowerShell에서 `-var` 값은 위처럼 `"player_id=값"` 전체를 큰따옴표로 감싼다.
+
+---
+
+### 2. Bastion 접속 (Windows PowerShell → SSM)
+
+```powershell
+# 위 output 명령을 그대로 실행 (예시)
+aws ssm start-session --target <i-xxxxxxxx> --region ap-northeast-2
+```
+
+> 접속 후 프롬프트가 `sh-5.2$` 로 바뀌면 Bastion 안이다. 이후 명령은 **Bastion(bash)** 에서 실행.
+> user_data 설치가 끝나야 terraform/docker가 준비된다(생성 후 1~2분). 확인: `terraform version && docker version`.
+
+---
+
+### 3. 지급 파일 배치 (Bastion 안)
 
 ```bash
-sudo dnf install -y yum-utils
-sudo yum-config-manager --add-repo https://rpm.releases.hashicorp.com/AmazonLinux/hashicorp.repo
-sudo dnf install -y terraform
-terraform version   # 설치 확인
+# 권한 적용 (docker 그룹)
+newgrp docker
+
+# 코드 받기
+git clone https://github.com/hnmly/2026-terraform.git
+cd 2026-terraform/08/1과제
+
+# 디렉토리 구조
+#   app/Dockerfile, app/book        ← 지급 바이너리
+#   static/index.html, static/main.jpeg ← 지급 파일
 ```
 
-### 1. 파일 배치
+**지급 파일(book, index.html, main.jpeg) 옮기는 법** — Windows 로컬에서 임시 S3로 업로드 후 Bastion에서 내려받기:
 
-```
-1과제/
-├── app/
-│   ├── Dockerfile   # 아래 예시 참고
-│   └── book         # 지급 바이너리
-└── static/
-    ├── index.html   # 지급 파일
-    └── main.jpeg    # 지급 파일
+```powershell
+# (Windows PowerShell) 임시 버킷 생성 후 업로드
+aws s3 mb s3://<비번호>-transfer --region ap-northeast-2
+aws s3 cp .\app\book   s3://<비번호>-transfer/book
+aws s3 cp .\static\index.html s3://<비번호>-transfer/index.html
+aws s3 cp .\static\main.jpeg  s3://<비번호>-transfer/main.jpeg
 ```
 
-**Dockerfile 예시**
+```bash
+# (Bastion) 내려받아 배치
+aws s3 cp s3://<비번호>-transfer/book        app/book
+aws s3 cp s3://<비번호>-transfer/index.html  static/index.html
+aws s3 cp s3://<비번호>-transfer/main.jpeg   static/main.jpeg
+chmod +x app/book
+```
+
+**Dockerfile 예시** (`app/Dockerfile`)
 ```dockerfile
 FROM --platform=linux/amd64 amazonlinux:2023
 COPY book /app/book
@@ -32,26 +118,21 @@ EXPOSE 8080
 CMD ["/app/book"]
 ```
 
-### 2. 코드 받기 & 이동
+---
 
-```bash
-git clone https://github.com/hnmly/2026-terraform.git
-cd 2026-terraform/08/1과제
-```
-
-### 3. 배포
+### 4. main 인프라 배포 (Bastion 안)
 
 ```bash
 terraform init
 terraform apply -var="player_id=<비번호>" -auto-approve
 ```
 
-> CloudFront 배포 완료까지 최대 3분 소요.
+> CloudFront 배포 완료까지 최대 3분 소요. Bastion은 인스턴스 프로파일(Admin)을 사용하므로 별도 자격증명 설정이 불필요하다.
 
-### 3-1. 409 에러 발생 시 (리소스 이미 존재)
+#### 4-1. 409 에러 발생 시 (리소스 이미 존재)
 
 이전 apply 후 state 없이 재시작하면 `EntityAlreadyExists` / `OriginAccessControlAlreadyExists` 에러가 납니다.  
-아래 순서로 import 후 다시 apply하세요.
+아래 순서로 import 후 다시 apply하세요. (Bastion bash에서 실행)
 
 ```bash
 PID=<비번호>   # 본인 비번호로 변경
@@ -87,7 +168,9 @@ terraform apply -var="player_id=${PID}" -auto-approve
 > | ALB SG | `aws ec2 describe-security-groups --filters Name=group-name,Values=${PID}-alb-sg --query SecurityGroups[0].GroupId --output text` | `aws_security_group.alb` |
 > | ECS SG | `aws ec2 describe-security-groups --filters Name=group-name,Values=${PID}-ecs-sg --query SecurityGroups[0].GroupId --output text` | `aws_security_group.ecs` |
 
-### 4. 동작 확인
+---
+
+### 5. 동작 확인 (Bastion 안)
 
 ```bash
 CF=$(terraform output -raw cloudfront_domain_name)
@@ -104,9 +187,38 @@ curl -s -X POST "https://$CF/v1/book" \
   -d '{"client_id":"C001","username":"Alice","email":"kim@example.com","concert_name":"Seoul2026"}'
 ```
 
-### 5. 정리
+---
+
+### 6. ★ 채점 직전: Bastion 제거 (8-2 감점 방지)
+
+채점 스크립트는 실행/중지 중인 EC2가 있으면 8-2를 FAIL 처리합니다.  
+**main 인프라는 그대로 두고 Bastion만** 제거합니다. (Windows PowerShell)
+
+```powershell
+cd bastion
+terraform destroy -var="player_id=<비번호>" -auto-approve
+
+# 임시 transfer 버킷도 제거
+aws s3 rb s3://<비번호>-transfer --force
+```
+
+> Bastion을 지워도 main의 ECS/ALB/CloudFront/DynamoDB는 독립적으로 계속 동작합니다.
+> 단, Bastion을 지운 뒤 main을 다시 apply해야 한다면 Windows에 terraform이 있으므로
+> Bastion을 다시 만들거나 CloudShell에서 진행하세요.
+
+---
+
+### 7. 전체 정리 (대회 종료 후)
 
 ```bash
+# (Bastion 또는 CloudShell) main 제거
+cd 2026-terraform/08/1과제
+terraform destroy -var="player_id=<비번호>" -auto-approve
+```
+
+```powershell
+# (Windows) Bastion 제거 — 6단계에서 이미 했다면 생략
+cd bastion
 terraform destroy -var="player_id=<비번호>" -auto-approve
 ```
 

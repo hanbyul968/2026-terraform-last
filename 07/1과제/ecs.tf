@@ -5,18 +5,6 @@ resource "aws_ecr_repository" "book" {
   tags                 = { Name = "skills-book-ecr" }
 }
 
-resource "null_resource" "docker_push" {
-  depends_on = [aws_ecr_repository.book]
-
-  provisioner "local-exec" {
-    command = <<-EOT
-      aws ecr get-login-password --region ap-northeast-2 | docker login --username AWS --password-stdin ${data.aws_caller_identity.current.account_id}.dkr.ecr.ap-northeast-2.amazonaws.com
-      docker build -t skills-book-app ${path.module}/app
-      docker tag skills-book-app:latest ${aws_ecr_repository.book.repository_url}:latest
-      docker push ${aws_ecr_repository.book.repository_url}:latest
-    EOT
-  }
-}
 
 resource "aws_ecs_cluster" "main" {
   name = "skills-book-cluster"
@@ -71,6 +59,6 @@ resource "aws_ecs_service" "book" {
     container_port   = 8080
   }
 
-  depends_on = [aws_lb_listener.http, null_resource.docker_push]
+  depends_on = [aws_lb_listener.http, aws_instance.bastion]
   tags       = { Name = "skills-book-service" }
 }

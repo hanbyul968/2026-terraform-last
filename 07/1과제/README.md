@@ -1,45 +1,58 @@
 # 2026 전국기능경기대회 07 - 1과제
 
-## 실행법
+## 실행법 (Windows PowerShell)
 
-### Step 1. Terraform 설치 (CloudShell)
+### Step 1. Terraform 설치
 
-```bash
-sudo dnf install -y yum-utils
-sudo yum-config-manager --add-repo https://rpm.releases.hashicorp.com/AmazonLinux/hashicorp.repo
-sudo dnf install -y terraform
+[terraform.io/downloads](https://developer.hashicorp.com/terraform/downloads) 에서 Windows AMD64 zip 다운로드 후 `terraform.exe`를 PATH에 추가.
+
+또는 winget:
+```powershell
+winget install HashiCorp.Terraform
 ```
 
-### Step 2. 리포 클론
+### Step 2. AWS 자격증명 설정
 
-```bash
+```powershell
+aws configure
+# AWS Access Key ID, Secret, region: ap-northeast-2, output: json
+```
+
+### Step 3. 리포 클론
+
+```powershell
 git clone https://github.com/hnmly/2026-terraform.git
 cd 2026-terraform/07/1과제
 ```
 
-### Step 3. 지급 바이너리 배치
+### Step 4. 지급 바이너리 배치
 
-CloudShell 상단 Actions → Upload file 로 `book` 업로드 후:
+지급받은 `book` 바이너리를 `app\book` 으로 복사:
 
-```bash
-cp ~/book app/book
-chmod +x app/book
+```powershell
+Copy-Item C:\path\to\book app\book
 ```
 
-### Step 4. 배포
+### Step 5. 배포
 
-```bash
+```powershell
 terraform init
 terraform apply -var="bibunho=비번호" -auto-approve
 ```
 
-> CloudFront 배포 반영까지 **3~5분** 소요. 기다렸다가 검증.
+**동작 흐름:**
+1. VPC / 서브넷 / IGW / NAT / DynamoDB Endpoint 생성
+2. Bastion EC2 자동 생성 → SSH로 docker 빌드/푸시 → ECR에 이미지 업로드
+3. ECS Fargate 서비스 기동 (bastion 완료 후)
+4. CloudFront 배포 반영까지 **3~5분** 소요
 
-### Step 4-1. IAM Role 충돌 시 (EntityAlreadyExists 에러)
+> `bastion-key.pem` 파일이 현재 디렉터리에 자동 생성됩니다 (SSH 접속 필요 시 사용).
+
+### Step 5-1. IAM Role 충돌 시 (EntityAlreadyExists 에러)
 
 이전 apply 잔재로 IAM Role이 남아 있을 때 발생. import 후 재apply:
 
-```bash
+```powershell
 terraform import aws_iam_role.ecs_execution skills-book-ecs-execution-role
 terraform import aws_iam_role.ecs_task skills-book-ecs-task-role
 terraform apply -var="bibunho=비번호" -auto-approve

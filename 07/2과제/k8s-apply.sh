@@ -7,18 +7,25 @@ ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 
 aws eks update-kubeconfig --region $REGION --name $CLUSTER
 
+# CoreDNS를 Fargate에서 실행하도록 패치 (EC2 nodeSelector annotation 제거)
+# 이게 빠지면 클러스터 DNS가 죽어 KEDA/Karpenter가 STS/SQS 주소를 못 풀어 전부 실패한다.
+kubectl patch deployment coredns -n kube-system --type=json \
+  -p='[{"op":"remove","path":"/spec/template/metadata/annotations/eks.amazonaws.com~1compute-type"}]' || true
+kubectl rollout restart deployment coredns -n kube-system || true
+kubectl rollout status deployment coredns -n kube-system --timeout=180s || true
+
 # Namespaces
 kubectl create namespace keda --dry-run=client -o yaml | kubectl apply -f -
 kubectl create namespace karpenter --dry-run=client -o yaml | kubectl apply -f -
 kubectl create namespace skills-sqs --dry-run=client -o yaml | kubectl apply -f -
 
-# Get role ARNs from terraform output (루트 단일 구성에서 실행)
-KEDA_ROLE=$(terraform output -raw keda_role_arn)
-KARPENTER_ROLE=$(terraform output -raw karpenter_role_arn)
-WORKER_ROLE=$(terraform output -raw worker_role_arn)
-NODE_ROLE=$(terraform output -raw node_role_arn)
-SQS_URL=$(terraform output -raw sqs_queue_url)
-NODE_PROFILE=$(terraform output -raw node_instance_profile)
+# 고정 리소스 이름으로 ARN/URL 조회 (terraform state 불필요 — bastion 등 어디서나 실행 가능)
+KEDA_ROLE=$(aws iam get-role --role-name skills-sqs-keda-role --query Role.Arn --output text)
+KARPENTER_ROLE=$(aws iam get-role --role-name skills-sqs-karpenter-role --query Role.Arn --output text)
+WORKER_ROLE=$(aws iam get-role --role-name skills-sqs-worker-role --query Role.Arn --output text)
+NODE_ROLE=$(aws iam get-role --role-name skills-sqs-node-role --query Role.Arn --output text)
+NODE_PROFILE=skills-sqs-node-profile
+SQS_URL=$(aws sqs get-queue-url --region $REGION --queue-name skills-sqs-queue --query QueueUrl --output text)
 
 # Install KEDA via Helm
 helm repo add kedacore https://kedacore.github.io/charts

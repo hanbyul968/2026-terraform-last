@@ -346,28 +346,142 @@ resource "aws_eks_access_policy_association" "m4_admin" {
   depends_on    = [aws_eks_access_entry.m4_admin]
 }
 
-# CoreDNS를 Fargate에서 실행하도록 패치 (EC2 nodeSelector annotation 제거)
-resource "null_resource" "coredns_fargate" {
-  depends_on = [
-    aws_eks_fargate_profile.m4_kube_system,
-    aws_eks_access_policy_association.m4_admin
-  ]
-  provisioner "local-exec" {
-    interpreter = ["/bin/bash", "-c"]
-    command     = <<-EOT
-      aws eks update-kubeconfig --region us-west-2 --name skills-sqs-cluster
-      kubectl patch deployment coredns -n kube-system --type=json -p='[{"op":"remove","path":"/spec/template/metadata/annotations/eks.amazonaws.com~1compute-type"}]' || true
-      kubectl rollout restart deployment coredns -n kube-system || true
-    EOT
+###############################################################################
+# Bastion EC2 — EKS K8s 레이어(kubectl/helm/docker) 실행 호스트
+# Windows에서 terraform apply만 하면, bastion이 CoreDNS 패치 + k8s-apply.sh를
+# 자동 수행한다. (CloudShell/로컬 도구 불필요)
+###############################################################################
+
+data "aws_ami" "al2023_oregon" {
+  provider    = aws.oregon
+  most_recent = true
+  owners      = ["amazon"]
+  filter {
+    name   = "name"
+    values = ["al2023-ami-2023*-x86_64"]
   }
+  filter {
+    name   = "state"
+    values = ["available"]
+  }
+}
+
+resource "aws_security_group" "m4_bastion" {
+  provider    = aws.oregon
+  vpc_id      = aws_vpc.m4.id
+  description = "skills-sqs bastion (SSM only, no inbound)"
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  tags = { Name = "skills-sqs-bastion-sg" }
+}
+
+resource "aws_iam_role" "m4_bastion" {
+  name = "skills-sqs-bastion-role"
+  assume_role_policy = jsonencode({
+    Version   = "2012-10-17"
+    Statement = [{ Action = "sts:AssumeRole", Effect = "Allow", Principal = { Service = "ec2.amazonaws.com" } }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "m4_bastion_ssm" {
+  role       = aws_iam_role.m4_bastion.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_role_policy_attachment" "m4_bastion_ecr" {
+  role       = aws_iam_role.m4_bastion.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryFullAccess"
+}
+
+resource "aws_iam_role_policy" "m4_bastion" {
+  name = "skills-sqs-bastion-extra"
+  role = aws_iam_role.m4_bastion.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      { Effect = "Allow", Action = ["eks:DescribeCluster", "eks:ListClusters"], Resource = "*" },
+      { Effect = "Allow", Action = ["ec2:DescribeSubnets", "ec2:CreateTags"], Resource = "*" },
+      { Effect = "Allow", Action = ["iam:GetRole", "iam:GetInstanceProfile"], Resource = "*" },
+      { Effect = "Allow", Action = ["sqs:GetQueueUrl", "sqs:GetQueueAttributes", "sqs:SendMessage"], Resource = aws_sqs_queue.m4.arn }
+    ]
+  })
+}
+
+resource "aws_iam_instance_profile" "m4_bastion" {
+  name = "skills-sqs-bastion-profile"
+  role = aws_iam_role.m4_bastion.name
+}
+
+# Bastion을 EKS cluster-admin으로 등록 (kubectl/helm 실행 권한)
+resource "aws_eks_access_entry" "m4_bastion" {
+  provider      = aws.oregon
+  cluster_name  = aws_eks_cluster.m4.name
+  principal_arn = aws_iam_role.m4_bastion.arn
+  type          = "STANDARD"
+}
+
+resource "aws_eks_access_policy_association" "m4_bastion" {
+  provider      = aws.oregon
+  cluster_name  = aws_eks_cluster.m4.name
+  principal_arn = aws_iam_role.m4_bastion.arn
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+  access_scope { type = "cluster" }
+  depends_on    = [aws_eks_access_entry.m4_bastion]
+}
+
+resource "aws_instance" "m4_bastion" {
+  provider                    = aws.oregon
+  ami                         = data.aws_ami.al2023_oregon.id
+  instance_type               = "t3.small"
+  subnet_id                   = aws_subnet.m4_public[0].id
+  associate_public_ip_address = true
+  vpc_security_group_ids      = [aws_security_group.m4_bastion.id]
+  iam_instance_profile        = aws_iam_instance_profile.m4_bastion.name
+
+  user_data = <<-USERDATA
+#!/bin/bash
+set -ex
+exec > /var/log/skills-bastion-bootstrap.log 2>&1
+REGION=us-west-2
+CLUSTER=skills-sqs-cluster
+
+dnf install -y docker git
+systemctl enable --now docker
+
+# kubectl (클러스터 버전에 맞춰)
+EKS_VER=$(aws eks describe-cluster --region $REGION --name $CLUSTER --query cluster.version --output text)
+curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/v$${EKS_VER}.0/bin/linux/amd64/kubectl"
+chmod +x /usr/local/bin/kubectl
+
+# helm
+curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+# 클러스터가 ACTIVE 될 때까지 대기
+until [ "$(aws eks describe-cluster --region $REGION --name $CLUSTER --query cluster.status --output text)" = "ACTIVE" ]; do sleep 15; done
+
+# repo clone 후 K8s 레이어 배포 (CoreDNS 패치 포함)
+cd /root
+git clone https://github.com/hnmly/2026-terraform.git
+cd 2026-terraform/07/2과제
+bash k8s-apply.sh
+echo "BASTION_BOOTSTRAP_DONE"
+USERDATA
+
+  tags       = { Name = "skills-sqs-bastion" }
+  depends_on = [
+    aws_eks_fargate_profile.m4_karpenter,
+    aws_eks_access_policy_association.m4_bastion,
+    aws_nat_gateway.m4
+  ]
 }
 
 # Outputs
 output "eks_cluster_name" { value = aws_eks_cluster.m4.name }
 output "eks_endpoint" { value = aws_eks_cluster.m4.endpoint }
 output "sqs_queue_url" { value = aws_sqs_queue.m4.url }
-output "keda_role_arn" { value = aws_iam_role.m4_keda.arn }
-output "karpenter_role_arn" { value = aws_iam_role.m4_karpenter.arn }
-output "worker_role_arn" { value = aws_iam_role.m4_worker.arn }
-output "node_role_arn" { value = aws_iam_role.m4_node.arn }
-output "node_instance_profile" { value = aws_iam_instance_profile.m4_node.name }
+output "bastion_instance_id" { value = aws_instance.m4_bastion.id }
+output "bastion_public_ip" { value = aws_instance.m4_bastion.public_ip }

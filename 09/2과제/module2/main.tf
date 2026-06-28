@@ -247,6 +247,113 @@ resource "aws_security_group" "cloudshell" {
   tags = { Name = "wsc2026-logging-cloudshell-sg" }
 }
 
+# ── Bastion EC2 (Windows 로컬 대신 VPC 내부에서 kubectl/helm 실행) ────────
+# private endpoint 클러스터라 VPC 밖(Windows 로컬)에선 kubectl 불가 → bastion에서 수행
+data "aws_ami" "al2023" {
+  most_recent = true
+  owners      = ["amazon"]
+  filter {
+    name   = "name"
+    values = ["al2023-ami-*-x86_64"]
+  }
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
+
+resource "aws_iam_role" "bastion" {
+  name = "wsc2026-logging-bastion-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
+      Principal = { AWS = "*" }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "bastion_admin" {
+  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
+  role       = aws_iam_role.bastion.name
+}
+
+resource "aws_iam_role_policy_attachment" "bastion_ssm" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+  role       = aws_iam_role.bastion.name
+}
+
+resource "aws_iam_instance_profile" "bastion" {
+  name = "wsc2026-logging-bastion-profile"
+  role = aws_iam_role.bastion.name
+}
+
+resource "aws_security_group" "bastion" {
+  name        = "wsc2026-logging-bastion-sg"
+  description = "Bastion - kubectl/helm host"
+  vpc_id      = aws_vpc.main.id
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  tags = { Name = "wsc2026-logging-bastion-sg" }
+}
+
+resource "aws_instance" "bastion" {
+  ami                         = data.aws_ami.al2023.id
+  instance_type               = "t3.small"
+  subnet_id                   = aws_subnet.public_a.id
+  vpc_security_group_ids      = [aws_security_group.bastion.id]
+  iam_instance_profile        = aws_iam_instance_profile.bastion.name
+  associate_public_ip_address = true
+
+  user_data = <<-EOF
+#!/bin/bash
+exec > /var/log/user-data.log 2>&1
+# kubectl
+curl -sLO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+# helm
+curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+# kubeconfig (ec2-user 용)
+sudo -u ec2-user aws eks update-kubeconfig --name wsc2026-logging-cluster --region ap-southeast-2
+echo done > /home/ec2-user/bastion_ready.txt
+EOF
+
+  tags = { Name = "wsc2026-logging-bastion" }
+}
+
+# bastion role → EKS cluster-admin (kubectl 권한)
+resource "aws_eks_access_entry" "bastion" {
+  cluster_name  = aws_eks_cluster.main.name
+  principal_arn = aws_iam_role.bastion.arn
+  type          = "STANDARD"
+}
+
+resource "aws_eks_access_policy_association" "bastion_admin" {
+  cluster_name  = aws_eks_cluster.main.name
+  principal_arn = aws_iam_role.bastion.arn
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+  access_scope {
+    type = "cluster"
+  }
+  depends_on = [aws_eks_access_entry.bastion]
+}
+
+# bastion → EKS API 443 (클러스터 SG가 VPC CIDR 443은 이미 허용하지만 명시)
+resource "aws_security_group_rule" "cluster_from_bastion" {
+  type                     = "ingress"
+  from_port                = 443
+  to_port                  = 443
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.bastion.id
+  security_group_id        = aws_eks_cluster.main.vpc_config[0].cluster_security_group_id
+  description              = "Allow bastion to EKS API"
+}
+
 # OIDC Provider
 resource "aws_iam_openid_connect_provider" "eks" {
   client_id_list  = ["sts.amazonaws.com"]
@@ -367,6 +474,14 @@ resource "aws_security_group_rule" "cluster_from_vpc" {
   cidr_blocks       = [aws_vpc.main.cidr_block]
   security_group_id = aws_eks_cluster.main.vpc_config[0].cluster_security_group_id
   description       = "Allow VPC internal to EKS API 443"
+}
+
+output "bastion_id" {
+  value = aws_instance.bastion.id
+}
+
+output "bastion_public_ip" {
+  value = aws_instance.bastion.public_ip
 }
 
 output "cluster_name" {

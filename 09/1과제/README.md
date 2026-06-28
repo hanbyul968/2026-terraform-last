@@ -2,9 +2,13 @@
 
 ## 실행 순서
 
-### 1. Terraform 실행 (로컬)
+> **로컬(PowerShell)** 과 **Bastion(bash)** 을 구분하여 표기합니다.
 
-```bash
+---
+
+### 1. Terraform 실행 — 로컬 PowerShell
+
+```powershell
 cd C:\Users\competitor\2026-terraform\09\1과제
 terraform init
 terraform apply -auto-approve
@@ -14,21 +18,23 @@ terraform apply -auto-approve
 
 ---
 
-### 2. Bastion 접속
+### 2. Bastion 접속 — 로컬 PowerShell
 
-```bash
+```powershell
 # Bastion 퍼블릭 IP 확인
-aws ec2 describe-instances --filters Name=tag:Name,Values=worldpay-bastion \
+$BASTION_IP = aws ec2 describe-instances `
+  --filters Name=tag:Name,Values=worldpay-bastion `
   --query "Reservations[0].Instances[0].PublicIpAddress" --output text
+echo $BASTION_IP
 
 # SSH 접속 (패스워드 인증)
-ssh ec2-user@<위에서 나온 IP>
+ssh ec2-user@$BASTION_IP
 # 패스워드: worldpay2026!
 ```
 
 ---
 
-### 3. setup.sh 실행 (Bastion 내부)
+### 3. setup.sh 실행 — Bastion bash
 
 ```bash
 BUCKET=$(aws s3 ls | grep worldpay-manifest | awk '{print $3}')
@@ -42,27 +48,26 @@ chmod +x setup.sh
 
 ---
 
-### 4. 완료 확인
+### 4. 완료 확인 — Bastion bash
 
 ```bash
 # CloudFront 도메인
 aws cloudfront list-distributions --query 'DistributionList.Items[0].DomainName' --output text
 
-# Grafana URL
+# Grafana URL (admin / worldpay2026!)
 echo "http://$(aws elbv2 describe-load-balancers --names grafana-alb \
   --query 'LoadBalancers[0].DNSName' --output text)"
-# admin / worldpay2026!
 
 # API 테스트
 CF=$(aws cloudfront list-distributions --query 'DistributionList.Items[0].DomainName' --output text)
-curl -X POST https://$CF/v1/book \
+curl -s -X POST https://$CF/v1/book \
   -H 'Content-Type: application/json' \
-  -d '{"client_id":"C001","username":"Alice","email":"a@a.com","concert_name":"Test"}'
+  -d '{"client_id":"C001","username":"Alice","email":"a@a.com","concert_name":"Test"}' | jq .
 ```
 
 ---
 
-### 5. 채점 스크립트 실행 (Bastion 내부)
+### 5. 채점 스크립트 실행 — Bastion bash
 
 ```bash
 aws configure set region ap-northeast-2
@@ -72,146 +77,177 @@ bash /home/ec2-user/mark.sh
 
 ---
 
-### manifest 파일만 수정했을 때 재적용 (Terraform 없이)
+### manifest 파일 수정 후 재적용
+
+**로컬 PowerShell** — S3 업로드
+
+```powershell
+cd C:\Users\competitor\2026-terraform\09\1과제
+terraform apply -auto-approve   # etag 변경 감지 → 변경된 파일만 S3 재업로드
+```
+
+**Bastion bash** — 내려받아서 재적용
 
 ```bash
-# 로컬에서 S3 업로드
-cd C:\Users\competitor\2026-terraform\09\1과제
-terraform apply -auto-approve   # etag 변경 감지해서 S3만 업로드됨
-
-# Bastion에서 재적용
-BUCKET=$(aws s3 ls | grep worldpay-manifest | awk '{print $3}')
 cd /tmp/worldpay
+BUCKET=$(aws s3 ls | grep worldpay-manifest | awk '{print $3}')
 aws s3 cp s3://$BUCKET/ . --recursive
 
-# 예: fluentbit만 재적용 (ACCOUNT_ID 치환 필수)
+# fluentbit 재적용
 ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
 sed -i "s|ACCOUNT_ID|$ACCOUNT|g" fluentbit.yaml
 kubectl apply -f fluentbit.yaml
 kubectl rollout restart daemonset worldpay-fluentbit -n logging
+kubectl rollout status daemonset/worldpay-fluentbit -n logging --timeout=120s
 
-# 예: deployment만 재적용
+# deployment 재적용
+sed -i "s|ACCOUNT_ID|$ACCOUNT|g" deployment.yaml
 kubectl apply -f deployment.yaml
 kubectl rollout restart deployment book-deploy -n worldpay
+kubectl rollout status deployment/book-deploy -n worldpay --timeout=120s
 ```
 
 ---
 
 ### Terraform Import (리소스가 이미 존재할 때)
 
-`terraform apply` 실행 시 리소스가 이미 존재한다는 오류가 나면 import로 state에 등록 후 재시도합니다.
+`terraform apply` 시 리소스가 이미 존재한다는 오류가 나면 import 후 재시도합니다.
+모든 명령은 **로컬 PowerShell** 에서 실행합니다.
 
-```bash
-# 공통 준비
-ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
-REGION=ap-northeast-2
+```powershell
+# 공통 변수
+$ACCOUNT = aws sts get-caller-identity --query Account --output text
 ```
 
 #### VPC
-```bash
-VPC_ID=$(aws ec2 describe-vpcs --filters Name=tag:Name,Values=worldpay-vpc --query "Vpcs[0].VpcId" --output text)
+```powershell
+$VPC_ID = aws ec2 describe-vpcs --filters Name=tag:Name,Values=worldpay-vpc `
+  --query "Vpcs[0].VpcId" --output text
 terraform import module.VPC.aws_vpc.this $VPC_ID
 ```
 
 #### Subnet
-```bash
+```powershell
 # public subnet a
-SID=$(aws ec2 describe-subnets --filters Name=tag:Name,Values=worldpay-public-subnet-a --query "Subnets[0].SubnetId" --output text)
+$SID = aws ec2 describe-subnets --filters Name=tag:Name,Values=worldpay-public-subnet-a `
+  --query "Subnets[0].SubnetId" --output text
 terraform import 'module.VPC.aws_subnet.public[0]' $SID
 
 # public subnet c
-SID=$(aws ec2 describe-subnets --filters Name=tag:Name,Values=worldpay-public-subnet-c --query "Subnets[0].SubnetId" --output text)
+$SID = aws ec2 describe-subnets --filters Name=tag:Name,Values=worldpay-public-subnet-c `
+  --query "Subnets[0].SubnetId" --output text
 terraform import 'module.VPC.aws_subnet.public[1]' $SID
 
 # isolated subnet a
-SID=$(aws ec2 describe-subnets --filters Name=tag:Name,Values=worldpay-isolated-subnet-a --query "Subnets[0].SubnetId" --output text)
+$SID = aws ec2 describe-subnets --filters Name=tag:Name,Values=worldpay-isolated-subnet-a `
+  --query "Subnets[0].SubnetId" --output text
 terraform import 'module.VPC.aws_subnet.isolated[0]' $SID
 
 # isolated subnet c
-SID=$(aws ec2 describe-subnets --filters Name=tag:Name,Values=worldpay-isolated-subnet-c --query "Subnets[0].SubnetId" --output text)
+$SID = aws ec2 describe-subnets --filters Name=tag:Name,Values=worldpay-isolated-subnet-c `
+  --query "Subnets[0].SubnetId" --output text
 terraform import 'module.VPC.aws_subnet.isolated[1]' $SID
 ```
 
 #### Internet Gateway
-```bash
-IGW_ID=$(aws ec2 describe-internet-gateways --filters Name=tag:Name,Values=worldpay-vpc-igw --query "InternetGateways[0].InternetGatewayId" --output text)
+```powershell
+$IGW_ID = aws ec2 describe-internet-gateways `
+  --filters Name=tag:Name,Values=worldpay-vpc-igw `
+  --query "InternetGateways[0].InternetGatewayId" --output text
 terraform import module.VPC.aws_internet_gateway.this $IGW_ID
 ```
 
 #### KMS
-```bash
-DB_KEY_ID=$(aws kms list-aliases --query "Aliases[?AliasName=='alias/worldpay-db-key'].TargetKeyId" --output text)
+```powershell
+$DB_KEY_ID = aws kms list-aliases `
+  --query "Aliases[?AliasName=='alias/worldpay-db-key'].TargetKeyId" --output text
 terraform import module.KMS.aws_kms_key.db $DB_KEY_ID
 terraform import module.KMS.aws_kms_alias.db alias/worldpay-db-key
 
-S3_KEY_ID=$(aws kms list-aliases --query "Aliases[?AliasName=='alias/worldpay-s3-key'].TargetKeyId" --output text)
+$S3_KEY_ID = aws kms list-aliases `
+  --query "Aliases[?AliasName=='alias/worldpay-s3-key'].TargetKeyId" --output text
 terraform import module.KMS.aws_kms_key.s3 $S3_KEY_ID
 terraform import module.KMS.aws_kms_alias.s3 alias/worldpay-s3-key
 ```
 
 #### DynamoDB
-```bash
+```powershell
 terraform import module.DynamoDB.aws_dynamodb_table.this Concerts
 terraform import module.DynamoDB.aws_dynamodb_contributor_insights.this Concerts
 ```
 
 #### S3 (호스팅 버킷)
-```bash
-terraform import module.S3.aws_s3_bucket.this worldpay-bucket-$ACCOUNT
+```powershell
+terraform import module.S3.aws_s3_bucket.this "worldpay-bucket-$ACCOUNT"
 ```
 
 #### ECR
-```bash
+```powershell
 terraform import module.ECR.aws_ecr_repository.this worldpay-book
 ```
 
 #### Bastion
-```bash
+```powershell
 # EIP
-ALLOC_ID=$(aws ec2 describe-addresses --filters Name=tag:Name,Values=worldpay-bastion-eip --query "Addresses[0].AllocationId" --output text)
+$ALLOC_ID = aws ec2 describe-addresses `
+  --filters Name=tag:Name,Values=worldpay-bastion-eip `
+  --query "Addresses[0].AllocationId" --output text
 terraform import aws_eip.bastion $ALLOC_ID
 
 # IAM Role
 terraform import aws_iam_role.bastion worldpay-bastion-role
 
 # Instance
-INSTANCE_ID=$(aws ec2 describe-instances --filters Name=tag:Name,Values=worldpay-bastion --query "Reservations[0].Instances[0].InstanceId" --output text)
+$INSTANCE_ID = aws ec2 describe-instances `
+  --filters Name=tag:Name,Values=worldpay-bastion `
+  --query "Reservations[0].Instances[0].InstanceId" --output text
 terraform import aws_instance.bastion $INSTANCE_ID
 ```
 
 #### ALB
-```bash
-BOOK_ALB_ARN=$(aws elbv2 describe-load-balancers --names book-alb --query "LoadBalancers[0].LoadBalancerArn" --output text)
+```powershell
+$BOOK_ALB_ARN = aws elbv2 describe-load-balancers --names book-alb `
+  --query "LoadBalancers[0].LoadBalancerArn" --output text
 terraform import aws_lb.book $BOOK_ALB_ARN
 
-BOOK_TG_ARN=$(aws elbv2 describe-target-groups --names book-tg --query "TargetGroups[0].TargetGroupArn" --output text)
+$BOOK_TG_ARN = aws elbv2 describe-target-groups --names book-tg `
+  --query "TargetGroups[0].TargetGroupArn" --output text
 terraform import aws_lb_target_group.book $BOOK_TG_ARN
 
-GRAFANA_ALB_ARN=$(aws elbv2 describe-load-balancers --names grafana-alb --query "LoadBalancers[0].LoadBalancerArn" --output text)
+$GRAFANA_ALB_ARN = aws elbv2 describe-load-balancers --names grafana-alb `
+  --query "LoadBalancers[0].LoadBalancerArn" --output text
 terraform import aws_lb.grafana $GRAFANA_ALB_ARN
 
-GRAFANA_TG_ARN=$(aws elbv2 describe-target-groups --names grafana-tg --query "TargetGroups[0].TargetGroupArn" --output text)
+$GRAFANA_TG_ARN = aws elbv2 describe-target-groups --names grafana-tg `
+  --query "TargetGroups[0].TargetGroupArn" --output text
 terraform import aws_lb_target_group.grafana $GRAFANA_TG_ARN
 ```
 
 #### CloudWatch Log Group
-```bash
+```powershell
 terraform import aws_cloudwatch_log_group.app /worldpay/application
 ```
 
 #### CloudFront
-```bash
-DIST_ID=$(for i in $(aws cloudfront list-distributions --query 'DistributionList.Items[].Id' --output text); do
-  [ "$(aws cloudfront list-tags-for-resource \
-    --resource arn:aws:cloudfront::${ACCOUNT}:distribution/$i \
-    --query "Tags.Items[?Key=='Name'].Value|[0]" --output text)" = "worldpay-cdn" ] && echo $i && break
-done)
+```powershell
+$DIST_ID = aws cloudfront list-distributions `
+  --query "DistributionList.Items[?contains(Aliases.Items, 'worldpay-cdn') || Tags.Items[?Key=='Name'&&Value=='worldpay-cdn']].Id | [0]" `
+  --output text
+
+# 위 명령이 None이면 태그로 직접 검색
+foreach ($i in (aws cloudfront list-distributions --query 'DistributionList.Items[].Id' --output text).Split()) {
+  $tag = aws cloudfront list-tags-for-resource `
+    --resource "arn:aws:cloudfront::${ACCOUNT}:distribution/$i" `
+    --query "Tags.Items[?Key=='Name'].Value|[0]" --output text
+  if ($tag -eq "worldpay-cdn") { $DIST_ID = $i; break }
+}
 terraform import module.CloudFront.aws_cloudfront_distribution.this $DIST_ID
 ```
 
-#### Pod Identity IAM Role (Book)
-```bash
+#### Pod Identity IAM Role (Book / ALBC)
+```powershell
 terraform import aws_iam_role.book_app worldpay-book-app-role
+terraform import aws_iam_role.albc worldpay-albc-role
 ```
 
 ---

@@ -1,52 +1,71 @@
 # 2과제: Small Challenge (Terraform)
 
-**반드시 CloudShell에서 실행하세요.**
+**배포는 Bastion EC2(Linux)에서, 채점·검증은 CloudShell에서 합니다.**
 
-> 📍 **어디서 실행?** 모든 명령은 **AWS Console 우측 상단의 CloudShell 아이콘**(`>_`)을 눌러 연 터미널에서 칩니다.
-> 2번에서 `cd 2026-terraform/08/2과제` 로 이동한 뒤, **3~7번은 전부 이 `2과제` 디렉터리 안에서** 실행하세요.
-> (`bash files/...`, `terraform output` 이 상대경로·state를 참조하므로 디렉터리를 벗어나면 안 됩니다.)
-> 디렉터리 확인: `pwd` → `.../2026-terraform/08/2과제` 인지 확인.
+> 📍 **왜 Bastion?** 이 테라폼의 `null_resource.sfn_execute`가 `/bin/bash`에 의존하므로
+> 로컬 윈도우에서 직접 `apply` 하면 실패합니다. 그래서 **로컬 윈도우(PowerShell)** 에서 Bastion EC2를
+> 먼저 띄우고, **Bastion(Amazon Linux)** 에 접속해 4개 모듈을 배포합니다.
+> Bastion은 인스턴스 프로파일(권한)을 쓰므로 **IAM User AccessKey가 필요 없습니다.**
+>
+> **흐름:** 로컬 윈도우(PowerShell)에서 ①Bastion 생성 → ②Bastion 접속 → ③Bastion에서 배포 → CloudShell에서 채점/검증
 
 ---
 
-## 실행 순서
+## A. 로컬 윈도우(PowerShell)에서 — Bastion 생성
 
-### 1. Terraform 설치
+> 📍 내 PC의 **PowerShell**. AWS CLI가 설치·구성(`aws configure`)돼 있어야 합니다.
+> SSM 접속을 위해 [Session Manager 플러그인](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)도 설치하세요.
 
-```bash
-sudo dnf install -y yum-utils
-sudo yum-config-manager --add-repo https://rpm.releases.hashicorp.com/AmazonLinux/hashicorp.repo
-sudo dnf install -y terraform
+```powershell
+cd 2026-terraform\08\2과제\bastion
+terraform init
+terraform apply -auto-approve
 ```
 
-### 2. 코드 다운로드
+apply가 끝나면 접속 명령이 출력됩니다:
+
+```powershell
+terraform output -raw ssm_connect_command
+# 예) aws ssm start-session --target i-0abc... --region ap-northeast-2
+```
+
+## B. 로컬 윈도우(PowerShell)에서 — Bastion 접속
+
+> 📍 내 PC의 **PowerShell**. user_data로 git·terraform 설치가 끝날 때까지 부팅 후 1~2분 대기.
+
+```powershell
+aws ssm start-session --target <위에서 출력된 인스턴스 ID> --region ap-northeast-2
+```
+
+접속하면 프롬프트가 Bastion(`sh-5.2$`)으로 바뀝니다. 이후 **C~F는 모두 Bastion 안에서** 실행합니다.
+
+## C. Bastion에서 — 코드 다운로드 & 배포
+
+> 📍 **Bastion 쉘.** terraform/git은 부팅 시 자동 설치됨 (`terraform -version`으로 확인).
 
 ```bash
+sudo su -                     # 편의상 루트로 전환 (선택)
 git clone https://github.com/hnmly/2026-terraform.git
 cd 2026-terraform/08/2과제
-```
-
-### 3. 배포
-
-```bash
 terraform init
 terraform apply -var="team_id=<비번호>" -auto-approve
 ```
 
 > 소요 시간: Aurora Serverless v2 약 10분, CloudFront 약 3분
+> **이후 D~F는 전부 이 `2과제` 디렉터리 안에서** 실행하세요 (`bash files/...`, `terraform output`이 상대경로·state 참조).
 
-### 4. Module 1 - result.json 생성 (채점 필수)
+## D. Bastion에서 — Module 1 result.json 생성 (채점 필수)
 
-> 📍 CloudShell, `2과제` 디렉터리에서 실행 (apply 완료 후).
+> 📍 **Bastion 쉘**, `2과제` 디렉터리 (apply 완료 후).
 
 ```bash
 bash files/nosql/query.sh electronics
 cat ~/result.json
 ```
 
-### 5. Module 3 - Step Functions 실행 (채점 필수)
+## E. Bastion에서 — Module 3 Step Functions 실행 (채점 필수)
 
-> 📍 CloudShell, `2과제` 디렉터리. `<비번호>`는 본인 번호로 바꿔 입력.
+> 📍 **Bastion 쉘**, `2과제` 디렉터리. `<비번호>`는 본인 번호로.
 
 ```bash
 SFN_ARN=$(aws stepfunctions list-state-machines \
@@ -69,9 +88,9 @@ aws dynamodb scan \
 
 > Count >= 1 이면 정상
 
-### 6. 동작 확인
+## F. Bastion에서 — 동작 확인
 
-> 📍 CloudShell, `2과제` 디렉터리 (`terraform output` 사용 때문).
+> 📍 **Bastion 쉘**, `2과제` 디렉터리 (`terraform output` 사용 때문).
 
 ```bash
 # Module 2: X-Custom-Header 확인
@@ -87,17 +106,37 @@ aws lambda invoke \
 cat response.json
 ```
 
-### 7. 삭제
+## G. CloudShell에서 — 채점
+
+> 📍 **CloudShell** (AWS Console 우측 상단 `>_` 아이콘). 채점 규칙상 채점은 CloudShell에서 진행합니다.
+> 배포는 Bastion에서 끝났으므로, CloudShell에서는 채점 스크립트만 실행합니다.
 
 ```bash
+bash grade_module1_v2.sh
+bash grade_module2_v2.sh
+bash grade_module3_v2.sh
+bash grade_module4_v2.sh
+```
+
+## H. 정리 (채점 후)
+
+```bash
+# 1) Bastion 쉘, 2과제 디렉터리 — 4개 모듈 삭제
 terraform destroy -var="team_id=<비번호>" -auto-approve
+exit   # Bastion 세션 종료
+
+# 2) 로컬 윈도우(PowerShell), bastion 디렉터리 — Bastion EC2 삭제
+cd 2026-terraform\08\2과제\bastion
+terraform destroy -auto-approve
 ```
 
 ---
 
 ## 주의사항
 
-- **반드시 CloudShell(Linux)에서 실행하세요.** Windows에서 실행하면 `null_resource.sfn_execute`의 `/bin/bash`를 찾지 못해 실패합니다.
+- **로컬 윈도우에서 4개 모듈을 직접 `apply` 하지 마세요.** `null_resource.sfn_execute`의 `/bin/bash`를 못 찾아 실패합니다. 반드시 Bastion(Linux)에서 배포하세요.
+- **채점은 CloudShell에서** 진행합니다 (채점 규칙). 배포 위치(Bastion)와 채점 위치(CloudShell)가 다른 점에 유의하세요.
+- **Bastion은 배포용 임시 리소스**입니다. 4개 모듈 채점이 끝나면 H의 순서대로 Bastion까지 삭제하세요. (Bastion의 main terraform state는 Bastion 안에 있으므로, 모듈 destroy를 먼저 한 뒤 Bastion을 삭제)
 - **`insert.sh`를 따로 실행하지 마세요.** 이 테라폼이 `aws_dynamodb_table_item`으로 20건을 직접 삽입합니다. 같이 돌리면 `ConditionalCheckFailedException`(중복 삽입) 충돌이 납니다. apply 후에는 `query.sh`만 실행해 `result.json`을 만드세요.
 - apply가 중간에 실패한 뒤 재실행하면 state와 실제 AWS 리소스가 어긋나 `already exists`(409) 충돌이 날 수 있습니다. 아래 트러블슈팅 참고.
 
@@ -176,6 +215,17 @@ terraform apply -var="team_id=<비번호>" -auto-approve
 | 2 CDN | us-east-1 | S3 `cdn-static-<비번호>` + CloudFront + OAC + Function |
 | 3 Workflow | ap-southeast-1 | S3 + Lambda `workflow-transform` + DynamoDB `workflow-output` + Step Functions |
 | 4 RDS | ap-northeast-3 | Aurora MySQL Serverless v2 + Data API + Secret `rds/aurora/admin` + Lambda |
+
+> 위 4개 모듈 = 채점 대상. **Bastion**(`bastion/` 폴더)은 배포용 임시 EC2로 채점 대상이 아니며, 별도 state로 관리됩니다.
+
+### Bastion 설정 변경 (`bastion/main.tf`)
+
+| 변경 항목 | 수정 위치 | 현재 값 |
+|-----------|-----------|---------|
+| Bastion 리전 | `provider "aws"` → `region` | `"ap-northeast-2"` |
+| 인스턴스 타입 | `aws_instance.bastion` → `instance_type` | `"t3.small"` |
+| 접속 방식 | SSM Session Manager (키페어/22번 포트 없음) | — |
+| 권한 | `aws_iam_role_policy_attachment.admin` (AdministratorAccess) | — |
 
 ---
 

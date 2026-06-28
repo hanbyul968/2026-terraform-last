@@ -87,24 +87,27 @@ terraform init
 terraform apply -auto-approve
 ```
 
-> ⚠️ 이후 단계는 **CloudShell VPC 환경**(private-subnet-a + `wsc2026-logging-cloudshell-sg`)에서 실행.
-> private endpoint 클러스터라 일반 CloudShell/VPC 밖에선 kubectl 안 됨. (상세는 `module2/README.md` 0단계)
+> ⚠️ 이후 kubectl/helm 단계는 **bastion EC2**에서 실행. private endpoint 클러스터라 VPC 밖(Windows 로컬)에선 kubectl 불가.
+> terraform이 bastion에 kubectl·helm·kubeconfig를 user_data로 자동 설치함. (CloudShell 불필요, 상세는 `module2/README.md`)
 
-**2. helm 설치** (CloudShell엔 helm 없음 → `helm: command not found` 방지)
+**2. bastion 접속** — [로컬 PowerShell]
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-helm version   # 안 잡히면: export PATH=$PATH:/usr/local/bin:~/.local/bin
+```powershell
+$BID = (aws ec2 describe-instances --region ap-southeast-2 `
+  --filters "Name=tag:Name,Values=wsc2026-logging-bastion" "Name=instance-state-name,Values=running" `
+  --query "Reservations[0].Instances[0].InstanceId" --output text)
+aws ssm start-session --target $BID --region ap-southeast-2
+# 접속 후: sudo su - ec2-user ; cat bastion_ready.txt (done이면 준비완료)
 ```
 
-**3. kubeconfig 설정**
+**3. kubeconfig 확인** — [bastion]
 
 ```bash
 aws eks update-kubeconfig --name wsc2026-logging-cluster --region ap-southeast-2
 kubectl get nodes
 ```
 
-**4. ALB Controller 설치** (`region`/`vpcId` 필수 — 없으면 VPC ID 못 찾아 CrashLoop)
+**4. ALB Controller 설치** — [bastion] (`region`/`vpcId` 명시 권장 — VPC ID 자동조회 실패 시 CrashLoop 방지)
 
 ```bash
 ALB_ROLE=$(aws iam get-role --role-name wsc2026-logging-alb-controller-role \

@@ -37,43 +37,43 @@ terraform apply --auto-approve
 
 ## apply 후 할 일
 
-### 0. CloudShell VPC 환경 접속 (★ 가장 중요)
+> 실행 위치 구분:
+> - **[로컬]** = Windows PowerShell (terraform apply, AWS CLI 조회, SSM 접속)
+> - **[bastion]** = bastion EC2 안 (kubectl / helm). private endpoint 클러스터라 VPC 내부에서만 kubectl 가능.
+>   terraform이 만든 bastion에 kubectl·helm·kubeconfig가 user_data로 자동 설치됨. (CloudShell 불필요)
 
-클러스터는 **private endpoint**라, VPC 밖(일반 CloudShell)에서는 kubectl이 안 된다.
-반드시 **CloudShell VPC 환경**을 아래 설정으로 띄운다:
+### 0. bastion 접속 (★ kubectl/helm은 전부 여기서) — [로컬]
 
-- **VPC**: `wsc2026-logging-vpc`
-- **Subnet**: `wsc2026-logging-private-subnet-a`  ← **private 서브넷만! (NAT 연결됨)**
-- **Security group**: `wsc2026-logging-cloudshell-sg`
+```powershell
+# bastion 인스턴스 ID (terraform output 또는 태그로)
+terraform output -raw bastion_id
+# 또는
+aws ec2 describe-instances --region ap-southeast-2 `
+  --filters "Name=tag:Name,Values=wsc2026-logging-bastion" "Name=instance-state-name,Values=running" `
+  --query "Reservations[0].Instances[0].InstanceId" --output text
 
-> ❗ public 서브넷에 띄우면 CloudShell ENI에 공인 IP가 없어 **인터넷이 안 됨**
-> → `aws eks update-kubeconfig` 가 `Connect timeout on endpoint URL` 로 멈춤.
-> private-subnet-a 는 NAT 경유로 인터넷 OK + VPC 내부라 private 클러스터도 OK.
-
-접속 확인:
-```bash
-aws sts get-caller-identity   # 바로 응답하면 인터넷 OK (멈추면 잘못된 서브넷 → 환경 다시 생성)
+# Session Manager 접속
+aws ssm start-session --target <위 ID> --region ap-southeast-2
 ```
 
-> 클러스터 SG는 terraform에서 이미 열어둠: `443 from 10.0.0.0/16` + `cloudshell SG 전체 허용`.
-
-### 1. helm 설치 (CloudShell엔 helm 없음)
+접속 후 ec2-user 로 전환 + 준비 확인:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-helm version   # 안 잡히면: export PATH=$PATH:/usr/local/bin:~/.local/bin
+sudo su - ec2-user
+cat /home/ec2-user/bastion_ready.txt   # "done" 나오면 kubectl/helm 설치 완료
+helm version; kubectl version --client
 ```
 
-### 2. kubeconfig 설정
+### 1. kubeconfig 확인 — [bastion]
 ```bash
+# user_data가 자동 설정함. 안 됐으면 수동:
 aws eks update-kubeconfig --name wsc2026-logging-cluster --region ap-southeast-2
 kubectl get nodes   # 노드 Ready 확인
 ```
 
-### 3. ALB Controller 설치
+### 2. ALB Controller 설치 — [bastion]
 
 > ❗ 아래 4개 옵션은 **반드시 그대로**. 빠뜨리면 CrashLoop:
-> - `region` / `vpcId` 누락 → `failed to get VPC ID ... context deadline exceeded`
->   (CloudShell엔 인스턴스 메타데이터(IMDS)가 없어 VPC ID 자동 조회 불가)
+> - `region` / `vpcId` 누락 → `failed to get VPC ID ... context deadline exceeded` (명시하면 확실)
 > - `serviceAccount.create=true` + `serviceAccount.name` + role-arn 어노테이션 누락 → SA 없음 →
 >   `MountVolume.SetUp failed ... serviceaccounts "aws-load-balancer-controller" not found`
 >
@@ -107,7 +107,7 @@ kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-cont
 > helm uninstall aws-load-balancer-controller -n kube-system
 > ```
 
-### 4. k8s 리소스 배포
+### 3. k8s 리소스 배포 — [bastion]
 ```bash
 kubectl create namespace logging
 
@@ -131,7 +131,7 @@ kubectl run nginx --image=nginx -n logging
 kubectl expose pod nginx --port=80 -n logging
 ```
 
-### 5. Ingress 배포 (ALB 생성)
+### 4. Ingress 배포 (ALB 생성) — [bastion]
 ```bash
 kubectl apply -f - <<'EOF'
 apiVersion: networking.k8s.io/v1
@@ -172,7 +172,7 @@ spec:
 EOF
 ```
 
-### 6. ALB 생성 확인 (1~3분 소요)
+### 5. ALB 생성 확인 (1~3분 소요) — [bastion]
 ```bash
 # Ingress의 ADDRESS에 DNS가 뜨면 ALB 생성 완료
 kubectl get ingress -n logging
@@ -187,7 +187,7 @@ curl -s -o /dev/null -w "/(nginx): %{http_code}\n" http://$ALB_DNS/
 curl -s -o /dev/null -w "/logging(grafana): %{http_code}\n" http://$ALB_DNS/logging
 ```
 
-### 6.5 Grafana root_url을 ALB DNS로 재설정 (/logging 정상 동작용)
+### 5.5 Grafana root_url을 ALB DNS로 재설정 (/logging 정상 동작용) — [bastion]
 
 ALB DNS는 Ingress 생성 후에야 정해지므로, 그 값으로 grafana `root_url`을 채워준다:
 ```bash
@@ -210,11 +210,13 @@ curl -s -o /dev/null -w "/zzz(404): %{http_code}\n" http://$ALB_DNS/zzz
 > terraform이 만든 같은 이름 ALB가 남아있는 것. `module2`에서 `terraform apply`로 terraform ALB를
 > 제거(이제 코드에 ALB 없음)하면 컨트롤러가 자동으로 자기 ALB를 생성한다.
 
-## CloudShell VPC Environment (채점용)
+## kubectl/helm 실행 환경 = bastion EC2
 
-- VPC: wsc2026-logging-vpc
-- Subnet: wsc2026-logging-private-subnet-a
-- Security Group: wsc2026-logging-cloudshell-sg
+- 인스턴스: `wsc2026-logging-bastion` (public-subnet-a, t3.small)
+- terraform이 user_data로 kubectl·helm·kubeconfig 자동 설치
+- 접속: **[로컬 Windows]** `aws ssm start-session --target <bastion_id> --region ap-southeast-2`
+- IAM: admin + EKS cluster-admin access entry (kubectl 권한)
+- (CloudShell VPC 환경은 더 이상 필요 없음. 채점관이 CloudShell을 쓰려면 cloudshell SG도 그대로 남겨둠)
 
 ## Grafana 접속
 
@@ -234,3 +236,4 @@ PW: wsc2026-logging-admin-61
 | ALB          | wsc2026-logging-alb (internet-facing) |
 | Namespace    | logging                               |
 | Grafana PW   | wsc2026-logging-admin-61              |
+| Bastion      | wsc2026-logging-bastion (kubectl/helm 실행 호스트) |

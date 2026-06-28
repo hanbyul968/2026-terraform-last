@@ -1,139 +1,142 @@
-# 2과제: Small Challenges — 실행 가이드
+# 2과제: Small Challenges — 실행 가이드 (Windows + Bastion)
 
-> **모든 모듈(1~4)이 루트 단일 구성으로 통합되어 있습니다. `terraform apply` 한 번이면 4개 리전 인프라가 전부 생성됩니다.**
-> provider alias(seoul/tokyo/singapore/oregon)로 리전별 리소스를 한 state에서 관리합니다.
+> **terraform apply 한 번**이면 4개 리전 인프라 전부 + **us-west-2 bastion EC2**까지 생성됩니다.
+> bastion이 부팅하면서 **CoreDNS 패치 + KEDA/Karpenter/Worker 배포(k8s-apply.sh)를 자동 실행**합니다.
+> → Windows에서 terraform만 돌리면 끝. CloudShell·로컬 kubectl/helm/docker 불필요.
 
 ---
 
-## 0. 준비 (CloudShell)
+## 0. 준비 (Windows / PowerShell)
 
-```bash
-# Terraform 설치
-sudo dnf install -y yum-utils
-sudo yum-config-manager --add-repo https://rpm.releases.hashicorp.com/AmazonLinux/hashicorp.repo
-sudo dnf install -y terraform
+```powershell
+# Terraform & AWS CLI 설치 (한 번만)
+winget install Hashicorp.Terraform
+winget install Amazon.AWSCLI
 
-# 소스 클론
+# AWS 자격증명 설정 (대회 지급 계정)
+aws configure        # Access Key / Secret / region=us-west-2
+
+# 소스
 git clone https://github.com/hnmly/2026-terraform.git
-cd 2026-terraform/07/2과제
+cd 2026-terraform\07\2과제
 ```
 
 ---
 
-## 1. 단일 apply (모듈 1~4 인프라 전부)
+## 1. 단일 apply (인프라 전부 + bastion)
 
-```bash
+```powershell
 terraform init
 terraform apply -var="docdb_password=Skills2026!" -auto-approve
 ```
 
-⏱ EKS 클러스터 때문에 전체 ~20분 소요. 이 한 번으로:
+⏱ EKS + bastion 부트스트랩까지 전체 ~25분. 이 한 번으로:
 - 모듈1: DocumentDB + Client EC2(앱 자동 설치·seed·인덱스) — 서울
 - 모듈2: VPC Lattice + Client/Service EC2(앱 자동 기동) — 도쿄
 - 모듈3: SNS/Lambda/CloudTrail/EventBridge — 싱가포르
-- 모듈4: EKS/Fargate/SQS/IRSA + CoreDNS Fargate 패치 — 오레곤
+- 모듈4: EKS/Fargate/SQS/IRSA + **bastion EC2** — 오레곤
 
-> apply 중 모듈4의 `null_resource.coredns_fargate`가 CloudShell의 `kubectl`로 CoreDNS를 패치합니다. **apply 전에 아래 kubectl이 설치돼 있어야 이 단계가 동작합니다.** (없으면 apply 후 수동 patch 필요)
+**bastion이 자동으로 하는 일** (user_data → `k8s-apply.sh`):
+CoreDNS Fargate 패치 → KEDA/Karpenter Helm 설치 → Worker SA/Deployment → KEDA ScaledObject/TriggerAuth → Karpenter NodePool/EC2NodeClass → 서브넷 태깅 → ECR 이미지 빌드·푸시.
 
-```bash
-# (권장) apply 전에 kubectl 미리 설치
-EKS_VER=1.31   # 대략값. 클러스터 생성 후 정확값으로 맞춰도 됨
-curl -LO "https://dl.k8s.io/release/v${EKS_VER}.0/bin/linux/amd64/kubectl"
-chmod +x kubectl && sudo mv kubectl /usr/local/bin/
-```
+> terraform은 **인프라까지만** 책임지고(apply 완료), bastion의 K8s 배포는 **백그라운드로 몇 분 더** 걸립니다. 아래 2번으로 완료를 확인하세요.
 
 ---
 
-## 2. 모듈4 K8s 레이어 (apply 후 1회)
+## 2. bastion 진행상황 확인 (apply 후)
 
-EKS 위의 KEDA/Karpenter/Worker는 Helm·kubectl·Docker가 필요해 terraform 밖에서 실행합니다.
+bastion은 인바운드 없이 **SSM**으로만 접속합니다(키페어 불필요).
 
-```bash
-# kubectl (위에서 안 했다면)
-EKS_VER=$(aws eks describe-cluster --region us-west-2 --name skills-sqs-cluster --query 'cluster.version' --output text)
-curl -LO "https://dl.k8s.io/release/v${EKS_VER}.0/bin/linux/amd64/kubectl"
-chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+```powershell
+# bastion 인스턴스 ID
+$BASTION = terraform output -raw bastion_instance_id
 
-# Helm
-curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-
-# Docker 로그인 (Worker 이미지 빌드·푸시용)
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-aws ecr get-login-password --region us-west-2 | \
-  docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.us-west-2.amazonaws.com
-
-# K8s 리소스 배포 (반드시 2과제 루트에서 실행 — terraform output 참조)
-bash k8s-apply.sh
+# 부트스트랩 로그 실시간 확인 (SSM Session)
+aws ssm start-session --target $BASTION --region us-west-2
+#  (세션 안에서)
+sudo tail -f /var/log/skills-bastion-bootstrap.log
+#  마지막에 "BASTION_BOOTSTRAP_DONE" 나오면 완료
 ```
 
-`k8s-apply.sh`가 하는 일: namespace 생성 → KEDA/Karpenter Helm 설치 → Worker SA/Deployment → KEDA ScaledObject/TriggerAuthentication → Karpenter NodePool/EC2NodeClass → 서브넷 태깅 → ECR 이미지 빌드·푸시.
+완료되면 bastion 세션 안에서 바로 검증 가능:
+
+```bash
+# bastion 안에서 (kubectl/helm 이미 설치·인증됨)
+kubectl get pod -n keda
+kubectl get pod -n karpenter
+kubectl get deploy sqs-worker -n skills-sqs
+```
+
+> **재실행이 필요하면** bastion에서:
+> ```bash
+> cd /root/2026-terraform/07/2과제 && git pull && bash k8s-apply.sh
+> ```
 
 ---
 
-## 3. 확인
+## 3. 확인 (Windows / PowerShell)
 
-```bash
+```powershell
 # 모듈1
-IP=$(aws ec2 describe-instances --region ap-northeast-2 --filters Name=tag:Name,Values=skills-nosql-client-ec2 Name=instance-state-name,Values=running --query "Reservations[0].Instances[0].PublicIpAddress" --output text)
-curl http://$IP:8080/health && curl http://$IP:8080/v1/admin/summary
+$IP = aws ec2 describe-instances --region ap-northeast-2 --filters "Name=tag:Name,Values=skills-nosql-client-ec2" "Name=instance-state-name,Values=running" --query "Reservations[0].Instances[0].PublicIpAddress" --output text
+curl "http://${IP}:8080/health"; curl "http://${IP}:8080/v1/admin/summary"
 
 # 모듈2
-IP=$(aws ec2 describe-instances --region ap-northeast-1 --filters Name=tag:Name,Values=skills-lattice-client-ec2 Name=instance-state-name,Values=running --query "Reservations[0].Instances[0].PublicIpAddress" --output text)
-curl http://$IP/health && curl "http://$IP/v1/client/orders?id=1001"
+$IP = aws ec2 describe-instances --region ap-northeast-1 --filters "Name=tag:Name,Values=skills-lattice-client-ec2" "Name=instance-state-name,Values=running" --query "Reservations[0].Instances[0].PublicIpAddress" --output text
+curl "http://${IP}/health"; curl "http://${IP}/v1/client/orders?id=1001"
 
 # 모듈3 (Inbound 0개여야 함)
-aws ec2 describe-security-groups --region ap-southeast-1 --filters Name=tag:Name,Values=skills-ceh-protected-sg --query "SecurityGroups[].IpPermissions" --output json
+aws ec2 describe-security-groups --region ap-southeast-1 --filters "Name=tag:Name,Values=skills-ceh-protected-sg" --query "SecurityGroups[].IpPermissions" --output json
 
-# 모듈4
-aws eks update-kubeconfig --region us-west-2 --name skills-sqs-cluster
-kubectl get pod -n keda; kubectl get pod -n karpenter
+# 모듈4 — 스케일아웃 실증은 bastion 세션에서 (아래 bash 블록)
+```
 
-# 모듈4 스케일아웃 실증 (12개 발행 → Pod/EC2 노드 증가 → 큐 드레인)
-QUEUE_URL=$(terraform output -raw sqs_queue_url)
+```bash
+# 모듈4 스케일아웃 실증 — bastion SSM 세션 안에서 실행
+QUEUE_URL=$(aws sqs get-queue-url --region us-west-2 --queue-name skills-sqs-queue --query QueueUrl --output text)
 for i in $(seq 1 12); do aws sqs send-message --region us-west-2 --queue-url "$QUEUE_URL" --message-body "judge-$i"; done
 watch -n5 'kubectl get pods -n skills-sqs -l app=sqs-worker -o wide; kubectl get nodes -l karpenter.sh/nodepool=skills-sqs-nodepool'
 ```
 
 ---
 
-## 트러블슈팅 (실전에서 겪은 것들)
+## 트러블슈팅
 
-### ① kubectl `Bus error` / `curl: (23)` — CloudShell 홈(1GB) 꽉 참
-provider 캐시(`.terraform`, aws provider ~700MB)가 홈을 채우면 바이너리가 잘려 SIGBUS.
+대부분 bastion에서 자동 처리되지만, 직접 확인/재실행할 때 참고.
+
+### ① bastion이 K8s 배포를 끝냈는지 확인
+```powershell
+$BASTION = terraform output -raw bastion_instance_id
+aws ssm start-session --target $BASTION --region us-west-2
+```
 ```bash
-df -h ~
-rm -rf ~/2026-terraform/07/2과제/.terraform        # terraform output은 .terraform 없이도 동작
-curl -fsSL -o /tmp/kubectl "https://dl.k8s.io/release/v$(aws eks describe-cluster --region us-west-2 --name skills-sqs-cluster --query cluster.version --output text).0/bin/linux/amd64/kubectl"
-chmod +x /tmp/kubectl && sudo mv /tmp/kubectl /usr/local/bin/
-kubectl version --client
-# 재init 필요 시 캐시는 홈 밖으로: export TF_PLUGIN_CACHE_DIR=/tmp/tf-plugin-cache
+# bastion 안에서
+sudo tail -n 50 /var/log/skills-bastion-bootstrap.log   # "BASTION_BOOTSTRAP_DONE"?
+cd /root/2026-terraform/07/2과제 && bash k8s-apply.sh    # 재실행(멱등)
 ```
 
-### ② `kubectl`이 401 `the server has asked for the client to provide credentials` — EKS 접근권한 없음
-`module4.tf`가 **apply 실행 주체(=채점 주체)** 를 admin access entry로 자동 등록합니다. 그래도 안 되면(예: 클러스터를 다른 주체로 만들었을 때) 수동 등록:
-```bash
-PRINCIPAL=$(aws sts get-caller-identity --query Arn --output text)   # IAM User면 그대로, Assumed Role이면 role ARN으로
-aws eks create-access-entry --region us-west-2 --cluster-name skills-sqs-cluster --principal-arn "$PRINCIPAL" || true
-aws eks associate-access-policy --region us-west-2 --cluster-name skills-sqs-cluster \
-  --principal-arn "$PRINCIPAL" \
-  --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy --access-scope type=cluster
-aws eks update-kubeconfig --region us-west-2 --name skills-sqs-cluster
-```
-
-### ③ KEDA/Karpenter가 `STS/SQS lookup ... 53: connection refused` — CoreDNS가 Fargate에 안 떠서 DNS 죽음
-EKS-Fargate 고질 문제. CoreDNS Pod의 `eks.amazonaws.com/compute-type: ec2` 어노테이션을 제거해야 Fargate에 스케줄됩니다.
-`module4.tf`의 `null_resource.coredns_fargate`가 **apply 중 자동 패치**하지만, kubectl 미설치/권한 부족이면 건너뜁니다. 수동 패치:
+### ② CoreDNS가 Fargate에 안 떠서 DNS 죽음 (`STS/SQS lookup ... 53: connection refused`)
+EKS-Fargate 고질 문제. `k8s-apply.sh`가 **맨 앞에서 자동 패치**합니다(CoreDNS Pod의 `eks.amazonaws.com/compute-type: ec2` 어노테이션 제거). 수동으로 한다면 bastion에서:
 ```bash
 kubectl patch deployment coredns -n kube-system --type=json \
   -p='[{"op":"remove","path":"/spec/template/metadata/annotations/eks.amazonaws.com~1compute-type"}]'
 kubectl rollout restart deployment coredns -n kube-system
-kubectl rollout status deployment coredns -n kube-system
 kubectl get pods -n kube-system -l k8s-app=kube-dns -o wide   # Fargate에서 Running 확인
 ```
-> **그래서 apply 전에 kubectl을 미리 설치**해 두는 것을 강력 권장합니다(섹션 1). 그래야 자동 패치가 한 번에 성공해 이 문제를 안 겪습니다.
+
+### ③ `kubectl` 401 `the server has asked for the client to provide credentials`
+bastion role(`skills-sqs-bastion-role`)은 `module4.tf`에서 EKS admin access entry로 자동 등록됩니다. **Windows에서 직접** kubectl을 쓰고 싶으면 본인 주체도 등록:
+```powershell
+$PRINCIPAL = aws sts get-caller-identity --query Arn --output text
+aws eks create-access-entry --region us-west-2 --cluster-name skills-sqs-cluster --principal-arn $PRINCIPAL
+aws eks associate-access-policy --region us-west-2 --cluster-name skills-sqs-cluster `
+  --principal-arn $PRINCIPAL `
+  --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy --access-scope type=cluster
+```
+> `module4.tf`의 `aws_eks_access_entry.m4_admin`도 apply 실행 주체를 자동 등록하지만, Windows에 kubectl이 없으면 의미 없으니 보통 bastion으로 작업합니다.
 
 ### ④ Karpenter `1/2` (비리더 replica CrashLoop)
-`k8s-apply.sh`에서 `--set replicas=1`로 단일 리더 운영하게 해뒀습니다. 이미 떠 있으면:
+`k8s-apply.sh`에서 `--set replicas=1`로 단일 리더 운영. 이미 떠 있으면:
 ```bash
 kubectl scale deployment karpenter -n karpenter --replicas=1
 ```
@@ -149,9 +152,9 @@ kubectl scale deployment karpenter -n karpenter --replicas=1
 ├── module1.tf       # DocumentDB (ap-northeast-2)
 ├── module2.tf       # VPC Lattice (ap-northeast-1)
 ├── module3.tf       # EventBridge+Lambda (ap-southeast-1)
-├── module4.tf       # EKS+SQS (us-west-2) + CoreDNS 패치
+├── module4.tf       # EKS+SQS+IRSA (us-west-2) + Bastion EC2
 ├── app/             # 앱 소스 (제공 배포파일 그대로)
-├── k8s-apply.sh     # 모듈4 K8s 배포 (루트에서 실행)
+├── k8s-apply.sh     # 모듈4 K8s 배포 — bastion이 자동 실행(어디서든 실행 가능, terraform state 불필요)
 └── README.md
 ```
 
@@ -218,6 +221,8 @@ kubectl scale deployment karpenter -n karpenter --replicas=1
 | Private 서브넷 CIDR | `module4.tf` | `aws_subnet.m4_private` → `"10.4.${count.index + 10}.0/24"` | `10.4.10~11.0/24` |
 | SQS Visibility Timeout | `module4.tf` | `aws_sqs_queue.m4` → `visibility_timeout_seconds` | `60` |
 | Fargate Profile 이름 | `module4.tf` | `aws_eks_fargate_profile.m4_keda / m4_karpenter` → `fargate_profile_name` | `skills-sqs-fp-keda / -karpenter` |
+| Bastion 인스턴스 타입 | `module4.tf` | `aws_instance.m4_bastion` → `instance_type` | `t3.small` |
+| Bastion이 clone하는 repo | `module4.tf` | `aws_instance.m4_bastion` user_data의 `git clone` URL | `hnmly/2026-terraform` |
 | Karpenter 버전 | `k8s-apply.sh` | `helm ... karpenter ... --version` | `1.4.0` |
 | KEDA queueLength | `k8s-apply.sh` | ScaledObject → `queueLength` | `"2"` |
 | KEDA pollingInterval | `k8s-apply.sh` | ScaledObject → `pollingInterval` | `15` |
@@ -240,7 +245,7 @@ kubectl scale deployment karpenter -n karpenter --replicas=1
 
 추가로:
 - 모듈2 리전 변경 시 `module2.tf`의 `data.aws_ec2_managed_prefix_list.lattice` → `name = "com.amazonaws.<NEW_REGION>.vpc-lattice"`
-- 모듈4 리전 변경 시 `module4.tf`의 `aws_ec2_tag`·`null_resource.coredns_fargate`·서브넷 태그(`kubernetes.io/cluster/...`) 안의 `us-west-2`/클러스터명, `k8s-apply.sh` 상단 `REGION=`, 모듈1 user_data·confirm 명령들의 리전도 함께 확인
+- 모듈4 리전 변경 시 `module4.tf`의 `aws_ec2_tag`·서브넷 태그(`kubernetes.io/cluster/...`)·**bastion user_data 안의 `REGION=us-west-2`**, `k8s-apply.sh` 상단 `REGION=`, 모듈1 user_data의 리전도 함께 확인
 
 ### 비번호가 필요한 리소스 (Global Unique)
 

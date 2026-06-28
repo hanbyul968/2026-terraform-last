@@ -343,7 +343,7 @@ resource "aws_eks_access_policy_association" "m4_admin" {
   principal_arn = local.admin_principal_arn
   policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
   access_scope { type = "cluster" }
-  depends_on    = [aws_eks_access_entry.m4_admin]
+  depends_on = [aws_eks_access_entry.m4_admin]
 }
 
 ###############################################################################
@@ -430,7 +430,7 @@ resource "aws_eks_access_policy_association" "m4_bastion" {
   principal_arn = aws_iam_role.m4_bastion.arn
   policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
   access_scope { type = "cluster" }
-  depends_on    = [aws_eks_access_entry.m4_bastion]
+  depends_on = [aws_eks_access_entry.m4_bastion]
 }
 
 resource "aws_instance" "m4_bastion" {
@@ -471,7 +471,7 @@ bash k8s-apply.sh
 echo "BASTION_BOOTSTRAP_DONE"
 USERDATA
 
-  tags       = { Name = "skills-sqs-bastion" }
+  tags = { Name = "skills-sqs-bastion" }
   depends_on = [
     aws_eks_fargate_profile.m4_karpenter,
     aws_eks_access_policy_association.m4_bastion,

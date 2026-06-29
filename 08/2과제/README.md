@@ -51,6 +51,8 @@ terraform init
 terraform apply -var="team_id=<비번호>" -auto-approve
 ```
 
+> `team_id`(비번호)에는 **기본값이 없으므로 apply 시 반드시 입력**해야 합니다.
+> `-var="team_id=<비번호>"`로 전달하거나, 생략하면 terraform이 대화형으로 비번호를 물어봅니다.
 > 소요 시간: Aurora Serverless v2 약 10분, CloudFront 약 3분
 > **이후 D~F는 전부 이 `2과제` 디렉터리 안에서** 실행하세요 (`bash files/...`, `terraform output`이 상대경로·state 참조).
 

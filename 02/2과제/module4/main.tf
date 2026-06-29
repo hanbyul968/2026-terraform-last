@@ -13,8 +13,7 @@ provider "aws" {
 data "aws_caller_identity" "current" {}
 
 variable "bibunho" {
-  type    = string
-  default = "000"
+  type = string
 }
 
 # ── VPC msk-vpc 192.168.0.0/16 ───────────────────────────────────────

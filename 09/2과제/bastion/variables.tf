@@ -17,7 +17,6 @@ variable "instance_type" {
 }
 
 variable "competitor_number" {
-  description = "module3(MSK) S3 버킷 이름에 쓰이는 비번호. deploy.sh 가 module3 apply 시 -var 로 전달한다."
+  description = "module3(MSK) S3 버킷 이름에 쓰이는 비번호. deploy.sh 가 module3 apply 시 -var 로 전달한다. (기본값 없음 → bastion apply 시 입력)"
   type        = string
-  default     = "01"
 }

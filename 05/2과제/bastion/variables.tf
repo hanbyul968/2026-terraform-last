@@ -17,9 +17,8 @@ variable "instance_type" {
 }
 
 variable "pin" {
-  description = "2과제 비번호 - CDN S3 버킷 gj2026-cdn-bucket-<pin> 등에 사용. 미입력 시 player_id 사용."
+  description = "2과제 비번호 - CDN S3 버킷 gj2026-cdn-bucket-<pin> 등에 사용. apply 시 입력받음(필수). 빈 값 입력 시 player_id 사용."
   type        = string
-  default     = ""
 }
 
 variable "alarm_email" {

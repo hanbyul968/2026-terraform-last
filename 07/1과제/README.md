@@ -47,7 +47,8 @@ AWS 인프라. **2단계 구성**으로 동작한다.
 ```powershell
 cd 2026-terraform\07\1과제\bootstrap
 terraform init
-terraform apply -var="bibunho=비번호" -auto-approve
+# 비번호는 default가 없어 필수 입력값이다. apply 시 -var 로 전달한다.
+terraform apply -var="bibunho=<비번호>" -auto-approve
 ```
 
 완료되면 `bastion-key.pem` 이 생성되고, `ssh_command` / `next_steps` 가 출력된다.
@@ -77,7 +78,7 @@ ssh -i bastion-key.pem ec2-user@<BASTION_PUBLIC_IP>
 
 ```powershell
 cd 2026-terraform\07\1과제\bootstrap
-terraform destroy -var="bibunho=비번호" -auto-approve
+terraform destroy -var="bibunho=<비번호>" -auto-approve
 ```
 
 ---

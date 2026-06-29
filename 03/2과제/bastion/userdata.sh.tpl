@@ -59,12 +59,15 @@ cat > /opt/task2/deploy.sh <<'RUN'
 set -e
 BASE=/opt/task2
 PIN="$${1:-${pin}}"
+if [ -z "$${PIN:-}" ]; then
+  read -rp "비번호 입력: " PIN
+fi
 echo "[deploy] pin=$PIN"
 
 echo "================= APPLY module1 (CDN, us-east-1) ================="
 cd "$BASE/module1"
 terraform init -input=false
-terraform apply -auto-approve -var "pin=$PIN"
+terraform apply -auto-approve -var "bibunho=$PIN"
 
 echo "================= APPLY module2 (Keycloak, ap-northeast-2) ================="
 cd "$BASE/module2"

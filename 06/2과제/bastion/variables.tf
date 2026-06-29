@@ -17,7 +17,6 @@ variable "instance_type" {
 }
 
 variable "competitor_number" {
-  description = "선수등번호 (deploy.sh -> module4 Grafana 계정/비번 및 setup.sh 에 사용)"
+  description = "선수등번호 (deploy.sh -> module4 Grafana 계정/비번 및 setup.sh 에 사용). apply 시 입력 (default 제거됨)."
   type        = string
-  default     = "00"
 }

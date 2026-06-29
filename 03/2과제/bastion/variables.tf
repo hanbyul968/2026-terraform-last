@@ -5,9 +5,8 @@ variable "player_id" {
 }
 
 variable "pin" {
-  description = "선수 비번호 (module1 CDN S3 버킷명 wsc2026-cdn-asset-<비번호> 에 사용)"
+  description = "선수 비번호 (module1 CDN S3 버킷명 wsc2026-cdn-asset-<비번호> 에 사용). apply 시 입력받음(기본값 없음)."
   type        = string
-  default     = "00"
 }
 
 variable "region" {

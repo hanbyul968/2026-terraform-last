@@ -13,7 +13,6 @@ provider "aws" {
 variable "bibunho" {
   description = "선수 비번호 (S3 버킷 접미사)"
   type        = string
-  default     = "000"
 }
 
 # ── S3 (input/ processed/ error/) ───────────────────────────────────

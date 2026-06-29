@@ -18,12 +18,15 @@ exec > >(tee -a /var/log/task2-deploy.log) 2>&1
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# ---- 선수등번호 결정 (인자 > 환경변수 number > .competitor_number 파일 > 00) ----
+# ---- 선수등번호 결정 (인자 > 환경변수 number > .competitor_number 파일 > 프롬프트) ----
 COMPETITOR_NUMBER="${1:-${number:-}}"
 if [ -z "${COMPETITOR_NUMBER}" ] && [ -f "${ROOT}/.competitor_number" ]; then
   COMPETITOR_NUMBER="$(cat "${ROOT}/.competitor_number")"
 fi
-COMPETITOR_NUMBER="${COMPETITOR_NUMBER:-00}"
+# 하드코딩 default 제거: 값이 없으면 apply 시점에 입력받는다.
+if [ -z "${COMPETITOR_NUMBER:-}" ]; then
+  read -rp "비번호(competitor_number) 입력: " COMPETITOR_NUMBER
+fi
 
 echo "===== [Task2-06] deploy start (competitor_number=${COMPETITOR_NUMBER}) ====="
 

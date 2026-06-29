@@ -3,7 +3,7 @@
 #   module1 Workflow(ap-se-1) → module2 Analytics(ap-ne-2) → module3 Event(eu-west-1) → module4 MSK(ap-ne-1)
 set -euo pipefail
 ROOT=/opt/task2
-BIBUNHO="${BIBUNHO:-000}"
+if [ -z "${BIBUNHO:-}" ]; then read -rp "비번호(bibunho) 입력: " BIBUNHO; fi
 
 echo "===== module1: Student-score Workflow (ap-southeast-1) ====="
 cd "$ROOT/module1" && terraform init -input=false && terraform apply -auto-approve -var="bibunho=$BIBUNHO"

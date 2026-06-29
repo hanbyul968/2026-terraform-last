@@ -12,8 +12,7 @@ provider "aws" {
 }
 
 variable "bibunho" {
-  type    = string
-  default = "000"
+  type = string
 }
 
 # ── S3 (versioning, BPA, OAC-only) ───────────────────────────────────

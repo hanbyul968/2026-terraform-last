@@ -37,7 +37,8 @@ TYPE_SPECS = {
     "aws_iam_instance_profile":      {"id_kind": "Instance Profile 이름", "from_err": True},
     "aws_iam_role_policy":           {"id_kind": "role_name:policy_name 형식", "from_err": False,
                                       "needs": "인라인 정책 → <role이름>:<정책이름> 으로 입력"},
-    "aws_iam_role_policy_attachment":{"id_kind": "role_name/policy_arn 형식", "from_err": False},
+    "aws_iam_role_policy_attachment":{"id_kind": "role_name/policy_arn 형식", "from_err": False,
+                                      "needs": "<role이름>/<정책 ARN> 으로 입력 (정책 ARN: aws iam list-policies --query \"Policies[?PolicyName=='<name>'].Arn\" --output text)"},
     "aws_s3_bucket":                 {"id_kind": "버킷 이름", "from_err": True},
     "aws_s3_bucket_versioning":      {"id_kind": "버킷 이름", "from_err": True},
     "aws_s3_bucket_policy":          {"id_kind": "버킷 이름", "from_err": True},
@@ -48,20 +49,25 @@ TYPE_SPECS = {
     "aws_ecr_repository":            {"id_kind": "레포 이름", "from_err": True},
     "aws_lambda_function":           {"id_kind": "함수 이름", "from_err": True},
     "aws_cloudwatch_log_group":      {"id_kind": "로그 그룹 이름", "from_err": True},
-    "aws_sns_topic":                 {"id_kind": "Topic ARN", "from_err": False},
-    "aws_sqs_queue":                 {"id_kind": "Queue URL", "from_err": False},
+    "aws_sns_topic":                 {"id_kind": "Topic ARN", "from_err": False,
+                                      "needs": 'aws sns list-topics --query "Topics[?ends_with(TopicArn, \':<name>\')].TopicArn|[0]" --output text'},
+    "aws_sqs_queue":                 {"id_kind": "Queue URL", "from_err": False,
+                                      "needs": 'aws sqs get-queue-url --queue-name <name> --query QueueUrl --output text'},
     "aws_secretsmanager_secret":     {"id_kind": "Secret ARN 또는 이름", "from_err": True},
     "aws_kms_alias":                 {"id_kind": "alias/<이름>", "from_err": True},
     "aws_db_instance":               {"id_kind": "DB identifier", "from_err": True},
     "aws_eks_cluster":               {"id_kind": "클러스터 이름", "from_err": True},
-    "aws_eks_node_group":            {"id_kind": "cluster:nodegroup 형식", "from_err": False},
+    "aws_eks_node_group":            {"id_kind": "cluster:nodegroup 형식", "from_err": False,
+                                      "needs": '<클러스터이름>:<노드그룹이름> (조회: aws eks list-nodegroups --cluster-name <cluster> --query "nodegroups" --output text)'},
     "aws_ecs_cluster":               {"id_kind": "클러스터 이름 또는 ARN", "from_err": True},
-    "aws_route53_zone":              {"id_kind": "Hosted Zone ID", "from_err": False},
+    "aws_route53_zone":              {"id_kind": "Hosted Zone ID", "from_err": False,
+                                      "needs": 'aws route53 list-hosted-zones-by-name --dns-name <name> --query "HostedZones[0].Id" --output text'},
 
     # ID 기반 (에러에 ID 가 없으면 aws CLI 로 조회 필요)
     "aws_kms_key":                   {"id_kind": "Key ID", "from_err": False,
                                       "needs": 'aws kms describe-key --key-id alias/<alias> --query "KeyMetadata.KeyId" --output text'},
-    "aws_kms_replica_key":           {"id_kind": "Key ID", "from_err": False},
+    "aws_kms_replica_key":           {"id_kind": "Key ID", "from_err": False,
+                                      "needs": 'aws kms list-aliases --query "Aliases[?AliasName==\'alias/<alias>\'].TargetKeyId|[0]" --output text'},
     "aws_vpc":                       {"id_kind": "VPC ID (vpc-...)", "from_err": False,
                                       "needs": 'aws ec2 describe-vpcs --filters Name=tag:Name,Values=<name> --query "Vpcs[0].VpcId" --output text'},
     "aws_subnet":                    {"id_kind": "Subnet ID (subnet-...)", "from_err": False,
@@ -74,24 +80,32 @@ TYPE_SPECS = {
                                       "needs": 'aws ec2 describe-addresses --filters Name=tag:Name,Values=<name> --query "Addresses[0].AllocationId" --output text'},
     "aws_route_table":               {"id_kind": "Route Table ID (rtb-...)", "from_err": False,
                                       "needs": 'aws ec2 describe-route-tables --filters Name=tag:Name,Values=<name> --query "RouteTables[0].RouteTableId" --output text'},
-    "aws_route_table_association":   {"id_kind": "subnet_id/route_table_id 형식", "from_err": False},
+    "aws_route_table_association":   {"id_kind": "subnet_id/route_table_id 형식", "from_err": False,
+                                      "needs": '<subnet-id>/<rtb-id> 으로 입력 (subnet: aws ec2 describe-subnets ..., rtb: aws ec2 describe-route-tables ...)'},
     "aws_security_group":            {"id_kind": "SG ID (sg-...)", "from_err": False,
                                       "needs": 'aws ec2 describe-security-groups --filters Name=group-name,Values=<name> --query "SecurityGroups[0].GroupId" --output text'},
     "aws_security_group_rule":       {"id_kind": "sg-...연결된 복합 ID", "from_err": False,
                                       "needs": "보통 import 대신 apply 로 재생성 권장"},
     "aws_flow_log":                  {"id_kind": "Flow Log ID (fl-...)", "from_err": False,
                                       "needs": 'aws ec2 describe-flow-logs --filter Name=resource-id,Values=<vpc-id> --query "FlowLogs[0].FlowLogId" --output text'},
-    "aws_vpc_endpoint":              {"id_kind": "VPC Endpoint ID (vpce-...)", "from_err": False},
-    "aws_instance":                  {"id_kind": "Instance ID (i-...)", "from_err": False},
+    "aws_vpc_endpoint":              {"id_kind": "VPC Endpoint ID (vpce-...)", "from_err": False,
+                                      "needs": 'aws ec2 describe-vpc-endpoints --filters Name=tag:Name,Values=<name> --query "VpcEndpoints[0].VpcEndpointId" --output text'},
+    "aws_instance":                  {"id_kind": "Instance ID (i-...)", "from_err": False,
+                                      "needs": 'aws ec2 describe-instances --filters Name=tag:Name,Values=<name> --query "Reservations[0].Instances[0].InstanceId" --output text'},
     "aws_lb":                        {"id_kind": "LB ARN", "from_err": False,
                                       "needs": 'aws elbv2 describe-load-balancers --names <name> --query "LoadBalancers[0].LoadBalancerArn" --output text'},
     "aws_lb_target_group":           {"id_kind": "Target Group ARN", "from_err": False,
                                       "needs": 'aws elbv2 describe-target-groups --names <name> --query "TargetGroups[0].TargetGroupArn" --output text'},
-    "aws_lb_listener":               {"id_kind": "Listener ARN", "from_err": False},
-    "aws_lb_listener_rule":          {"id_kind": "Rule ARN", "from_err": False},
+    "aws_lb_listener":               {"id_kind": "Listener ARN", "from_err": False,
+                                      "needs": 'aws elbv2 describe-listeners --load-balancer-arn <lb-arn> --query "Listeners[0].ListenerArn" --output text'},
+    "aws_lb_listener_rule":          {"id_kind": "Rule ARN", "from_err": False,
+                                      "needs": 'aws elbv2 describe-rules --listener-arn <listener-arn> --query "Rules[0].RuleArn" --output text'},
     "aws_cloudfront_distribution":   {"id_kind": "Distribution ID", "from_err": False,
                                       "needs": 'aws cloudfront list-distributions --query "DistributionList.Items[?Comment==\'<comment>\'].Id|[0]" --output text'},
-    "aws_cloudfront_origin_access_control": {"id_kind": "OAC ID", "from_err": False},
+    "aws_cloudfront_origin_access_control": {"id_kind": "OAC ID", "from_err": False,
+                                      "needs": 'aws cloudfront list-origin-access-controls --query "OriginAccessControlList.Items[?Name==\'<name>\'].Id|[0]" --output text'},
+    "aws_cloudfront_function":       {"id_kind": "함수 이름", "from_err": True,
+                                      "needs": 'aws cloudfront list-functions --query "FunctionList.Items[?Name==\'<name>\'].Name|[0]" --output text'},
     "aws_wafv2_web_acl":             {"id_kind": "ID/Name/Scope 형식", "from_err": False,
                                       "needs": "<id>/<name>/<REGIONAL|CLOUDFRONT>"},
 }
@@ -149,10 +163,21 @@ def build(block, var_pairs=None):
     lines = []
     note = None
     if spec is None:
-        note = (f"'{rtype}' 타입의 import 규칙이 등록되어 있지 않습니다. "
-                f"`terraform import {addr} <ID>` 형식으로 직접 import 하세요. "
-                f"(ID 형식은 Terraform Registry의 해당 리소스 문서 'Import' 섹션 참고)")
-        lines.append(f"{tf} {addr} <리소스_ID>")
+        if rtype in ("null_resource", "terraform_data"):
+            # 실제 클라우드 자원이 아니라 import 대상이 아님
+            note = (f"'{rtype}' 는 실제 클라우드 리소스가 아니라 import 할 수 없습니다. "
+                    f"이미 state 에 있다면 그대로 두고, 재생성이 필요하면 아래처럼 replace 하세요.")
+            lines.append(f"terraform apply -replace='{addr}'")
+        else:
+            note = (f"'{rtype}' 타입의 import 규칙이 등록되어 있지 않습니다. "
+                    f"`terraform import {addr} <ID>` 형식으로 직접 import 하세요. "
+                    f"아래 명령으로 후보 ID 를 찾아본 뒤, 정확한 형식은 "
+                    f"Terraform Registry 해당 리소스 문서의 'Import' 섹션을 확인하세요.")
+            svc = rtype[4:] if rtype.startswith("aws_") else rtype
+            lines.append(f"# ID 후보 조회 (서비스에 맞게 수정):")
+            lines.append(f"# aws resourcegroupstaggingapi get-resources "
+                         f"--resource-type-filters {svc} --query \"ResourceTagMappingList[].ResourceARN\" --output text")
+            lines.append(f"{tf} {addr} <리소스_ID>")
         return {"addr": addr, "rtype": rtype, "commands": "\n".join(lines), "note": note}
 
     if spec.get("from_err") and name:

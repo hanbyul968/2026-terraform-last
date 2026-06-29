@@ -1,23 +1,37 @@
 # 2026 전국기능경기대회 클라우드컴퓨팅 1과제 - Terraform 단일 apply
 
-`wsc-*` 리소스를 문제지(과제지_v3) / 채점기준표(채점기준표_v2)에 맞춰 **단일 `terraform apply`** 로 구성한다.
-수동 작업 없음(eksctl/스크립트 별도 실행 불필요). Windows PowerShell 기준.
+`wsc-*` 리소스를 문제지(과제지_v3) / 채점기준표(채점기준표_v2)에 맞춰 구성한다.
+**배포는 2단계**: 로컬 PowerShell 에서 Bastion 을 띄우고, Bastion(Linux) 안에서 main 전체를 `terraform apply` 한다.
+(루트가 `/bin/bash` provisioner(ecr docker build·dynamodb backup·TargetGroupBinding)·kubernetes/helm provider 에 의존하므로 **로컬 직접 apply 는 불가**.)
 
 > 대회 당일에는 과제가 **최대 30% 변경**될 수 있다. 아래 **[§ 값 변경 시 수정 위치](#-값-변경-시-수정-위치-대회-30-변경-대비)** 표만 보고 빠르게 수정할 수 있도록 정리해 두었다.
 
 ---
 
 ## 사전 준비
-- AWS 자격증명 (ap-northeast-2, 관리자급 권한)
-- `terraform` >= 1.6, `aws` CLI v2, `kubectl`, `docker` 데몬 실행 중 (PATH 등록)
+- 로컬(Windows): `terraform`, `aws` CLI v2, **Session Manager Plugin** (`aws configure`, region ap-northeast-2). → docker/kubectl/helm 은 **bastion 에서 자동 설치되므로 로컬 불필요**
 - 배포파일은 `files/`(book, index.html, main.jpeg, Dockerfile, cf-function.js)에 포함됨
   - **book / index.html / main.jpeg 는 대회 배포파일 원본으로 교체되어 있음.** 새 배포파일을 받으면 `files/` 안의 동일 파일명으로 덮어쓰면 됨.
 
-## 실행
+## 실행 — 2단계 (로컬 → Bastion)
 ```powershell
-cd "01\1과제"
+# 1) 로컬 PowerShell — Bastion 생성
+cd C:\Users\competitor\2026-terraform\01\1과제\bastion
 terraform init
 terraform apply -auto-approve
+terraform output -raw ssm_connect_command   # → aws ssm start-session --target i-xxxx --region ap-northeast-2
+```
+```bash
+# 2) SSM 접속 후, Bastion 안에서 main 배포  (코드는 /opt/task1 에 내려옴 — 홈 디렉터리 아님!)
+until [ -f /opt/task1/READY ]; do echo waiting...; sleep 5; done
+cd /opt/task1
+bash run.sh 2>&1 | tee /tmp/apply.log        # terraform init + apply (EKS/노드그룹/helm ~20-30분)
+
+# /opt/task1 가 비어 있으면(번들 다운로드 지연/실패) 수동 복구:
+#   BUCKET=$(aws s3 ls | grep task1-bootstrap | awk '{print $3}')
+#   aws s3 cp s3://$BUCKET/task1-bundle.zip /tmp/t.zip --region ap-northeast-2
+#   sudo mkdir -p /opt/task1 && sudo chmod 777 /opt/task1 && unzip -o /tmp/t.zip -d /opt/task1
+#   cd /opt/task1 && bash run.sh
 ```
 - EKS/노드그룹/헬름까지 약 20~30분 소요.
 - apply 중에는 EKS endpoint 가 public+private 로 열려 있어야 k8s/helm 리소스를 적용할 수 있다.
@@ -31,8 +45,7 @@ terraform apply -auto-approve
    aws eks update-cluster-config --region ap-northeast-2 --name wsc-eks-cluster `
      --resources-vpc-config endpointPublicAccess=false,endpointPrivateAccess=true,publicAccessCidrs=[]
    ```
-2. 또는 `finalize.tf.disabled` → `finalize.tf` 로 이름을 바꾸고 `terraform apply` 재실행
-   (이 파일의 `null_resource.private_only` 가 위 명령을 자동 수행).
+2. **이미 `finalize.tf` 가 활성화되어 있어**, `run.sh`(=`terraform apply`)가 끝나면 `null_resource.private_only` 가 위 전환을 **자동 수행**한다(보통 별도 작업 불필요).
 
 > destroy 전에는 반대로 public 을 다시 켜야 k8s/helm 리소스를 정리할 수 있다(맨 아래 참고).
 
@@ -160,28 +173,18 @@ terraform destroy
 
 ---
 
-## 🚀 Apply — 2단계 (로컬 PowerShell → Bastion)
-
-이 과제는 **로컬에서 직접 apply 하지 않습니다** (루트 구성이 `/bin/bash` provisioner·docker build·kubectl 에 의존). 로컬에서는 **bastion 만** 띄우고, **bastion(Linux) 안에서 main 전체**를 apply 합니다.
+## 정리 (Destroy) & 비고
 
 ```powershell
-# 1) 로컬 Windows PowerShell — Bastion 생성
-cd C:\Users\competitor\2026-terraform\01\1과제\bastion
-terraform init
-terraform apply -auto-approve
-terraform output -raw ssm_connect_command   # 접속 명령 출력
+# (로컬) Bastion 제거
+cd C:\Users\competitor\2026-terraform\01\1과제\bastion ; terraform destroy -auto-approve
 ```
 ```bash
-# 2) SSM 접속 후 Bastion 에서 — main 배포 (docker build/push + EKS + helm)
-until [ -f /opt/task1/READY ]; do sleep 5; done
-bash /opt/task1/run.sh
-#  → 마지막 finalize 단계에서 EKS public endpoint 를 끄고 private-only 로 전환(채점 5-1)
-```
-```powershell
-# 3) 채점 후 — 로컬에서 Bastion 제거
-cd C:\Users\competitor\2026-terraform\01\1과제\bastion
-terraform destroy -auto-approve
+# (Bastion) main 정리 — private-only 상태면 destroy 전 public 재오픈
+aws eks update-cluster-config --region ap-northeast-2 --name wsc-eks-cluster \
+  --resources-vpc-config endpointPublicAccess=true,endpointPrivateAccess=true
+cd /opt/task1 && terraform destroy -auto-approve
 ```
 
-> ✅ 이 bastion 은 **자체 VPC(10.250.0.0/16)** 를 생성하므로 default VPC 가 없는 계정에서도 동작합니다.
-> ⚠️ main destroy(=`/opt/task1` 에서 `terraform destroy`) 전에는 EKS public 을 잠시 재오픈해야 k8s 리소스를 정리할 수 있습니다.
+> ✅ bastion 은 **자체 VPC(10.250.0.0/16)** 를 생성 → default VPC 없는 계정에서도 동작.
+> ✅ AMI 는 표준 AL2023(`al2023-ami-2023.*`)만 선택 — minimal AMI 는 SSM 에이전트가 없어 접속 불가하므로 제외함.

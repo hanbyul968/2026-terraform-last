@@ -142,10 +142,15 @@ def parse_blocks(error_text):
 
 
 def type_of(addr):
-    """리소스 주소에서 aws_xxx 타입을 추출."""
+    """리소스 주소에서 리소스 타입을 추출. (aws_ 외 null_resource 등도 지원)"""
     # module.X.Y.aws_type.name[idx] -> aws_type
     m = re.search(r'(aws_[a-z0-9_]+)\.', addr)
-    return m.group(1) if m else None
+    if m:
+        return m.group(1)
+    # aws_ 가 아닌 타입: module 프리픽스를 제거한 뒤 첫 토큰을 타입으로
+    s = re.sub(r'^(?:module\.[\w\-]+\.)+', '', addr)
+    m2 = re.match(r'([a-z][a-z0-9_]*)\.', s)
+    return m2.group(1) if m2 else None
 
 
 def build(block, var_pairs=None):
@@ -163,7 +168,11 @@ def build(block, var_pairs=None):
     lines = []
     note = None
     if spec is None:
-        if rtype in ("null_resource", "terraform_data"):
+        if rtype is None:
+            note = ("리소스 타입을 인식하지 못했습니다. "
+                    "`terraform import <리소스주소> <ID>` 형식으로 직접 import 하세요.")
+            lines.append(f"{tf} {addr} <리소스_ID>")
+        elif rtype in ("null_resource", "terraform_data"):
             # 실제 클라우드 자원이 아니라 import 대상이 아님
             note = (f"'{rtype}' 는 실제 클라우드 리소스가 아니라 import 할 수 없습니다. "
                     f"이미 state 에 있다면 그대로 두고, 재생성이 필요하면 아래처럼 replace 하세요.")

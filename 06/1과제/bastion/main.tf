@@ -15,15 +15,34 @@
 data "aws_caller_identity" "current" {}
 
 # ---- 기본 VPC / 서브넷 사용 (채점 대상 VPC와 무관) ----
-data "aws_vpc" "default" {
-  default = true
+# ---- Bastion 전용 VPC (이 계정엔 default VPC 가 없음) ----
+resource "aws_vpc" "bn" {
+  cidr_block           = "10.250.0.0/16"
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+  tags                 = { Name = "task-bastion-vpc" }
 }
-
-data "aws_subnets" "default" {
-  filter {
-    name   = "vpc-id"
-    values = [data.aws_vpc.default.id]
+resource "aws_internet_gateway" "bn" {
+  vpc_id = aws_vpc.bn.id
+  tags   = { Name = "task-bastion-igw" }
+}
+resource "aws_subnet" "bn" {
+  vpc_id                  = aws_vpc.bn.id
+  cidr_block              = "10.250.0.0/24"
+  map_public_ip_on_launch = true
+  tags                    = { Name = "task-bastion-subnet" }
+}
+resource "aws_route_table" "bn" {
+  vpc_id = aws_vpc.bn.id
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.bn.id
   }
+  tags = { Name = "task-bastion-rt" }
+}
+resource "aws_route_table_association" "bn" {
+  subnet_id      = aws_subnet.bn.id
+  route_table_id = aws_route_table.bn.id
 }
 
 # ---- 최신 Amazon Linux 2023 AMI ----
@@ -125,7 +144,7 @@ resource "aws_iam_instance_profile" "bastion" {
 resource "aws_security_group" "bastion" {
   name        = "${var.player_id}-task1-bastion-sg"
   description = "Bastion SG - no inbound, SSM via outbound 443 only"
-  vpc_id      = data.aws_vpc.default.id
+  vpc_id      = aws_vpc.bn.id
 
   egress {
     description = "All outbound (SSM, ECR, EKS API, helm charts)"
@@ -152,7 +171,7 @@ locals {
 resource "aws_instance" "bastion" {
   ami                    = data.aws_ami.al2023.id
   instance_type          = var.instance_type
-  subnet_id              = tolist(data.aws_subnets.default.ids)[0]
+  subnet_id              = aws_subnet.bn.id
   iam_instance_profile   = aws_iam_instance_profile.bastion.name
   vpc_security_group_ids = [aws_security_group.bastion.id]
 

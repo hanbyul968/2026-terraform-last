@@ -1,12 +1,35 @@
 # 2과제(02) 배포용 Bastion — 로컬 PowerShell 에서 apply → SSM → bash /opt/task2/deploy.sh
 data "aws_caller_identity" "current" {}
-data "aws_vpc" "default" { default = true }
-data "aws_subnets" "default" {
-  filter {
-    name   = "vpc-id"
-    values = [data.aws_vpc.default.id]
-  }
+# ---- Bastion 전용 VPC (이 계정엔 default VPC 가 없음) ----
+resource "aws_vpc" "bn" {
+  cidr_block           = "10.250.0.0/16"
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+  tags                 = { Name = "task-bastion-vpc" }
 }
+resource "aws_internet_gateway" "bn" {
+  vpc_id = aws_vpc.bn.id
+  tags   = { Name = "task-bastion-igw" }
+}
+resource "aws_subnet" "bn" {
+  vpc_id                  = aws_vpc.bn.id
+  cidr_block              = "10.250.0.0/24"
+  map_public_ip_on_launch = true
+  tags                    = { Name = "task-bastion-subnet" }
+}
+resource "aws_route_table" "bn" {
+  vpc_id = aws_vpc.bn.id
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.bn.id
+  }
+  tags = { Name = "task-bastion-rt" }
+}
+resource "aws_route_table_association" "bn" {
+  subnet_id      = aws_subnet.bn.id
+  route_table_id = aws_route_table.bn.id
+}
+
 data "aws_ami" "al2023" {
   most_recent = true
   owners      = ["amazon"]
@@ -78,7 +101,7 @@ resource "aws_iam_instance_profile" "bastion" {
 resource "aws_security_group" "bastion" {
   name        = "${var.player_id}-task2-02-bastion-sg"
   description = "egress only (SSM)"
-  vpc_id      = data.aws_vpc.default.id
+  vpc_id      = aws_vpc.bn.id
   egress {
     from_port   = 0
     to_port     = 0
@@ -97,7 +120,7 @@ locals {
 resource "aws_instance" "bastion" {
   ami                    = data.aws_ami.al2023.id
   instance_type          = var.instance_type
-  subnet_id              = tolist(data.aws_subnets.default.ids)[0]
+  subnet_id              = aws_subnet.bn.id
   iam_instance_profile   = aws_iam_instance_profile.bastion.name
   vpc_security_group_ids = [aws_security_group.bastion.id]
   user_data              = local.user_data

@@ -204,3 +204,18 @@ cd C:\Users\competitor\2026-terraform\03\1과제\bastion ; terraform destroy -au
 
 > ⚠️ 구 `bastion.tf` 는 `bastion.tf.OLD-in-main` 으로 비활성화됨(외부 bastion/ 스테이지로 대체).
 > ⚠️ **default VPC 없음**: `bastion/main.tf` 의 default VPC 참조를 전용 VPC 로 교체해야 apply 됩니다(01/1과제 bastion 참고).
+
+
+---
+
+## 🧹 Bastion 네트워크 & 삭제
+
+- **Bastion 네트워크**: 전용 VPC `10.250.0.0/16` + 퍼블릭 서브넷 `10.250.0.0/24` + IGW.
+  (이 대회 계정엔 **default VPC 가 없어** bastion 이 자체 VPC 를 생성한다. 접속은 SSM 아웃바운드 443만 사용.)
+- **AMI**: 표준 AL2023(`al2023-ami-2023.*`)만 선택 — minimal AMI 는 SSM 에이전트가 없어 제외.
+- **Bastion 삭제** (채점 대상과 분리된 별도 state → bastion 만 안전하게 제거):
+```powershell
+cd C:\Users\competitor\2026-terraform\03\1과제\bastion
+terraform destroy -auto-approve
+```
+> 채점 대상(main/모듈)은 bastion 안에서 별도로 destroy. EKS 가 private-only 인 과제는 destroy 전 public 재오픈 필요.

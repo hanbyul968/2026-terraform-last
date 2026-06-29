@@ -37,3 +37,18 @@ module1~4 + bastion `terraform validate` 통과. Lambda 런타임 python3.14 (aw
 - MSK 토픽 생성은 TF 밖(producer EC2 kafka CLI). 
 - Managed Flink Studio 는 CLI(null_resource)로 생성 — apply 머신(bastion)에 aws CLI 필요(설치됨).
 - module3 EventBridge eventName 매핑은 CloudTrail 관리이벤트 기반(타입변경=ModifyInstanceAttribute, Role변경=Associate/ReplaceIamInstanceProfile). 채점 스크립트의 정확한 eventName 과 대조 권장.
+
+
+---
+
+## 🧹 Bastion 네트워크 & 삭제
+
+- **Bastion 네트워크**: 전용 VPC `10.250.0.0/16` + 퍼블릭 서브넷 `10.250.0.0/24` + IGW.
+  (이 대회 계정엔 **default VPC 가 없어** bastion 이 자체 VPC 를 생성한다. 접속은 SSM 아웃바운드 443만 사용.)
+- **AMI**: 표준 AL2023(`al2023-ami-2023.*`)만 선택 — minimal AMI 는 SSM 에이전트가 없어 제외.
+- **Bastion 삭제** (채점 대상과 분리된 별도 state → bastion 만 안전하게 제거):
+```powershell
+cd C:\Users\competitor\2026-terraform\02\2과제\bastion
+terraform destroy -auto-approve
+```
+> 채점 대상(main/모듈)은 bastion 안에서 별도로 destroy. EKS 가 private-only 인 과제는 destroy 전 public 재오픈 필요.

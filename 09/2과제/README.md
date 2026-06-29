@@ -470,3 +470,18 @@ aws eks list-nodegroups --cluster-name wsi-eks
 > ⚠️ PowerShell에서는 작은따옴표 대신 큰따옴표 사용: `terraform import "aws_s3_bucket.data" "버킷이름"`
 > ⚠️ import는 state만 채운다. 속성이 코드와 다르면 다음 apply에서 그 차이만 수정된다(리소스 재생성 아님, 단 일부는 replace될 수 있으니 plan 먼저 확인).
 > ⚠️ 반대로 state엔 있는데 AWS엔 없어 꼬이면 `terraform state rm '<주소>'` 로 state에서 빼고 다시 apply.
+
+
+---
+
+## 🧹 Bastion 네트워크 & 삭제
+
+- **Bastion 네트워크**: 전용 VPC `10.250.0.0/16` + 퍼블릭 서브넷 `10.250.0.0/24` + IGW.
+  (이 대회 계정엔 **default VPC 가 없어** bastion 이 자체 VPC 를 생성한다. 접속은 SSM 아웃바운드 443만 사용.)
+- **AMI**: 표준 AL2023(`al2023-ami-2023.*`)만 선택 — minimal AMI 는 SSM 에이전트가 없어 제외.
+- **Bastion 삭제** (채점 대상과 분리된 별도 state → bastion 만 안전하게 제거):
+```powershell
+cd C:\Users\competitor\2026-terraform\09\2과제\bastion
+terraform destroy -auto-approve
+```
+> 채점 대상(main/모듈)은 bastion 안에서 별도로 destroy. EKS 가 private-only 인 과제는 destroy 전 public 재오픈 필요.

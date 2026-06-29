@@ -63,152 +63,51 @@ cat /home/ec2-user/bastion_ready.txt   # "done" 나오면 kubectl/helm 설치 �
 helm version; kubectl version --client
 ```
 
-### 1. kubeconfig 확인 — [bastion]
+### 1. 자동 구성(setup.sh) 완료 대기 — [bastion]
+
+bastion user_data가 **S3(`wsc2026-logging-setup-<계정ID>`)의 `setup.sh`를 받아 자동 실행**한다.
+setup.sh가 하는 일: ALB Controller 설치 → namespace → Loki/Grafana(서브패스)/Fluent Bit/nginx → Ingress(ALB 생성) → ALB DNS 확정 후 grafana `root_url` 재설정.
+
 ```bash
-# user_data가 자동 설정함. 안 됐으면 수동:
-aws eks update-kubeconfig --name wsc2026-logging-cluster --region ap-southeast-2
-kubectl get nodes   # 노드 Ready 확인
+# 완료 마커 (setup.sh 끝나면 생김)
+cat /root/setup_done.txt 2>/dev/null || sudo cat /root/setup_done.txt   # "setup.sh done. ALB=..." 나오면 완료
+# 진행 로그
+sudo tail -f /var/log/setup.log   # (Ctrl+C로 빠져나오기)
 ```
 
-### 2. ALB Controller 설치 — [bastion]
+> setup.sh는 ALB 생성까지 기다리느라 **5~8분** 걸린다. `setup_done.txt`가 생기면 끝.
 
-> ❗ 아래 4개 옵션은 **반드시 그대로**. 빠뜨리면 CrashLoop:
-> - `region` / `vpcId` 누락 → `failed to get VPC ID ... context deadline exceeded` (명시하면 확실)
-> - `serviceAccount.create=true` + `serviceAccount.name` + role-arn 어노테이션 누락 → SA 없음 →
->   `MountVolume.SetUp failed ... serviceaccounts "aws-load-balancer-controller" not found`
->
-> ⚠️ **절대 `serviceAccount.create=false` 로 install/upgrade 하지 말 것** (SA가 안 만들어져 위 에러 발생).
-
+### 2. 구성 검증 — [bastion]
 ```bash
-ALB_ROLE=$(aws iam get-role --role-name wsc2026-logging-alb-controller-role \
-  --query Role.Arn --output text)
-VPC_ID=$(aws ec2 describe-vpcs --region ap-southeast-2 \
-  --filters "Name=tag:Name,Values=wsc2026-logging-vpc" \
-  --query "Vpcs[0].VpcId" --output text)
+# 파드 4종 Running (채점 2-4)
+kubectl get po -A | grep fluent-bit
+kubectl get po -n logging | grep -E 'loki|grafana|nginx'
 
-helm repo add eks https://aws.github.io/eks-charts && helm repo update
-helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
-  -n kube-system \
-  --set clusterName=wsc2026-logging-cluster \
-  --set region=ap-southeast-2 \
-  --set vpcId=$VPC_ID \
-  --set serviceAccount.create=true \
-  --set serviceAccount.name=aws-load-balancer-controller \
-  --set "serviceAccount.annotations.eks\.amazonaws\.com/role-arn=$ALB_ROLE"
-
-# 확인: SA 존재 + 파드 2개 Running 1/1
-kubectl get sa aws-load-balancer-controller -n kube-system
-kubectl rollout status deploy/aws-load-balancer-controller -n kube-system --timeout=120s
+# ALB Controller
 kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller
-```
 
-> 이미 망가진 상태(CrashLoop/ContainerCreating/SA 없음)면 **깨끗이 지우고 위 명령 재실행**:
-> ```bash
-> helm uninstall aws-load-balancer-controller -n kube-system
-> ```
-
-### 3. k8s 리소스 배포 — [bastion]
-```bash
-kubectl create namespace logging
-
-# Loki
-helm repo add grafana https://grafana.github.io/helm-charts && helm repo update
-helm install loki grafana/loki-stack -n logging
-
-# Grafana — /logging 서브패스로 서비스해야 함 (ALB가 /logging 경로 그대로 전달)
-# ALB DNS는 Ingress 생성 후 정해지므로, 먼저 설치하고 5단계 뒤 ALB DNS로 root_url 재설정(아래 6.5단계)
-helm install grafana grafana/grafana -n logging \
-  --set adminUser=admin \
-  --set adminPassword=wsc2026-logging-admin-61 \
-  --set "grafana\.ini.server.serve_from_sub_path=true"
-
-# Fluent Bit
-helm repo add fluent https://fluent.github.io/helm-charts
-helm install fluent-bit fluent/fluent-bit -n logging
-
-# nginx
-kubectl run nginx --image=nginx -n logging
-kubectl expose pod nginx --port=80 -n logging
-```
-
-### 4. Ingress 배포 (ALB 생성) — [bastion]
-```bash
-kubectl apply -f - <<'EOF'
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: logging-ingress
-  namespace: logging
-  annotations:
-    kubernetes.io/ingress.class: alb
-    alb.ingress.kubernetes.io/load-balancer-name: wsc2026-logging-alb
-    alb.ingress.kubernetes.io/scheme: internet-facing
-    alb.ingress.kubernetes.io/target-type: ip
-    # grafana는 헬스체크 경로 / 에서 302(로그인 리다이렉트) 반환 → 302도 healthy로 인정해야 503 안 남
-    alb.ingress.kubernetes.io/success-codes: "200,302"
-spec:
-  defaultBackend:
-    service:
-      name: nginx
-      port:
-        number: 80
-  rules:
-  - http:
-      paths:
-      - path: /logging
-        pathType: Prefix
-        backend:
-          service:
-            name: grafana
-            port:
-              number: 80
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: nginx
-            port:
-              number: 80
-EOF
-```
-
-### 5. ALB 생성 확인 (1~3분 소요) — [bastion]
-```bash
-# Ingress의 ADDRESS에 DNS가 뜨면 ALB 생성 완료
-kubectl get ingress -n logging
-
-# 또는 직접 조회
-aws elbv2 describe-load-balancers --names wsc2026-logging-alb \
-  --region ap-southeast-2 --query "LoadBalancers[].DNSName" --output text
-
-# 접속 테스트 (ALB active 후)
+# ALB DNS + 접속 (채점 2-5, 2-6)
 ALB_DNS=$(aws elbv2 describe-load-balancers --names wsc2026-logging-alb --region ap-southeast-2 --query "LoadBalancers[0].DNSName" --output text)
+echo $ALB_DNS
 curl -s -o /dev/null -w "/(nginx): %{http_code}\n" http://$ALB_DNS/
-curl -s -o /dev/null -w "/logging(grafana): %{http_code}\n" http://$ALB_DNS/logging
-```
-
-### 5.5 Grafana root_url을 ALB DNS로 재설정 (/logging 정상 동작용) — [bastion]
-
-ALB DNS는 Ingress 생성 후에야 정해지므로, 그 값으로 grafana `root_url`을 채워준다:
-```bash
-ALB_DNS=$(aws elbv2 describe-load-balancers --names wsc2026-logging-alb --region ap-southeast-2 --query "LoadBalancers[0].DNSName" --output text)
-
-helm upgrade grafana grafana/grafana -n logging --reuse-values \
-  --set "grafana\.ini.server.root_url=http://$ALB_DNS/logging" \
-  --set "grafana\.ini.server.serve_from_sub_path=true"
-
-# 타깃 healthy + /logging 200 확인 (1~2분 후)
-curl -s -L -o /dev/null -w "/logging: %{http_code}\n" http://$ALB_DNS/logging
+curl -s -L -o /dev/null -w "/logging(grafana): %{http_code}\n" http://$ALB_DNS/logging
 curl -s -o /dev/null -w "/zzz(404): %{http_code}\n" http://$ALB_DNS/zzz
 ```
+- `/` → 200(nginx), `/logging` → 200(grafana), 임의경로 → 404 면 정상.
 
-> `/logging`이 **503**이면 grafana 타깃이 unhealthy인 것:
-> - 위 `success-codes: "200,302"` 가 Ingress에 들어갔는지 확인 (grafana `/`는 302 반환)
-> - 타깃 헬스: `aws elbv2 describe-target-health --target-group-arn <grafana-TG-ARN> --region ap-southeast-2`
+### 수동 재실행 (setup.sh 실패/일부만 됐을 때) — [bastion]
+```bash
+# S3에서 다시 받아 실행
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+sudo aws s3 cp s3://wsc2026-logging-setup-${ACCOUNT_ID}/setup.sh /root/setup.sh --region ap-southeast-2
+sudo chmod +x /root/setup.sh && sudo /root/setup.sh
+```
 
-> ❗ Ingress가 `DuplicateLoadBalancerName ... exists, but with different settings` 로그를 반복하면,
-> terraform이 만든 같은 이름 ALB가 남아있는 것. `module2`에서 `terraform apply`로 terraform ALB를
-> 제거(이제 코드에 ALB 없음)하면 컨트롤러가 자동으로 자기 ALB를 생성한다.
+> setup.sh 내용을 바꾸려면 로컬에서 `module2/setup.sh` 수정 → `terraform apply`(S3 객체 갱신) →
+> bastion에서 위 "수동 재실행" 또는 bastion 교체(`user_data_replace_on_change=true`라 apply 시 자동 교체).
+
+> `/logging`이 503이면 grafana 타깃 unhealthy → setup.sh의 Ingress `success-codes: "200,302"` 확인.
+> Ingress가 `DuplicateLoadBalancerName` 반복하면 terraform이 만든 동명 ALB 잔재 → `terraform apply`로 정리(이제 코드에 ALB 없음).
 
 ## kubectl/helm 실행 환경 = bastion EC2
 

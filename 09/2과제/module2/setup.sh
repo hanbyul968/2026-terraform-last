@@ -1,202 +1,112 @@
 #!/bin/bash
-set -e
+# bastion에서 실행 — module2 k8s 리소스 자동 구성
+# ALB Controller + Loki/Grafana/Fluent Bit/nginx + Ingress(ALB 생성) + grafana /logging 서브패스
+# (ALB는 Ingress가 생성. terraform에는 ALB/TG 없음)
+exec > /var/log/setup.log 2>&1
+set -x
 
-REGION="ap-southeast-2"
-CLUSTER="wsc2026-logging-cluster"
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+REGION=ap-southeast-2
+CLUSTER=wsc2026-logging-cluster
 
-echo "=== Updating kubeconfig ==="
 aws eks update-kubeconfig --name $CLUSTER --region $REGION
 
-echo "=== Fix StorageClass ==="
-kubectl patch storageclass gp2 -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}' 2>/dev/null || true
+# 노드 Ready 대기
+for i in $(seq 1 30); do
+  kubectl get nodes 2>/dev/null | grep -q ' Ready ' && break
+  sleep 10
+done
 
-echo "=== Installing Helm ==="
-curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+ALB_ROLE=$(aws iam get-role --role-name wsc2026-logging-alb-controller-role --query Role.Arn --output text)
+VPC_ID=$(aws ec2 describe-vpcs --region $REGION \
+  --filters "Name=tag:Name,Values=wsc2026-logging-vpc" --query "Vpcs[0].VpcId" --output text)
 
-echo "=== Adding Helm repos ==="
-helm repo add grafana https://grafana.github.io/helm-charts 2>/dev/null || true
-helm repo add eks https://aws.github.io/eks-charts 2>/dev/null || true
+helm repo add eks https://aws.github.io/eks-charts
+helm repo add grafana https://grafana.github.io/helm-charts
+helm repo add fluent https://fluent.github.io/helm-charts
 helm repo update
 
-echo "=== Installing ALB Controller ==="
-VPC_ID=$(aws eks describe-cluster --name $CLUSTER --region $REGION --query "cluster.resourcesVpcConfig.vpcId" --output text)
-ALB_ROLE_ARN=$(aws iam get-role --role-name wsc2026-logging-alb-controller-role --query "Role.Arn" --output text)
+# ── ALB Controller (region/vpcId/SA 필수) ───────────────────────
 helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
   -n kube-system \
   --set clusterName=$CLUSTER \
-  --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"=$ALB_ROLE_ARN \
+  --set region=$REGION \
   --set vpcId=$VPC_ID \
-  --wait --timeout 5m
+  --set serviceAccount.create=true \
+  --set serviceAccount.name=aws-load-balancer-controller \
+  --set "serviceAccount.annotations.eks\.amazonaws\.com/role-arn=$ALB_ROLE"
+kubectl rollout status deploy/aws-load-balancer-controller -n kube-system --timeout=180s
 
-echo "=== Creating logging namespace ==="
+# ── 로깅 스택 ───────────────────────────────────────────────────
 kubectl create namespace logging --dry-run=client -o yaml | kubectl apply -f -
 
-echo "=== Installing Loki ==="
-helm upgrade --install loki grafana/loki -n logging \
-  --set deploymentMode=SingleBinary \
-  --set singleBinary.replicas=1 \
-  --set singleBinary.persistence.enabled=true \
-  --set singleBinary.persistence.size=10Gi \
-  --set loki.auth_enabled=false \
-  --set loki.commonConfig.replication_factor=1 \
-  --set loki.storage.type=filesystem \
-  --set loki.limits_config.allow_structured_metadata=true \
-  --set 'loki.schemaConfig.configs[0].from=2024-01-01' \
-  --set 'loki.schemaConfig.configs[0].store=tsdb' \
-  --set 'loki.schemaConfig.configs[0].object_store=filesystem' \
-  --set 'loki.schemaConfig.configs[0].schema=v13' \
-  --set 'loki.schemaConfig.configs[0].index.prefix=index_' \
-  --set 'loki.schemaConfig.configs[0].index.period=24h' \
-  --set chunksCache.enabled=false \
-  --set resultsCache.enabled=false \
-  --set backend.replicas=0 \
-  --set read.replicas=0 \
-  --set write.replicas=0 \
-  --timeout 10m
+helm upgrade --install loki grafana/loki-stack -n logging
 
-echo "=== Installing Grafana ==="
 helm upgrade --install grafana grafana/grafana -n logging \
-  --set adminUser="admin" \
-  --set adminPassword="wsc2026-logging-admin-61" \
-  --set service.type=ClusterIP \
+  --set adminUser=admin \
+  --set adminPassword=wsc2026-logging-admin-61 \
+  --set "grafana\.ini.server.serve_from_sub_path=true" \
   --set 'datasources.datasources\.yaml.apiVersion=1' \
   --set 'datasources.datasources\.yaml.datasources[0].name=Loki' \
   --set 'datasources.datasources\.yaml.datasources[0].type=loki' \
   --set 'datasources.datasources\.yaml.datasources[0].url=http://loki:3100' \
-  --set 'datasources.datasources\.yaml.datasources[0].access=proxy' \
-  --set 'datasources.datasources\.yaml.datasources[0].isDefault=true' \
-  --wait --timeout 5m
+  --set 'datasources.datasources\.yaml.datasources[0].access=proxy'
 
-echo "=== Installing Fluent Bit ==="
-helm upgrade --install fluent-bit grafana/fluent-bit -n logging \
-  --set config.outputs="[OUTPUT]\n    Name        loki\n    Match       *\n    Host        loki\n    Port        3100\n    Labels      job=fluent-bit\n    auto_kubernetes_labels on" \
-  --timeout 5m 2>/dev/null || \
-cat <<'EOF' | kubectl apply -f -
-apiVersion: apps/v1
-kind: DaemonSet
+helm upgrade --install fluent-bit fluent/fluent-bit -n logging
+
+kubectl get pod nginx -n logging >/dev/null 2>&1 || kubectl run nginx --image=nginx -n logging
+kubectl get svc nginx -n logging >/dev/null 2>&1 || kubectl expose pod nginx --port=80 -n logging
+
+# ── Ingress (ALB 생성) ──────────────────────────────────────────
+kubectl apply -f - <<'YAML'
+apiVersion: networking.k8s.io/v1
+kind: Ingress
 metadata:
-  name: fluent-bit
+  name: logging-ingress
   namespace: logging
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/load-balancer-name: wsc2026-logging-alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/success-codes: "200,302"
 spec:
-  selector:
-    matchLabels:
-      app: fluent-bit
-  template:
-    metadata:
-      labels:
-        app: fluent-bit
-    spec:
-      serviceAccountName: fluent-bit
-      containers:
-        - name: fluent-bit
-          image: grafana/fluent-bit-plugin-loki:latest
-          env:
-            - name: LOKI_URL
-              value: "http://loki:3100/loki/api/v1/push"
-          volumeMounts:
-            - name: varlog
-              mountPath: /var/log
-              readOnly: true
-            - name: varlogpods
-              mountPath: /var/log/pods
-              readOnly: true
-      volumes:
-        - name: varlog
-          hostPath:
-            path: /var/log
-        - name: varlogpods
-          hostPath:
-            path: /var/log/pods
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: fluent-bit
-  namespace: logging
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: fluent-bit
-rules:
-  - apiGroups: [""]
-    resources: ["pods", "namespaces"]
-    verbs: ["get", "list", "watch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: fluent-bit
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: fluent-bit
-subjects:
-  - kind: ServiceAccount
-    name: fluent-bit
-    namespace: logging
-EOF
+  defaultBackend:
+    service:
+      name: nginx
+      port:
+        number: 80
+  rules:
+  - http:
+      paths:
+      - path: /logging
+        pathType: Prefix
+        backend:
+          service:
+            name: grafana
+            port:
+              number: 80
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: nginx
+            port:
+              number: 80
+YAML
 
-echo "=== Deploying Nginx ==="
-cat <<'EOF' | kubectl apply -f -
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: nginx
-  namespace: logging
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: nginx
-  template:
-    metadata:
-      labels:
-        app: nginx
-    spec:
-      containers:
-        - name: nginx
-          image: nginx:latest
-          ports:
-            - containerPort: 80
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: nginx
-  namespace: logging
-spec:
-  selector:
-    app: nginx
-  ports:
-    - port: 80
-      targetPort: 80
-  type: ClusterIP
-EOF
+# ── ALB DNS 확정 후 grafana root_url 재설정 (/logging 정상 동작) ──
+for i in $(seq 1 40); do
+  ALB_DNS=$(aws elbv2 describe-load-balancers --names wsc2026-logging-alb \
+    --region $REGION --query "LoadBalancers[0].DNSName" --output text 2>/dev/null)
+  [ -n "$ALB_DNS" ] && [ "$ALB_DNS" != "None" ] && break
+  sleep 15
+done
 
-echo "=== Setting up TargetGroupBinding for Grafana ==="
-GRAFANA_TG_ARN=$(aws elbv2 describe-target-groups --names wsc2026-logging-grafana-tg --region $REGION --query "TargetGroups[0].TargetGroupArn" --output text)
+if [ -n "$ALB_DNS" ] && [ "$ALB_DNS" != "None" ]; then
+  helm upgrade grafana grafana/grafana -n logging --reuse-values \
+    --set "grafana\.ini.server.root_url=http://$ALB_DNS/logging" \
+    --set "grafana\.ini.server.serve_from_sub_path=true"
+fi
 
-cat <<EOF | kubectl apply -f -
-apiVersion: elbv2.k8s.aws/v1beta1
-kind: TargetGroupBinding
-metadata:
-  name: grafana-tgb
-  namespace: logging
-spec:
-  serviceRef:
-    name: grafana
-    port: 80
-  targetGroupARN: ${GRAFANA_TG_ARN}
-  targetType: ip
-EOF
-
-echo "=== Done! ==="
-echo ""
+echo "setup.sh done. ALB=$ALB_DNS" > /root/setup_done.txt
 kubectl get po -n logging
-kubectl get po -A | grep fluent-bit
-echo ""
-ALB_DNS=$(aws elbv2 describe-load-balancers --names wsc2026-logging-alb --region $REGION --query "LoadBalancers[0].DNSName" --output text)
-echo "Grafana URL: http://${ALB_DNS}"
-echo "Grafana Login: admin / wsc2026-logging-admin-61"

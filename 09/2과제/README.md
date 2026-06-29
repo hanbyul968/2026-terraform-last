@@ -100,118 +100,34 @@ aws ssm start-session --target $BID --region ap-southeast-2
 # 접속 후: sudo su - ec2-user ; cat bastion_ready.txt (done이면 준비완료)
 ```
 
-**3. kubeconfig 확인** — [bastion]
+**3. 자동 구성(setup.sh) 완료 대기** — [bastion]
+
+bastion user_data가 **S3의 `setup.sh`를 받아 자동 실행** → ALB Controller, Loki/Grafana(서브패스)/Fluent Bit/nginx, Ingress(ALB 생성), grafana `root_url` 재설정까지 전부 자동.
 
 ```bash
-aws eks update-kubeconfig --name wsc2026-logging-cluster --region ap-southeast-2
-kubectl get nodes
+# 완료 마커 (5~8분 소요, ALB 생성까지 기다림)
+sudo cat /root/setup_done.txt 2>/dev/null    # "setup.sh done. ALB=..." 면 완료
+sudo tail -f /var/log/setup.log              # 진행 보기 (Ctrl+C)
 ```
 
-**4. ALB Controller 설치** — [bastion] (`region`/`vpcId` 명시 권장 — VPC ID 자동조회 실패 시 CrashLoop 방지)
+**4. 검증** — [bastion]
 
 ```bash
-ALB_ROLE=$(aws iam get-role --role-name wsc2026-logging-alb-controller-role \
-  --query Role.Arn --output text)
-VPC_ID=$(aws ec2 describe-vpcs --region ap-southeast-2 \
-  --filters "Name=tag:Name,Values=wsc2026-logging-vpc" --query "Vpcs[0].VpcId" --output text)
-
-helm repo add eks https://aws.github.io/eks-charts && helm repo update
-helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
-  -n kube-system \
-  --set clusterName=wsc2026-logging-cluster \
-  --set region=ap-southeast-2 \
-  --set vpcId=$VPC_ID \
-  --set serviceAccount.create=true \
-  --set serviceAccount.name=aws-load-balancer-controller \
-  --set "serviceAccount.annotations.eks\.amazonaws\.com/role-arn=$ALB_ROLE"
-
-kubectl get sa aws-load-balancer-controller -n kube-system   # SA 존재 확인
-kubectl rollout status deploy/aws-load-balancer-controller -n kube-system --timeout=120s
+kubectl get po -A | grep fluent-bit
+kubectl get po -n logging | grep -E 'loki|grafana|nginx'
+ALB_DNS=$(aws elbv2 describe-load-balancers --names wsc2026-logging-alb --region ap-southeast-2 --query "LoadBalancers[0].DNSName" --output text)
+curl -s -o /dev/null -w "/: %{http_code}\n" http://$ALB_DNS/                 # 200 (nginx)
+curl -s -L -o /dev/null -w "/logging: %{http_code}\n" http://$ALB_DNS/logging # 200 (grafana)
+curl -s -o /dev/null -w "/zzz: %{http_code}\n" http://$ALB_DNS/zzz            # 404
 ```
 
-**5. k8s 리소스 배포**
-
-```bash
-kubectl create namespace logging
-
-# Loki
-helm repo add grafana https://grafana.github.io/helm-charts
-helm repo update
-helm install loki grafana/loki-stack -n logging
-
-# Grafana (/logging 서브패스 서비스)
-helm install grafana grafana/grafana -n logging \
-  --set adminUser=admin \
-  --set adminPassword=wsc2026-logging-admin-61 \
-  --set "grafana\.ini.server.serve_from_sub_path=true"
-
-# Fluent Bit
-helm repo add fluent https://fluent.github.io/helm-charts
-helm install fluent-bit fluent/fluent-bit -n logging
-
-# nginx
-kubectl run nginx --image=nginx -n logging
-kubectl expose pod nginx --port=80 -n logging
-```
-
-**6. Ingress 배포 (ALB 생성)**
-
-```bash
-kubectl apply -f - <<'EOF'
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: logging-ingress
-  namespace: logging
-  annotations:
-    kubernetes.io/ingress.class: alb
-    alb.ingress.kubernetes.io/load-balancer-name: wsc2026-logging-alb
-    alb.ingress.kubernetes.io/scheme: internet-facing
-    alb.ingress.kubernetes.io/target-type: ip
-    alb.ingress.kubernetes.io/success-codes: "200,302"
-spec:
-  defaultBackend:
-    service:
-      name: nginx
-      port:
-        number: 80
-  rules:
-  - http:
-      paths:
-      - path: /logging
-        pathType: Prefix
-        backend:
-          service:
-            name: grafana
-            port:
-              number: 80
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: nginx
-            port:
-              number: 80
-EOF
-```
-
-**7. ALB DNS 확인 + Grafana root_url 재설정**
-
-```bash
-ALB_DNS=$(aws elbv2 describe-load-balancers --names wsc2026-logging-alb \
-  --region ap-southeast-2 --query "LoadBalancers[0].DNSName" --output text)
-echo $ALB_DNS
-
-# grafana를 ALB DNS의 /logging 서브패스로 재설정 (안 하면 /logging 접속 깨짐)
-helm upgrade grafana grafana/grafana -n logging --reuse-values \
-  --set "grafana\.ini.server.root_url=http://$ALB_DNS/logging" \
-  --set "grafana\.ini.server.serve_from_sub_path=true"
-
-# 접속 테스트 (1~2분 후): / →200(nginx), /logging →200(grafana), 임의경로 →404
-curl -s -o /dev/null -w "/: %{http_code}\n" http://$ALB_DNS/
-curl -s -L -o /dev/null -w "/logging: %{http_code}\n" http://$ALB_DNS/logging
-curl -s -o /dev/null -w "/zzz: %{http_code}\n" http://$ALB_DNS/zzz
-```
+> setup.sh가 일부만 됐으면 bastion에서 수동 재실행:
+> ```bash
+> ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+> sudo aws s3 cp s3://wsc2026-logging-setup-${ACCOUNT_ID}/setup.sh /root/setup.sh --region ap-southeast-2
+> sudo chmod +x /root/setup.sh && sudo /root/setup.sh
+> ```
+> setup.sh 수정 시: 로컬 `module2/setup.sh` 편집 → `terraform apply`(S3 갱신) → 위 재실행 또는 bastion 자동 교체.
 
 > `/logging`이 503이면 grafana 타깃 unhealthy → Ingress의 `success-codes: "200,302"` 들어갔는지 확인.
 

@@ -13,6 +13,18 @@ provider "aws" {
 
 data "aws_caller_identity" "current" {}
 
+# setup.sh 를 담는 S3 버킷 (bastion이 받아 실행)
+resource "aws_s3_bucket" "setup" {
+  bucket = "wsc2026-logging-setup-${data.aws_caller_identity.current.account_id}"
+}
+
+resource "aws_s3_object" "setup_sh" {
+  bucket = aws_s3_bucket.setup.bucket
+  key    = "setup.sh"
+  source = "${path.module}/setup.sh"
+  etag   = filemd5("${path.module}/setup.sh")
+}
+
 # VPC
 resource "aws_vpc" "main" {
   cidr_block           = "10.0.0.0/16"
@@ -318,10 +330,20 @@ curl -sLO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stab
 install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
 # helm
 curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-# kubeconfig (ec2-user 용)
+# kubeconfig (root + ec2-user)
+aws eks update-kubeconfig --name wsc2026-logging-cluster --region ap-southeast-2
 sudo -u ec2-user aws eks update-kubeconfig --name wsc2026-logging-cluster --region ap-southeast-2
+
+# S3에서 setup.sh 받아 나머지 리소스(ALB Controller, Loki/Grafana/FluentBit/nginx, Ingress) 자동 구성
+aws s3 cp s3://wsc2026-logging-setup-${data.aws_caller_identity.current.account_id}/setup.sh /root/setup.sh --region ap-southeast-2
+chmod +x /root/setup.sh
+/root/setup.sh
 echo done > /home/ec2-user/bastion_ready.txt
 EOF
+
+  user_data_replace_on_change = true
+
+  depends_on = [aws_s3_object.setup_sh, aws_eks_node_group.main]
 
   tags = { Name = "wsc2026-logging-bastion" }
 }

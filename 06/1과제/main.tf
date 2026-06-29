@@ -351,6 +351,81 @@ resource "aws_security_group_rule" "grafana_alb_from_cloudshell" {
 }
 
 
+# ========== Bastion (EKS 부트스트랩 실행용, SSM 접속) ==========
+# unicorn-mark CloudShell은 채점용으로 유지하고,
+# eksctl/kubectl/helm/docker 부트스트랩(apply.sh)은 이 bastion에서 실행한다.
+# Private Subnet + SSM(NAT 경유)로 접속하며 Public IP는 없다.
+data "aws_ssm_parameter" "al2023" {
+  name = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
+}
+
+resource "aws_iam_role" "bastion" {
+  name = "unicorn-bastion-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "ec2.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+# SSM 접속용
+resource "aws_iam_role_policy_attachment" "bastion_ssm" {
+  role       = aws_iam_role.bastion.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+# eksctl(클러스터/CFN/IAM 생성), ECR push, helm 등 광범위한 작업 필요 → 운영용 Admin
+# (채점 대상 리소스가 아닌 부트스트랩 도구이므로 Admin 사용)
+resource "aws_iam_role_policy_attachment" "bastion_admin" {
+  role       = aws_iam_role.bastion.name
+  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
+}
+
+resource "aws_iam_instance_profile" "bastion" {
+  name = "unicorn-bastion-profile"
+  role = aws_iam_role.bastion.name
+}
+
+resource "aws_security_group" "bastion" {
+  name   = "unicorn-bastion-sg"
+  vpc_id = module.VPC.vpc_id
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = { Name = "unicorn-bastion-sg" }
+}
+
+resource "aws_instance" "bastion" {
+  ami                    = data.aws_ssm_parameter.al2023.value
+  instance_type          = "t3.medium"
+  subnet_id              = module.VPC.private_subnet_ids[0]
+  iam_instance_profile   = aws_iam_instance_profile.bastion.name
+  vpc_security_group_ids  = [aws_security_group.bastion.id]
+  user_data              = file("${path.root}/bastion-userdata.sh")
+
+  metadata_options {
+    http_tokens = "required"
+  }
+
+  root_block_device {
+    volume_size = 30
+    encrypted   = true
+  }
+
+  tags = { Name = "unicorn-bastion" }
+}
+
+# EKS 클러스터 SG가 bastion을 허용하도록 apply.sh가 VPC CIDR(10.97.0.0/16)을 열어주므로
+# bastion(Private Subnet)은 자동으로 클러스터 접근이 가능하다.
+
 
 # ========== EKS SG Rule (apply after EKS exists) ==========
 # aws ec2 authorize-security-group-ingress --group-id <EKS_CLUSTER_SG> --protocol -1 --port -1 --source-group <cloudshell_sg_id>

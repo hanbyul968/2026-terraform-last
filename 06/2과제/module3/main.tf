@@ -4,14 +4,20 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
-    local = {
-      source  = "hashicorp/local"
-      version = "~> 2.0"
-    }
-    null = {
-      source  = "hashicorp/null"
-      version = "~> 3.0"
-    }
+  }
+}
+
+# Bastion 용 Amazon Linux 2023 AMI
+data "aws_ami" "al2023" {
+  most_recent = true
+  owners      = ["amazon"]
+  filter {
+    name   = "name"
+    values = ["al2023-ami-*-x86_64"]
+  }
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
   }
 }
 
@@ -430,9 +436,10 @@ output "cluster_name" {
 
 
 # ============================================================
-# 제공파일(app/) 자동 빌드 & 배포 — 별도 수동 docker build / kubectl 불필요
-# terraform apply 한 번으로 ECR 빌드/푸시 + 워크로드 배포까지 완료된다.
-# (apply 호스트에 docker, aws cli, bash 필요)
+# 제공파일(app/) 빌드 & 배포는 Bastion EC2 에서 수행한다.
+# terraform apply 는 ECR/S3/Bastion 까지만 만들고, 실제 docker build·helm·kubectl
+# 은 SSM Session Manager 로 Bastion 에 접속해 /opt/deploy/deploy.sh 를 실행한다.
+# (로컬에 Docker Desktop 불필요 — 로컬은 terraform apply 만)
 # ============================================================
 
 resource "aws_ecr_repository" "app" {
@@ -443,36 +450,7 @@ resource "aws_ecr_repository" "app" {
 
 locals {
   ecr_image = "${aws_ecr_repository.app.repository_url}:latest"
-}
 
-# Docker 이미지 빌드 & 푸시 (app/ 내용이 바뀌면 재빌드)
-resource "null_resource" "build_push" {
-  triggers = {
-    app_hash    = filesha256("${path.module}/app/app.py")
-    docker_hash = filesha256("${path.module}/app/Dockerfile")
-    req_hash    = filesha256("${path.module}/app/requirements.txt")
-    repo        = aws_ecr_repository.app.repository_url
-  }
-
-  provisioner "local-exec" {
-    interpreter = ["powershell", "-Command"]
-    command     = <<-EOT
-      $ErrorActionPreference = "Stop"
-      $REGION  = "${data.aws_region.current.name}"
-      $ACCOUNT = "${data.aws_caller_identity.current.account_id}"
-      $REPO    = "${aws_ecr_repository.app.repository_url}"
-      $pw = aws ecr get-login-password --region $REGION
-      docker login --username AWS --password $pw "$($ACCOUNT).dkr.ecr.$($REGION).amazonaws.com"
-      docker build --platform linux/amd64 -t "$($REPO):latest" "${path.module}/app"
-      docker push "$($REPO):latest"
-    EOT
-  }
-
-  depends_on = [aws_ecr_repository.app]
-}
-
-# --- 렌더링된 매니페스트를 디스크에 기록 ---
-locals {
   rendered_karpenter = templatefile("${path.module}/k8s-karpenter.yaml", {
     CLUSTER_NAME   = aws_eks_cluster.main.name
     NODE_ROLE_NAME = aws_iam_role.addon_ng.name
@@ -487,54 +465,205 @@ locals {
   })
 }
 
-resource "local_file" "karpenter" {
-  content  = local.rendered_karpenter
-  filename = "${path.module}/.rendered/karpenter.yaml"
-}
-resource "local_file" "app" {
-  content  = local.rendered_app
-  filename = "${path.module}/.rendered/app.yaml"
-}
-resource "local_file" "keda" {
-  content  = local.rendered_keda
-  filename = "${path.module}/.rendered/keda.yaml"
+# --- 배포 번들 S3 버킷 (app 소스 + 렌더링된 매니페스트 + env/deploy 스크립트) ---
+resource "aws_s3_bucket" "deploy" {
+  bucket        = "skm-deploy-${data.aws_caller_identity.current.account_id}"
+  force_destroy = true
 }
 
-# --- 단일 apply: helm(KEDA/Karpenter) + kubectl 매니페스트를 apply 시점 CLI 로 배포 ---
-# helm/kubectl provider 가 같은 apply 에서 만든 클러스터 endpoint 를 plan 시점에 못 읽는
-# Terraform 한계를 피하려고 local-exec 로 실행한다 => terraform apply 한 번으로 완료.
-resource "null_resource" "deploy" {
-  triggers = {
-    karpenter = local_file.karpenter.content
-    app       = local_file.app.content
-    keda      = local_file.keda.content
-    image     = local.ecr_image
-  }
+resource "aws_s3_object" "app_py" {
+  bucket = aws_s3_bucket.deploy.id
+  key    = "app.py"
+  source = "${path.module}/app/app.py"
+  etag   = filemd5("${path.module}/app/app.py")
+}
+resource "aws_s3_object" "dockerfile" {
+  bucket = aws_s3_bucket.deploy.id
+  key    = "Dockerfile"
+  source = "${path.module}/app/Dockerfile"
+  etag   = filemd5("${path.module}/app/Dockerfile")
+}
+resource "aws_s3_object" "requirements" {
+  bucket = aws_s3_bucket.deploy.id
+  key    = "requirements.txt"
+  source = "${path.module}/app/requirements.txt"
+  etag   = filemd5("${path.module}/app/requirements.txt")
+}
+resource "aws_s3_object" "m_karpenter" {
+  bucket  = aws_s3_bucket.deploy.id
+  key     = "karpenter.yaml"
+  content = local.rendered_karpenter
+}
+resource "aws_s3_object" "m_app" {
+  bucket  = aws_s3_bucket.deploy.id
+  key     = "app.yaml"
+  content = local.rendered_app
+}
+resource "aws_s3_object" "m_keda" {
+  bucket  = aws_s3_bucket.deploy.id
+  key     = "keda.yaml"
+  content = local.rendered_keda
+}
 
-  provisioner "local-exec" {
-    interpreter = ["powershell", "-NoProfile", "-File"]
-    command     = "${path.module}/deploy_k8s.ps1"
-    environment = {
-      CLUSTER_NAME       = aws_eks_cluster.main.name
-      CLUSTER_ENDPOINT   = aws_eks_cluster.main.endpoint
-      REGION             = data.aws_region.current.name
-      KEDA_ROLE_ARN      = aws_iam_role.keda_irsa.arn
-      KARPENTER_ROLE_ARN = aws_iam_role.karpenter_irsa.arn
-      MANIFEST_DIR       = "${path.module}/.rendered"
-    }
+# deploy.sh 가 source 할 환경변수 파일 (apply 시점 값으로 렌더링)
+resource "aws_s3_object" "env_sh" {
+  bucket = aws_s3_bucket.deploy.id
+  key    = "env.sh"
+  content = <<-EOT
+    export REGION="${data.aws_region.current.name}"
+    export ECR_REPO="${aws_ecr_repository.app.repository_url}"
+    export CLUSTER_NAME="${aws_eks_cluster.main.name}"
+    export CLUSTER_ENDPOINT="${aws_eks_cluster.main.endpoint}"
+    export KEDA_ROLE_ARN="${aws_iam_role.keda_irsa.arn}"
+    export KARPENTER_ROLE_ARN="${aws_iam_role.karpenter_irsa.arn}"
+  EOT
+}
+
+resource "aws_s3_object" "deploy_sh" {
+  bucket = aws_s3_bucket.deploy.id
+  key    = "deploy.sh"
+  source = "${path.module}/deploy.sh"
+  etag   = filemd5("${path.module}/deploy.sh")
+}
+
+# --- Bastion IAM Role (SSM + ECR push + EKS describe + S3 read) ---
+resource "aws_iam_role" "bastion" {
+  name = "skm-bastion-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
+      Principal = { Service = "ec2.amazonaws.com" }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "bastion_ssm" {
+  role       = aws_iam_role.bastion.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_role_policy_attachment" "bastion_ecr" {
+  role       = aws_iam_role.bastion.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser"
+}
+
+resource "aws_iam_role_policy" "bastion" {
+  name = "skm-bastion-policy"
+  role = aws_iam_role.bastion.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["eks:DescribeCluster", "eks:ListClusters"]
+        Resource = "*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:ListBucket"]
+        Resource = [aws_s3_bucket.deploy.arn, "${aws_s3_bucket.deploy.arn}/*"]
+      }
+    ]
+  })
+}
+
+resource "aws_iam_instance_profile" "bastion" {
+  name = "skm-bastion-profile"
+  role = aws_iam_role.bastion.name
+}
+
+# Bastion 이 kubectl/helm 으로 클러스터를 제어할 수 있도록 EKS Admin access entry 부여
+resource "aws_eks_access_entry" "bastion" {
+  cluster_name  = aws_eks_cluster.main.name
+  principal_arn = aws_iam_role.bastion.arn
+  type          = "STANDARD"
+}
+
+resource "aws_eks_access_policy_association" "bastion" {
+  cluster_name  = aws_eks_cluster.main.name
+  principal_arn = aws_iam_role.bastion.arn
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+  access_scope {
+    type = "cluster"
   }
+  depends_on = [aws_eks_access_entry.bastion]
+}
+
+# Bastion SG (인바운드 불필요 — SSM 사용, 아웃바운드 전체 허용)
+resource "aws_security_group" "bastion" {
+  name        = "skm-bastion-sg"
+  description = "skm bastion (SSM, egress only)"
+  vpc_id      = aws_vpc.main.id
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  tags = { Name = "skm-bastion-sg" }
+}
+
+resource "aws_instance" "bastion" {
+  ami                         = data.aws_ami.al2023.id
+  instance_type               = "t3.small"
+  iam_instance_profile        = aws_iam_instance_profile.bastion.name
+  vpc_security_group_ids      = [aws_security_group.bastion.id]
+  subnet_id                   = aws_subnet.pub_a.id
+  associate_public_ip_address = true
+
+  user_data = <<-EOF
+#!/bin/bash
+set -e
+dnf install -y docker git jq unzip
+systemctl enable --now docker
+
+# aws cli v2
+curl -s "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+cd /tmp && unzip -q awscliv2.zip && ./aws/install --update
+
+# kubectl (EKS 1.35)
+curl -sLo /usr/local/bin/kubectl "https://dl.k8s.io/release/$(curl -Ls https://dl.k8s.io/release/stable-1.35.txt)/bin/linux/amd64/kubectl"
+chmod +x /usr/local/bin/kubectl
+
+# helm
+curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+# 배포 번들 다운로드
+mkdir -p /opt/deploy
+/usr/local/bin/aws s3 cp s3://${aws_s3_bucket.deploy.id}/ /opt/deploy/ --recursive --region ${data.aws_region.current.name}
+chmod +x /opt/deploy/deploy.sh
+echo "BASTION_READY" > /opt/deploy/.ready
+EOF
+
+  tags = { Name = "skm-bastion" }
 
   depends_on = [
     aws_eks_node_group.addon,
     aws_eks_access_policy_association.creator,
     aws_eks_addon.coredns,
-    null_resource.build_push,
-    local_file.karpenter,
-    local_file.app,
-    local_file.keda,
+    aws_s3_object.app_py,
+    aws_s3_object.dockerfile,
+    aws_s3_object.requirements,
+    aws_s3_object.m_karpenter,
+    aws_s3_object.m_app,
+    aws_s3_object.m_keda,
+    aws_s3_object.env_sh,
+    aws_s3_object.deploy_sh,
   ]
 }
 
 output "ecr_image" {
   value = local.ecr_image
+}
+
+output "bastion_instance_id" {
+  value = aws_instance.bastion.id
+}
+
+# SSM 접속 후 배포 실행 명령 안내
+output "deploy_command" {
+  value = "aws ssm start-session --target ${aws_instance.bastion.id} --region ${data.aws_region.current.name}   # 접속 후:  sudo bash /opt/deploy/deploy.sh"
 }

@@ -61,10 +61,16 @@ CLOUDSHELL_SG=$(aws ec2 describe-security-groups --filters Name=group-name,Value
 aws ec2 authorize-security-group-ingress --group-id $CLUSTER_SG --protocol -1 --port -1 --source-group $CLOUDSHELL_SG 2>/dev/null
 aws ec2 authorize-security-group-ingress --group-id $CLUSTER_SG --protocol -1 --port -1 --cidr 10.97.0.0/16 2>/dev/null
 aws eks update-kubeconfig --name unicorn-eks-cluster --region $REGION
-source kubectl-connect unicorn-eks-cluster
-# Access Entry for current user
-aws eks create-access-entry --cluster-name unicorn-eks-cluster --principal-arn arn:aws:iam::${ACCOUNT}:root --type STANDARD 2>/dev/null
-aws eks associate-access-policy --cluster-name unicorn-eks-cluster --principal-arn arn:aws:iam::${ACCOUNT}:root --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy --access-scope type=cluster 2>/dev/null
+# (CloudShell 전용 kubectl-connect 제거 → bastion/CloudShell 양쪽 동작. update-kubeconfig 로 충분)
+
+# Access Entry: bastion이 클러스터를 만들면 creator=bastion role 이므로,
+# 채점자(CloudShell)가 쓰는 계정의 모든 IAM User에게 cluster admin 을 부여해
+# unicorn-mark에서 kubectl 이 동작하도록 한다.
+for UARN in $(aws iam list-users --query "Users[].Arn" --output text); do
+  aws eks create-access-entry --cluster-name unicorn-eks-cluster --principal-arn "$UARN" --type STANDARD 2>/dev/null
+  aws eks associate-access-policy --cluster-name unicorn-eks-cluster --principal-arn "$UARN" \
+    --policy-arn arn:aws:iam::aws:policy/AmazonEKSClusterAdminPolicy --access-scope type=cluster 2>/dev/null
+done
 
 # --- 5. kubectl apply ---
 kubectl apply -f namespace.yaml

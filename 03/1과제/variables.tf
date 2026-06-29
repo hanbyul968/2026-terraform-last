@@ -18,9 +18,8 @@ variable "azs" {
 # ── 비번호 (S3 버킷 이름에 사용) ──
 # S3 Bucket : wsc2026-static-<임의 영문 4자리>-<본인 비번호>-bucket
 variable "bi_number" {
-  description = "본인 비번호. S3 버킷 이름에 들어감. 반드시 본인 값으로 변경."
+  description = "본인 비번호. S3 버킷 이름에 들어감. 고정 default 없음 → apply 시 입력(-var/프롬프트)."
   type        = string
-  default     = "00"
 }
 
 variable "bucket_rand" {

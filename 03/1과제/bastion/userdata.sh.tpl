@@ -54,9 +54,11 @@ cat > /opt/task1/run.sh <<'RUN'
 #!/bin/bash
 set -e
 # 1단계 (AWS 레이어): VPC/KMS/S3/CloudFront/WAF/ECR(빌드)/DynamoDB/EKS/노드그룹/IAM/ALB-SG
+: "${BIBUNHO:=}"
+if [ -z "$BIBUNHO" ]; then read -rp "비번호(bi_number) 입력: " BIBUNHO; fi
 cd /opt/task1
 terraform init -input=false
-terraform apply -auto-approve
+terraform apply -auto-approve -var="bi_number=$BIBUNHO"
 # 2단계 (k8s/helm 레이어): book Deployment/Service/Ingress, AWS LB Controller,
 #   kube-prometheus-stack, Fluent Bit, ALB 대기, 그리고 마지막에 EKS public->private 전환(finalize)
 cd /opt/task1/k8s

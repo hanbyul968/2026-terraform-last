@@ -19,9 +19,8 @@ variable "azs" {
 # S3 버킷명 wskorea26-concert-bucket-<비번호> 에 사용. 채점 예시: 103
 # !! 대회 시작하면 반드시 본인 비번호로 변경 !!
 variable "bi_number" {
-  description = "선수 비번호. S3 버킷 suffix 등에 사용."
+  description = "선수 비번호. S3 버킷 suffix 등에 사용. 고정 default 없음 → apply 시 입력(-var/프롬프트)."
   type        = string
-  default     = "000"
 }
 
 # ── CloudFront -> ALB 식별 헤더 (과제 11/10) ──

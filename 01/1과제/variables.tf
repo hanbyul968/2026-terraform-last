@@ -5,9 +5,8 @@ variable "region" {
 }
 
 variable "competitor_number" {
-  description = "비번호 - used for the S3 bucket suffix wsc-2026-bucket-<비번호>. Grading only checks the 'wsc-2026-bucket-' prefix."
+  description = "비번호 - S3 버킷 접미사 wsc-2026-bucket-<비번호>에 사용. 고정 default 없음 → apply 시 입력받음(-var 또는 프롬프트). 채점은 'wsc-2026-bucket-' 접두만 확인."
   type        = string
-  default     = "101"
 }
 
 variable "azs" {

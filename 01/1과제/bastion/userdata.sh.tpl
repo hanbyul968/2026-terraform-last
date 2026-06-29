@@ -52,10 +52,13 @@ chmod -R 777 /opt/task1
 cat > /opt/task1/run.sh <<'RUN'
 #!/bin/bash
 set -e
+# 비번호 입력 (고정값 없음): 환경변수 BIBUNHO 사용하거나, 없으면 프롬프트
+: "${BIBUNHO:=}"
+if [ -z "$BIBUNHO" ]; then read -rp "비번호(competitor_number) 입력: " BIBUNHO; fi
 # 1단계 (AWS 레이어): VPC/KMS/S3/CloudFront/ECR(빌드)/DynamoDB+Backup/EKS/노드그룹/ALB/IAM
 cd /opt/task1
 terraform init -input=false
-terraform apply -auto-approve
+terraform apply -auto-approve -var="competitor_number=$BIBUNHO"
 # 2단계 (k8s/helm 레이어): book StatefulSet/Service, AWS LB Controller, kube-prometheus-stack,
 #   TargetGroupBinding, 그리고 마지막에 EKS public->private 전환(finalize)
 cd /opt/task1/k8s

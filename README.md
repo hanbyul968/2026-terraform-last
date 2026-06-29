@@ -45,15 +45,52 @@
 
 # 🚀 전체 Apply 가이드 (01~09 / 1과제·2과제)
 
-## 0. 사전 준비 (로컬 Windows PowerShell)
+## 0. 새 컴퓨터 초기 세팅 (Fresh Machine Setup)
+
+> 새 Windows PC 에서 처음 시작할 때 아래만 설치하면 됩니다. (배포는 bastion 에서 하므로 **로컬엔 Docker·kubectl·helm 불필요**)
+
+### A. 필수 도구 설치 (winget — PowerShell 관리자 권장)
 
 ```powershell
-winget install -e --id Hashicorp.Terraform
-winget install -e --id Amazon.AWSCLI
-winget install -e --id Amazon.SessionManagerPlugin   # SSM 접속용
-aws configure        # Access Key / Secret / region=ap-northeast-2
-aws sts get-caller-identity   # 자격증명 확인
+winget install -e --id Hashicorp.Terraform              # Terraform
+winget install -e --id Amazon.AWSCLI                     # AWS CLI v2
+winget install -e --id Amazon.SessionManagerPlugin       # SSM 접속(start-session) 플러그인 ★필수
+winget install -e --id Git.Git                           # git (clone/push)
+# (선택) winget install -e --id Microsoft.OpenSSH.Beta   # 07/1과제는 SSH 접속 → Win10/11 기본 ssh 로 보통 충분
 ```
+
+> 설치 후 **PowerShell 창을 새로 열어** PATH 를 갱신하세요. (특히 SessionManagerPlugin/aws/terraform 이 "not found" 면 창을 새로 여세요.)
+
+### B. 설치 확인
+
+```powershell
+terraform -version
+aws --version
+session-manager-plugin            # "The Session Manager plugin was installed successfully" 류 출력
+git --version
+```
+
+### C. AWS 자격증명 설정
+
+```powershell
+aws configure
+#   AWS Access Key ID     : <대회 지급 키>
+#   AWS Secret Access Key : <대회 지급 시크릿>
+#   Default region name   : ap-northeast-2
+#   Default output format : json
+aws sts get-caller-identity        # 계정/사용자 확인 (자격증명 정상 여부)
+```
+
+### D. 소스 코드 받기
+
+```powershell
+cd C:\Users\competitor
+git clone https://github.com/hnmly/2026-terraform.git
+cd 2026-terraform
+```
+
+### 로컬에 설치하지 않아도 되는 것
+- **Docker / kubectl / helm / eksctl** → 전부 **bastion(Linux)** 안에서 자동 설치·실행됩니다. 로컬 불필요.
 
 > ⚠️ **이 대회 계정에는 default VPC 가 없습니다.**
 > SSM bastion 들은 기본적으로 default VPC 를 쓰도록 작성돼 있어 그대로면 `Error: no matching EC2 VPC found` 로 apply 가 실패합니다.

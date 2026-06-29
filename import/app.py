@@ -153,6 +153,12 @@ def type_of(addr):
     return m2.group(1) if m2 else None
 
 
+def var_for(addr):
+    """리소스 주소를 셸 변수명으로 변환. 예: aws_s3_bucket.static[0] -> ID_AWS_S3_BUCKET_STATIC_0"""
+    safe = re.sub(r'[^a-zA-Z0-9]+', '_', addr).strip('_').upper()
+    return f"ID_{safe}"
+
+
 def build(block, var_pairs=None):
     addr = block["addr"]
     name = block["name"]
@@ -197,17 +203,24 @@ def build(block, var_pairs=None):
     else:
         # ID 를 별도로 구해야 함
         needs = spec.get("needs")
-        if needs:
-            hint = needs
-            if name and "<name>" in hint:
-                hint = hint.replace("<name>", name)
-            if name and "<comment>" in hint:
-                hint = hint.replace("<comment>", name)
-            lines.append(f"# {spec['id_kind']} 조회:")
-            lines.append(f"# {hint}")
-        lines.append(f"{tf} {addr} <{spec['id_kind']}>")
-        extra = f" (에러에서 '{name}' 감지)" if name else ""
-        note = f"import ID = {spec['id_kind']}. 위 조회 명령으로 실제 ID를 구해 넣으세요.{extra}"
+        hint = needs or ""
+        if name:
+            hint = hint.replace("<name>", name).replace("<comment>", name)
+        # needs 가 실제 실행 가능한 aws CLI 명령이면 변수에 담아 바로 import
+        if needs and needs.lstrip().startswith("aws "):
+            v = var_for(addr)
+            lines.append(f"# {spec['id_kind']} 조회 후 변수에 저장")
+            lines.append(f"{v}=$({hint})")
+            lines.append(f'{tf} {addr} "${v}"')
+            note = (f"import ID = {spec['id_kind']}. 위 두 줄을 그대로 실행하면 "
+                    f"조회한 ID(`${v}`)로 바로 import 됩니다.")
+        else:
+            if hint:
+                lines.append(f"# {spec['id_kind']} 조회/형식:")
+                lines.append(f"# {hint}")
+            lines.append(f"{tf} {addr} <{spec['id_kind']}>")
+            extra = f" (에러에서 '{name}' 감지)" if name else ""
+            note = f"import ID = {spec['id_kind']}. 위 안내대로 실제 ID를 구해 넣으세요.{extra}"
 
     return {"addr": addr, "rtype": rtype, "commands": "\n".join(lines), "note": note}
 

@@ -5,12 +5,12 @@ terraform {
   }
 }
 
-# 2-2 Real-time data analytics â€” ap-northeast-2
+# 2-2 Real-time data analytics ??ap-northeast-2
 provider "aws" {
   region = "ap-northeast-2"
 }
 
-# â”€â”€ VPC analytics-vpc 10.20.0.0/16 â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ?€?€ VPC analytics-vpc 10.20.0.0/16 ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
 resource "aws_vpc" "main" {
   cidr_block           = "10.20.0.0/16"
   enable_dns_support   = true
@@ -95,19 +95,19 @@ resource "aws_route_table_association" "priv_b" {
   route_table_id = aws_route_table.priv_b.id
 }
 
-# â”€â”€ Kinesis Data Stream (on-demand) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ?€?€ Kinesis Data Stream (on-demand) ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
 resource "aws_kinesis_stream" "orders" {
   name = "wsc2026-order-stream"
   stream_mode_details { stream_mode = "ON_DEMAND" }
 }
 
-# â”€â”€ EC2 (private, SSM) producing order logs to Kinesis â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ?€?€ EC2 (private, SSM) producing order logs to Kinesis ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
 data "aws_ami" "al2023" {
   most_recent = true
   owners      = ["amazon"]
   filter {
     name   = "name"
-    values = ["al2023-ami-*-x86_64"]
+    values = ["al2023-ami-2023.*-x86_64"]
   }
   filter {
     name   = "virtualization-type"
@@ -165,13 +165,13 @@ resource "aws_instance" "ec2" {
     #!/bin/bash
     set -eux
     dnf install -y python3-pip
-    # ë°°í¬íŒŒì¼ Application.md ì˜ ì•±ì„ /opt/app ì— ë°°ì¹˜í•˜ì—¬ 8080 ìœ¼ë¡œ ê¸°ë™ (Kinesis: wsc2026-order-stream)
+    # ë°°í¬?Œì¼ Application.md ???±ì„ /opt/app ??ë°°ì¹˜?˜ì—¬ 8080 ?¼ë¡œ ê¸°ë™ (Kinesis: wsc2026-order-stream)
     mkdir -p /opt/app
   EOF
   tags                   = { Name = "wsc2026-analytics-ec2" }
 }
 
-# â”€â”€ ALB â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ?€?€ ALB ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
 resource "aws_security_group" "alb" {
   name   = "wsc2026-analytics-alb-sg"
   vpc_id = aws_vpc.main.id
@@ -223,7 +223,7 @@ resource "aws_lb_listener" "http" {
   }
 }
 
-# â”€â”€ Managed Apache Flink Studio (Zeppelin) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ?€?€ Managed Apache Flink Studio (Zeppelin) ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
 resource "aws_iam_role" "flink" {
   name = "wsc2026-analytics-flink-role"
   assume_role_policy = jsonencode({

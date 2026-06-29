@@ -433,7 +433,7 @@ data "aws_ami" "al2023" {
   owners      = ["amazon"]
   filter {
     name   = "name"
-    values = ["al2023-ami-*-x86_64"]
+    values = ["al2023-ami-2023.*-x86_64"]
   }
   filter {
     name   = "virtualization-type"
@@ -505,7 +505,7 @@ EOF
   tags = { Name = "wsi-bastion" }
 }
 
-# bastion â†’ EKS API 443 í—ˆìš©
+# bastion ??EKS API 443 ?ˆìš©
 resource "aws_security_group_rule" "bastion_to_eks" {
   type                     = "ingress"
   from_port                = 443
@@ -516,8 +516,7 @@ resource "aws_security_group_rule" "bastion_to_eks" {
   description              = "Allow bastion to EKS API"
 }
 
-# bastion role â†’ EKS cluster-admin ì•¡ì„¸ìŠ¤
-resource "aws_eks_access_entry" "bastion" {
+# bastion role ??EKS cluster-admin ?¡ì„¸??resource "aws_eks_access_entry" "bastion" {
   cluster_name  = aws_eks_cluster.main.name
   principal_arn = aws_iam_role.bastion.arn
   type          = "STANDARD"
@@ -549,8 +548,8 @@ resource "aws_eks_addon" "coredns" {
   depends_on = [aws_eks_node_group.system]
 }
 
-# â”€â”€ Outputs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# (k8s í´ë”ê°€ terraform_remote_state ë¡œ ì½ì–´ê°)
+# ?€?€ Outputs ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# (k8s ?´ë”ê°€ terraform_remote_state ë¡??½ì–´ê°?
 
 output "sqs_queue_url" {
   value = aws_sqs_queue.main.url

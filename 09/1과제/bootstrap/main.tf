@@ -1,12 +1,11 @@
 ###############################################################################
-# 1단계 (로컬에서 실행) - 네트워크 기반 + Bastion + 코드 배포용 S3
-#   - VPC(서브넷/IGW/라우팅/VPC Endpoint 포함) 생성
-#   - Bastion EC2 (Administrator 권한, Password 인증, EIP 고정)
-#       └ user_data 에서 awscli/kubectl/eksctl/terraform/git 설치
-#       └ 2단계 코드(app/, modules/, manifest/, 배포파일/)를 S3에서 자동 다운로드
-#   - 2단계 코드를 담을 코드 버킷 생성 및 업로드
-#
-# 실행 후 Bastion 에 SSH 접속하여 ~/project/app 에서 `terraform apply` 로 2단계 진행.
+# 1?�계 (로컬?�서 ?�행) - ?�트?�크 기반 + Bastion + 코드 배포??S3
+#   - VPC(?�브??IGW/?�우??VPC Endpoint ?�함) ?�성
+#   - Bastion EC2 (Administrator 권한, Password ?�증, EIP 고정)
+#       ??user_data ?�서 awscli/kubectl/eksctl/terraform/git ?�치
+#       ??2?�계 코드(app/, modules/, manifest/, 배포?�일/)�?S3?�서 ?�동 ?�운로드
+#   - 2?�계 코드�??�을 코드 버킷 ?�성 �??�로??#
+# ?�행 ??Bastion ??SSH ?�속?�여 ~/project/app ?�서 `terraform apply` �?2?�계 진행.
 ###############################################################################
 
 terraform {
@@ -34,8 +33,8 @@ module "VPC" {
   isolated_subnet_names = ["worldpay-isolated-subnet-a", "worldpay-isolated-subnet-c"]
 }
 
-# ========== 코드 배포용 S3 버킷 ==========
-# 2단계(app) 코드를 Bastion 으로 전달하기 위한 버킷
+# ========== 코드 배포??S3 버킷 ==========
+# 2?�계(app) 코드�?Bastion ?�로 ?�달?�기 ?�한 버킷
 resource "aws_s3_bucket" "code" {
   bucket_prefix = "worldpay-code-"
   force_destroy = true
@@ -68,13 +67,13 @@ resource "aws_s3_object" "manifest" {
   etag     = filemd5("${path.root}/../manifest/${each.value}")
 }
 
-# 배포파일/*
+# 배포?�일/*
 resource "aws_s3_object" "dist" {
-  for_each = fileset("${path.root}/../배포파일", "*")
+  for_each = fileset("${path.root}/../배포?�일", "*")
   bucket   = aws_s3_bucket.code.id
-  key      = "배포파일/${each.value}"
-  source   = "${path.root}/../배포파일/${each.value}"
-  etag     = filemd5("${path.root}/../배포파일/${each.value}")
+  key      = "배포?�일/${each.value}"
+  source   = "${path.root}/../배포?�일/${each.value}"
+  etag     = filemd5("${path.root}/../배포?�일/${each.value}")
 }
 
 # ========== Bastion ==========
@@ -83,7 +82,7 @@ data "aws_ami" "al2023" {
   owners      = ["amazon"]
   filter {
     name   = "name"
-    values = ["al2023-ami-*-x86_64"]
+    values = ["al2023-ami-2023.*-x86_64"]
   }
 }
 
@@ -140,7 +139,7 @@ resource "aws_instance" "bastion" {
   vpc_security_group_ids = [aws_security_group.bastion.id]
   iam_instance_profile   = aws_iam_instance_profile.bastion.name
 
-  # 2단계 코드가 S3에 모두 올라온 뒤에 부팅하도록 보장
+  # 2?�계 코드가 S3??모두 ?�라???�에 부?�하?�록 보장
   depends_on = [
     aws_s3_object.app,
     aws_s3_object.modules,
@@ -150,13 +149,13 @@ resource "aws_instance" "bastion" {
 
   user_data = <<-EOF
     #!/bin/bash
-    # ===== Password 인증 =====
+    # ===== Password ?�증 =====
     echo 'ec2-user:worldpay2026!' | chpasswd
     sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
     sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
     systemctl restart sshd
 
-    # ===== 기본 패키지 =====
+    # ===== 기본 ?�키지 =====
     yum install -y curl jq unzip git
 
     # awscliv2
@@ -170,12 +169,12 @@ resource "aws_instance" "bastion" {
     # eksctl
     curl -sL "https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_Linux_amd64.tar.gz" | tar xz -C /usr/local/bin
 
-    # terraform (2단계 apply 용)
+    # terraform (2?�계 apply ??
     curl -sLo /tmp/terraform.zip "https://releases.hashicorp.com/terraform/1.13.4/terraform_1.13.4_linux_amd64.zip"
     unzip -qo /tmp/terraform.zip -d /usr/local/bin
     chmod +x /usr/local/bin/terraform
 
-    # ===== 2단계 코드 다운로드 =====
+    # ===== 2?�계 코드 ?�운로드 =====
     mkdir -p /home/ec2-user/project
     aws s3 cp s3://${aws_s3_bucket.code.id}/ /home/ec2-user/project --recursive --region ap-northeast-2
     chown -R ec2-user:ec2-user /home/ec2-user/project

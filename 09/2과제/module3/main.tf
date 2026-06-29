@@ -15,9 +15,9 @@ provider "aws" {
   region = "ap-northeast-3"
 }
 
-# ── 변수: 대회 비번호 (S3 버킷 이름에 사용) ──────────────────────────
+# ?�?� 변?? ?�??비번??(S3 버킷 ?�름???�용) ?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�
 variable "competitor_number" {
-  description = "대회 비번호 (예: 01, 15). S3 버킷 이름 wsc-msk-order-data-<비번호>-bucket 에 사용"
+  description = "?�??비번??(?? 01, 15). S3 버킷 ?�름 wsc-msk-order-data-<비번??-bucket ???�용"
   type        = string
 }
 
@@ -234,7 +234,7 @@ resource "aws_iam_role_policy" "ec2_s3" {
         Resource = "*"
       },
       {
-        # 채점/검증 편의: EC2에서 Lambda ESM 상태 확인·enable, DynamoDB 조회
+        # 채점/검�??�의: EC2?�서 Lambda ESM ?�태 ?�인·enable, DynamoDB 조회
         Effect = "Allow"
         Action = [
           "lambda:ListEventSourceMappings",
@@ -261,7 +261,7 @@ data "aws_ami" "al2023" {
   owners      = ["amazon"]
   filter {
     name   = "name"
-    values = ["al2023-ami-*-x86_64"]
+    values = ["al2023-ami-2023.*-x86_64"]
   }
   filter {
     name   = "virtualization-type"
@@ -269,7 +269,7 @@ data "aws_ami" "al2023" {
   }
 }
 
-# Bastion IAM Role (admin + 신뢰정책 전체 오픈)
+# Bastion IAM Role (admin + ?�뢰?�책 ?�체 ?�픈)
 resource "aws_iam_role" "bastion" {
   name = "wsc-bastion-role"
   assume_role_policy = jsonencode({
@@ -292,7 +292,7 @@ resource "aws_iam_instance_profile" "bastion" {
   role = aws_iam_role.bastion.name
 }
 
-# Bastion EC2 (A존, public subnet)
+# Bastion EC2 (A�? public subnet)
 resource "aws_instance" "bastion" {
   ami                         = data.aws_ami.al2023.id
   instance_type               = "t3.micro"
@@ -304,7 +304,7 @@ resource "aws_instance" "bastion" {
   tags = { Name = "wsc-bastion-ec2" }
 }
 
-# Application EC2 (A존, public subnet)
+# Application EC2 (A�? public subnet)
 resource "aws_instance" "app" {
   ami                    = data.aws_ami.al2023.id
   instance_type          = "t3.medium"
@@ -312,7 +312,7 @@ resource "aws_instance" "app" {
   vpc_security_group_ids = [aws_security_group.ec2.id]
   iam_instance_profile   = aws_iam_instance_profile.ec2.name
 
-  # user_data 변경 시 stop/start(재실행 안 됨)이 아니라 인스턴스 교체 → 새 user_data가 깨끗이 실행
+  # user_data 변�???stop/start(?�실?????????�니???�스?�스 교체 ????user_data가 깨끗???�행
   user_data_replace_on_change = true
 
   user_data = <<-EOF
@@ -320,19 +320,18 @@ resource "aws_instance" "app" {
 exec > /var/log/user-data.log 2>&1
 cd /home/ec2-user
 
-# Java + Python + pip 설치
+# Java + Python + pip ?�치
 dnf install -y java-11-amazon-corretto python3 python3-pip
 
-# kafka-python 설치 (producer.py/ec2_consumer.py 가 쓰는 라이브러리)
+# kafka-python ?�치 (producer.py/ec2_consumer.py 가 ?�는 ?�이브러�?
 python3 -m pip install kafka-python-ng boto3
 
-# ★ 먼저: ec2_consumer.py / producer.py 다운로드 (작고 빠름 — kafka tarball 기다리지 않음)
+# ??먼�?: ec2_consumer.py / producer.py ?�운로드 (?�고 빠름 ??kafka tarball 기다리�? ?�음)
 aws s3 cp s3://wsc-msk-setup-${data.aws_caller_identity.current.account_id}/ec2_consumer.py /home/ec2-user/ec2_consumer.py --region ap-northeast-3
 aws s3 cp s3://wsc-msk-setup-${data.aws_caller_identity.current.account_id}/producer.py /home/ec2-user/producer.py --region ap-northeast-3
 chown ec2-user:ec2-user /home/ec2-user/ec2_consumer.py /home/ec2-user/producer.py
 
-# Kafka CLI 클라이언트(토픽 생성용)는 느린 archive.apache.org → 백그라운드로 받아 user_data 블로킹 안 함
-(
+# Kafka CLI ?�라?�언???�픽 ?�성?????�린 archive.apache.org ??백그?�운?�로 받아 user_data 블로??????(
   for i in 1 2 3; do
     curl -fsS -o /home/ec2-user/kafka.tgz https://archive.apache.org/dist/kafka/3.5.1/kafka_2.13-3.5.1.tgz && break
     sleep 10
@@ -341,13 +340,13 @@ chown ec2-user:ec2-user /home/ec2-user/ec2_consumer.py /home/ec2-user/producer.p
   chown -R ec2-user:ec2-user /home/ec2-user/kafka_2.13-3.5.1
 ) &
 
-# MSK 준비될 때까지 대기 후 consumer 백그라운드 실행
+# MSK 준비될 ?�까지 ?��???consumer 백그?�운???�행
 cat > /home/ec2-user/start_consumer.sh << 'SCRIPT'
 #!/bin/bash
 REGION=ap-northeast-3
 BUCKET=wsc-msk-order-data-${data.aws_caller_identity.current.account_id}
 
-# MSK가 ACTIVE 상태가 될 때까지 대기 (최대 30분)
+# MSK가 ACTIVE ?�태가 ???�까지 ?��?(최�? 30�?
 for i in $(seq 1 60); do
   CLUSTER_ARN=$(aws kafka list-clusters --region $REGION \
     --query "ClusterInfoList[?ClusterName=='msk-order-cluster'].ClusterArn" --output text 2>/dev/null)
@@ -361,18 +360,18 @@ for i in $(seq 1 60); do
   sleep 30
 done
 
-# consumer 실행
+# consumer ?�행
 python3 /home/ec2-user/ec2_consumer.py \
   --bootstrap-servers $BOOTSTRAP \
   --bucket $BUCKET >> /home/ec2-user/consumer.log 2>&1
 SCRIPT
 
-# S3 버킷명 실제 값으로 치환
+# S3 버킷�??�제 값으�?치환
 sed -i "s|wsc-msk-order-data-\${data.aws_caller_identity.current.account_id}|wsc-msk-order-data-${data.aws_caller_identity.current.account_id}|g" /home/ec2-user/start_consumer.sh
 chmod +x /home/ec2-user/start_consumer.sh
 chown ec2-user:ec2-user /home/ec2-user/start_consumer.sh
 
-# 백그라운드 실행
+# 백그?�운???�행
 nohup /home/ec2-user/start_consumer.sh &
 
 echo "Setup complete" > /home/ec2-user/setup_done.txt
@@ -381,12 +380,12 @@ EOF
   tags = { Name = "wsc-app-ec2" }
 }
 
-# S3 Bucket (이름: wsc-msk-order-data-<비번호>-bucket)
+# S3 Bucket (?�름: wsc-msk-order-data-<비번??-bucket)
 resource "aws_s3_bucket" "data" {
   bucket = "wsc-msk-order-data-${var.competitor_number}-bucket"
 }
 
-# S3 Bucket for setup files (ec2_consumer.py 등)
+# S3 Bucket for setup files (ec2_consumer.py ??
 resource "aws_s3_bucket" "setup" {
   bucket = "wsc-msk-setup-${data.aws_caller_identity.current.account_id}"
 }
@@ -514,13 +513,12 @@ resource "aws_iam_role_policy" "lambda" {
   })
 }
 
-# VPC Lambda는 ENI 생성 권한이 생성 시점에 필요 → 관리형 정책 부착
-resource "aws_iam_role_policy_attachment" "lambda_vpc" {
+# VPC Lambda??ENI ?�성 권한???�성 ?�점???�요 ??관리형 ?�책 부�?resource "aws_iam_role_policy_attachment" "lambda_vpc" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
   role       = aws_iam_role.lambda.name
 }
 
-# IAM 정책 전파 지연(eventual consistency) 대기 → Lambda 생성 시 ENI 권한 확실히 적용
+# IAM ?�책 ?�파 지??eventual consistency) ?��???Lambda ?�성 ??ENI 권한 ?�실???�용
 resource "time_sleep" "wait_iam" {
   depends_on = [
     aws_iam_role_policy.lambda,

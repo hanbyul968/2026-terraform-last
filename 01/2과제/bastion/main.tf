@@ -1,27 +1,24 @@
 # =============================================================================
-# 1단계 (로컬 Windows PowerShell에서 apply) - 배포용 Bastion EC2
-#   - 목적: Windows 로컬 대신 Linux Bastion 안에서 2과제 4개 모듈
-#           (module-1 ~ module-4, 멀티 리전)을 terraform apply 한다.
-#           module-2 의 pymysql Lambda Layer 빌드(local-exec)가 bash 이므로
-#           Linux Bastion 에서만 정상 동작한다.
-#   - 접속: SSM Session Manager (SSH 키/인바운드 불필요)
-#   - 권한: 인스턴스 프로파일(AdministratorAccess)로 terraform 자격증명 자동 사용
-#   - 자동화: 상위(../) 2과제 코드(module-* / lambda / src 포함)를 zip 으로 묶어
-#            부트스트랩 S3 에 업로드 -> user_data 가 내려받아 /opt/task2 에 준비.
-#            SSM 접속 후 `bash /opt/task2/deploy.sh` 한 줄로 4개 모듈이 순서대로
-#            배포된다. (module-1 -> module-2 -> module-3 -> module-4)
+# 1?�계 (로컬 Windows PowerShell?�서 apply) - 배포??Bastion EC2
+#   - 목적: Windows 로컬 ?�??Linux Bastion ?�에??2과제 4�?모듈
+#           (module-1 ~ module-4, 멀??리전)??terraform apply ?�다.
+#           module-2 ??pymysql Lambda Layer 빌드(local-exec)가 bash ?��?�?#           Linux Bastion ?�서�??�상 ?�작?�다.
+#   - ?�속: SSM Session Manager (SSH ???�바?�드 불필??
+#   - 권한: ?�스?�스 ?�로?�일(AdministratorAccess)�?terraform ?�격증명 ?�동 ?�용
+#   - ?�동?? ?�위(../) 2과제 코드(module-* / lambda / src ?�함)�?zip ?�로 묶어
+#            부?�스?�랩 S3 ???�로??-> user_data 가 ?�려받아 /opt/task2 ??준�?
+#            SSM ?�속 ??`bash /opt/task2/deploy.sh` ??줄로 4�?모듈???�서?��?#            배포?�다. (module-1 -> module-2 -> module-3 -> module-4)
 #
-# ※ 이 폴더(state)는 module-* 와 분리되어 있다. 채점 전 이 폴더에서만
-#   `terraform destroy` 하면 Bastion(+부트스트랩 버킷)만 제거된다.
+# ?????�더(state)??module-* ?� 분리?�어 ?�다. 채점 ?????�더?�서�?#   `terraform destroy` ?�면 Bastion(+부?�스?�랩 버킷)�??�거?�다.
 #
-# ※ 권위 모듈 세트: module-1 ~ module-4 (각 폴더에 main.tf + lambda/ 존재).
-#   중복으로 보이는 빈 module1~module4 세트(.tf 없음)는 디스크에 그대로 두되
-#   deploy.sh 배포 순서에서는 제외한다.
+# ??권위 모듈 ?�트: module-1 ~ module-4 (�??�더??main.tf + lambda/ 존재).
+#   중복?�로 보이??�?module1~module4 ?�트(.tf ?�음)???�스?�에 그�?�??�되
+#   deploy.sh 배포 ?�서?�서???�외?�다.
 # =============================================================================
 
 data "aws_caller_identity" "current" {}
 
-# ---- 기본 VPC / 서브넷 사용 (채점 대상 VPC와 무관, 새 VPC 생성 안 함) ----
+# ---- 기본 VPC / ?�브???�용 (채점 ?�??VPC?� 무�?, ??VPC ?�성 ???? ----
 data "aws_vpc" "default" {
   default = true
 }
@@ -40,7 +37,7 @@ data "aws_ami" "al2023" {
 
   filter {
     name   = "name"
-    values = ["al2023-ami-*-x86_64"]
+    values = ["al2023-ami-2023.*-x86_64"]
   }
   filter {
     name   = "architecture"
@@ -49,10 +46,9 @@ data "aws_ami" "al2023" {
 }
 
 # =============================================================================
-# 상위(2과제) 코드 번들링 -> 부트스트랩 S3 업로드
-#  - source_dir : 상위 2과제 폴더(현재 로컬 파일, module-* / lambda / src 포함)
-#  - 제외       : bastion 폴더, .terraform, state, lock, plan (리눅스에서 새로 init)
-#  - 번들 zip 은 2과제 폴더 "밖"(01/)에 생성하여 자기 자신을 포함하지 않게 한다.
+# ?�위(2과제) 코드 번들�?-> 부?�스?�랩 S3 ?�로??#  - source_dir : ?�위 2과제 ?�더(?�재 로컬 ?�일, module-* / lambda / src ?�함)
+#  - ?�외       : bastion ?�더, .terraform, state, lock, plan (리눅?�에???�로 init)
+#  - 번들 zip ?� 2과제 ?�더 "�?(01/)???�성?�여 ?�기 ?�신???�함?��? ?�게 ?�다.
 # =============================================================================
 data "archive_file" "task2" {
   type        = "zip"
@@ -68,7 +64,7 @@ data "archive_file" "task2" {
     "**/terraform.tfstate.*",
     "**/.terraform.lock.hcl",
     "**/*.tfplan",
-    # 빌드 산출물(리눅스에서 새로 생성됨) - 스테일 아티팩트 번들 방지
+    # 빌드 ?�출�?리눅?�에???�로 ?�성?? - ?�테???�티?�트 번들 방�?
     "**/*.zip",
     "**/layer/**",
     ".gitignore",
@@ -113,13 +109,12 @@ resource "aws_iam_role" "bastion" {
   assume_role_policy = data.aws_iam_policy_document.ec2_assume.json
 }
 
-# SSM 접속용
-resource "aws_iam_role_policy_attachment" "ssm" {
+# SSM ?�속??resource "aws_iam_role_policy_attachment" "ssm" {
   role       = aws_iam_role.bastion.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
-# terraform 이 4개 모듈(멀티 리전)의 모든 리소스를 생성할 수 있도록 (대회 계정 한정)
+# terraform ??4�?모듈(멀??리전)??모든 리소?��? ?�성?????�도�?(?�??계정 ?�정)
 resource "aws_iam_role_policy_attachment" "admin" {
   role       = aws_iam_role.bastion.name
   policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
@@ -130,7 +125,7 @@ resource "aws_iam_instance_profile" "bastion" {
   role = aws_iam_role.bastion.name
 }
 
-# ---- 보안 그룹: 인바운드 0개 (SSM 은 아웃바운드 443만 사용) ----
+# ---- 보안 그룹: ?�바?�드 0�?(SSM ?� ?�웃바운??443�??�용) ----
 resource "aws_security_group" "bastion" {
   name        = "${var.player_id}-task2-bastion-sg"
   description = "Bastion SG - no inbound, SSM via outbound 443 only"
@@ -147,7 +142,7 @@ resource "aws_security_group" "bastion" {
   tags = { Name = "${var.player_id}-task2-bastion-sg" }
 }
 
-# ---- user_data: 도구 설치 + 코드 번들 자동 준비 + deploy.sh 생성 ----
+# ---- user_data: ?�구 ?�치 + 코드 번들 ?�동 준�?+ deploy.sh ?�성 ----
 locals {
   user_data = templatefile("${path.module}/userdata.sh.tpl", {
     bucket    = aws_s3_bucket.bootstrap.id
@@ -165,7 +160,7 @@ resource "aws_instance" "bastion" {
   vpc_security_group_ids      = [aws_security_group.bastion.id]
   associate_public_ip_address = true
 
-  # 번들 내용이 바뀌면 user_data 해시가 바뀌어 인스턴스가 교체된다.
+  # 번들 ?�용??바뀌면 user_data ?�시가 바뀌어 ?�스?�스가 교체?�다.
   user_data = local.user_data
 
   metadata_options {

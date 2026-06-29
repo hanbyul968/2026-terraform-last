@@ -1,4 +1,4 @@
-# 2과제(02) 배포용 Bastion — 로컬 PowerShell 에서 apply → SSM → bash /opt/task2/deploy.sh
+# 2과제(02) 배포??Bastion ??로컬 PowerShell ?�서 apply ??SSM ??bash /opt/task2/deploy.sh
 data "aws_caller_identity" "current" {}
 data "aws_vpc" "default" { default = true }
 data "aws_subnets" "default" {
@@ -12,7 +12,7 @@ data "aws_ami" "al2023" {
   owners      = ["amazon"]
   filter {
     name   = "name"
-    values = ["al2023-ami-*-x86_64"]
+    values = ["al2023-ami-2023.*-x86_64"]
   }
   filter {
     name   = "architecture"

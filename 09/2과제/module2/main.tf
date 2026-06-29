@@ -13,7 +13,7 @@ provider "aws" {
 
 data "aws_caller_identity" "current" {}
 
-# setup.sh 를 담는 S3 버킷 (bastion이 받아 실행)
+# setup.sh �??�는 S3 버킷 (bastion??받아 ?�행)
 resource "aws_s3_bucket" "setup" {
   bucket = "wsc2026-logging-setup-${data.aws_caller_identity.current.account_id}"
 }
@@ -259,14 +259,14 @@ resource "aws_security_group" "cloudshell" {
   tags = { Name = "wsc2026-logging-cloudshell-sg" }
 }
 
-# ── Bastion EC2 (Windows 로컬 대신 VPC 내부에서 kubectl/helm 실행) ────────
-# private endpoint 클러스터라 VPC 밖(Windows 로컬)에선 kubectl 불가 → bastion에서 수행
+# ?�?� Bastion EC2 (Windows 로컬 ?�??VPC ?��??�서 kubectl/helm ?�행) ?�?�?�?�?�?�?�?�
+# private endpoint ?�러?�터??VPC �?Windows 로컬)?�선 kubectl 불�? ??bastion?�서 ?�행
 data "aws_ami" "al2023" {
   most_recent = true
   owners      = ["amazon"]
   filter {
     name   = "name"
-    values = ["al2023-ami-*-x86_64"]
+    values = ["al2023-ami-2023.*-x86_64"]
   }
   filter {
     name   = "virtualization-type"
@@ -334,7 +334,7 @@ curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 |
 aws eks update-kubeconfig --name wsc2026-logging-cluster --region ap-southeast-2
 sudo -u ec2-user aws eks update-kubeconfig --name wsc2026-logging-cluster --region ap-southeast-2
 
-# S3에서 setup.sh 받아 나머지 리소스(ALB Controller, Loki/Grafana/FluentBit/nginx, Ingress) 자동 구성
+# S3?�서 setup.sh 받아 ?�머지 리소??ALB Controller, Loki/Grafana/FluentBit/nginx, Ingress) ?�동 구성
 aws s3 cp s3://wsc2026-logging-setup-${data.aws_caller_identity.current.account_id}/setup.sh /root/setup.sh --region ap-southeast-2
 chmod +x /root/setup.sh
 /root/setup.sh
@@ -348,7 +348,7 @@ EOF
   tags = { Name = "wsc2026-logging-bastion" }
 }
 
-# bastion role → EKS cluster-admin (kubectl 권한)
+# bastion role ??EKS cluster-admin (kubectl 권한)
 resource "aws_eks_access_entry" "bastion" {
   cluster_name  = aws_eks_cluster.main.name
   principal_arn = aws_iam_role.bastion.arn
@@ -365,7 +365,7 @@ resource "aws_eks_access_policy_association" "bastion_admin" {
   depends_on = [aws_eks_access_entry.bastion]
 }
 
-# bastion → EKS API 443 (클러스터 SG가 VPC CIDR 443은 이미 허용하지만 명시)
+# bastion ??EKS API 443 (?�러?�터 SG가 VPC CIDR 443?� ?��? ?�용?��?�?명시)
 resource "aws_security_group_rule" "cluster_from_bastion" {
   type                     = "ingress"
   from_port                = 443
@@ -473,11 +473,11 @@ resource "aws_iam_role_policy" "alb_controller_extra" {
   })
 }
 
-# ALB는 Ingress(logging-ingress) + AWS Load Balancer Controller가 생성한다.
-# (terraform에서 ALB/TG/리스너를 만들면 같은 이름으로 중복 생성되어 DuplicateLoadBalancerName 충돌)
-# → 실제 ALB 생성·파드 IP 타깃 등록·경로 라우팅은 k8s Ingress가 담당. README 5단계 참고.
+# ALB??Ingress(logging-ingress) + AWS Load Balancer Controller가 ?�성?�다.
+# (terraform?�서 ALB/TG/리스?��? 만들�?같�? ?�름?�로 중복 ?�성?�어 DuplicateLoadBalancerName 충돌)
+# ???�제 ALB ?�성·?�드 IP ?��??�록·경로 ?�우?��? k8s Ingress가 ?�당. README 5?�계 참고.
 
-# CloudShell/bastion(VPC 내부) → EKS API 접근 허용 (private cluster 채점용)
+# CloudShell/bastion(VPC ?��?) ??EKS API ?�근 ?�용 (private cluster 채점??
 resource "aws_security_group_rule" "cluster_from_cloudshell" {
   type                     = "ingress"
   from_port                = 0

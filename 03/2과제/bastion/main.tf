@@ -1,18 +1,16 @@
 # =============================================================================
-# 03/2과제 1단계 (로컬 Windows PowerShell 에서 apply) - 배포용 Bastion EC2
-#   - 목적: Windows 로컬 대신 Linux Bastion 안에서 2과제 4개 모듈
-#           (module1~module4, 멀티 리전)을 terraform apply 한다.
+# 03/2과제 1?�계 (로컬 Windows PowerShell ?�서 apply) - 배포??Bastion EC2
+#   - 목적: Windows 로컬 ?�??Linux Bastion ?�에??2과제 4�?모듈
+#           (module1~module4, 멀??리전)??terraform apply ?�다.
 #           module1 Pillow 빌드(build.sh), module2 saml-iam.sh,
-#           module3 helm/kubectl(deploy_k8s.sh) 모두 bash 이므로 Linux 필수.
-#   - 접속: SSM Session Manager (SSH 키/인바운드 불필요)
-#   - 권한: 인스턴스 프로파일(AdministratorAccess)
-#   - 자동화: 상위(../) 2과제 코드를 zip 으로 묶어 부트스트랩 S3 에 업로드 ->
-#            user_data 가 내려받아 /opt/task2 준비. SSM 접속 후
-#            `bash /opt/task2/deploy.sh` 로 module1->module4 + EKS k8s 단계까지 배포.
+#           module3 helm/kubectl(deploy_k8s.sh) 모두 bash ?��?�?Linux ?�수.
+#   - ?�속: SSM Session Manager (SSH ???�바?�드 불필??
+#   - 권한: ?�스?�스 ?�로?�일(AdministratorAccess)
+#   - ?�동?? ?�위(../) 2과제 코드�?zip ?�로 묶어 부?�스?�랩 S3 ???�로??->
+#            user_data 가 ?�려받아 /opt/task2 준�? SSM ?�속 ??#            `bash /opt/task2/deploy.sh` �?module1->module4 + EKS k8s ?�계까�? 배포.
 #
-#   ※ 이 폴더(state)는 module1~module4 와 분리되어 있다. 채점 전 이 폴더에서만
-#     terraform destroy 하면 Bastion(+부트스트랩 버킷)만 제거된다.
-#   ※ module3 EKS 는 채점이 PUBLIC endpoint 를 요구하므로 닫지 않는다.
+#   ?????�더(state)??module1~module4 ?� 분리?�어 ?�다. 채점 ?????�더?�서�?#     terraform destroy ?�면 Bastion(+부?�스?�랩 버킷)�??�거?�다.
+#   ??module3 EKS ??채점??PUBLIC endpoint �??�구?��?�??��? ?�는??
 # =============================================================================
 
 data "aws_caller_identity" "current" {}
@@ -34,7 +32,7 @@ data "aws_ami" "al2023" {
 
   filter {
     name   = "name"
-    values = ["al2023-ami-*-x86_64"]
+    values = ["al2023-ami-2023.*-x86_64"]
   }
   filter {
     name   = "architecture"
@@ -42,7 +40,7 @@ data "aws_ami" "al2023" {
   }
 }
 
-# ---- 상위(2과제) 코드 번들링 -> 부트스트랩 S3 ----
+# ---- ?�위(2과제) 코드 번들�?-> 부?�스?�랩 S3 ----
 data "archive_file" "task2" {
   type        = "zip"
   source_dir  = "${path.module}/.."
@@ -117,7 +115,7 @@ resource "aws_iam_instance_profile" "bastion" {
   role = aws_iam_role.bastion.name
 }
 
-# ---- 보안 그룹: 인바운드 0개 (SSM 아웃바운드 443만) ----
+# ---- 보안 그룹: ?�바?�드 0�?(SSM ?�웃바운??443�? ----
 resource "aws_security_group" "bastion" {
   name        = "${var.player_id}-task2-03-bastion-sg"
   description = "Bastion SG - no inbound, SSM via outbound only"

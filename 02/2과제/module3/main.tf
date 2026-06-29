@@ -5,14 +5,14 @@ terraform {
   }
 }
 
-# 2-3 Cloud event handling â€” eu-west-1
+# 2-3 Cloud event handling ??eu-west-1
 provider "aws" {
   region = "eu-west-1"
 }
 
 data "aws_caller_identity" "current" {}
 
-# â”€â”€ VPC event-vpc 172.16.0.0/16 â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ?€?€ VPC event-vpc 172.16.0.0/16 ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
 resource "aws_vpc" "main" {
   cidr_block           = "172.16.0.0/16"
   enable_dns_support   = true
@@ -54,13 +54,13 @@ resource "aws_route_table_association" "pub_b" {
   route_table_id = aws_route_table.pub.id
 }
 
-# â”€â”€ EC2 (monitored) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ?€?€ EC2 (monitored) ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
 data "aws_ami" "al2023" {
   most_recent = true
   owners      = ["amazon"]
   filter {
     name   = "name"
-    values = ["al2023-ami-*-x86_64"]
+    values = ["al2023-ami-2023.*-x86_64"]
   }
   filter {
     name   = "virtualization-type"
@@ -103,12 +103,12 @@ resource "aws_instance" "ec2" {
   tags                   = { Name = "wsc2026-event-ec2" }
 }
 
-# â”€â”€ SNS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ?€?€ SNS ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
 resource "aws_sns_topic" "alert" {
   name = "wsc2026-event-alert"
 }
 
-# â”€â”€ Lambda (remediate + notify) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ?€?€ Lambda (remediate + notify) ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
 resource "aws_iam_role" "lambda" {
   name = "wsc2026-event-lambda-role"
   assume_role_policy = jsonencode({
@@ -150,7 +150,7 @@ resource "aws_lambda_permission" "events" {
   principal     = "events.amazonaws.com"
 }
 
-# â”€â”€ CloudTrail (R/W management events) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ?€?€ CloudTrail (R/W management events) ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
 resource "aws_s3_bucket" "trail" {
   bucket        = "wsc2026-event-trail-${data.aws_caller_identity.current.account_id}"
   force_destroy = true
@@ -196,7 +196,7 @@ resource "aws_cloudtrail" "main" {
   depends_on = [aws_s3_bucket_policy.trail]
 }
 
-# â”€â”€ EventBridge rules (4) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ?€?€ EventBridge rules (4) ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
 locals {
   rules = {
     "wsc2026-sg-change-rule"       = ["AuthorizeSecurityGroupIngress"]

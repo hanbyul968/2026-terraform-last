@@ -12,26 +12,7 @@ provider "aws" {
 data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
 
-# EKS 클러스터에 k8s/helm provider 연결.
-# apply 시점엔 클러스터 endpoint 가 public(임시) 으로 열려 있어야 Windows 에서 접근 가능.
-provider "kubernetes" {
-  host                   = aws_eks_cluster.this.endpoint
-  cluster_ca_certificate = base64decode(aws_eks_cluster.this.certificate_authority[0].data)
-  exec {
-    api_version = "client.authentication.k8s.io/v1beta1"
-    command     = "aws"
-    args        = ["eks", "get-token", "--cluster-name", aws_eks_cluster.this.name, "--region", var.region]
-  }
-}
-
-provider "helm" {
-  kubernetes {
-    host                   = aws_eks_cluster.this.endpoint
-    cluster_ca_certificate = base64decode(aws_eks_cluster.this.certificate_authority[0].data)
-    exec {
-      api_version = "client.authentication.k8s.io/v1beta1"
-      command     = "aws"
-      args        = ["eks", "get-token", "--cluster-name", aws_eks_cluster.this.name, "--region", var.region]
-    }
-  }
-}
+# NOTE: kubernetes/helm provider 는 2단계(k8s/) 스테이지로 분리되었다.
+#   root 는 순수 AWS provider 만 사용하므로, 클러스터가 없는 상태에서도
+#   terraform import / plan / destroy 가 깨끗하게 동작한다.
+#   k8s/helm 리소스는 root apply 후 04\1과제\k8s\ 에서 적용한다.

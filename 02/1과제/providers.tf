@@ -13,26 +13,8 @@ provider "aws" {
 data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
 
-# EKS 클러스터에 k8s/helm provider 연결.
-# 클러스터 endpoint 가 public 으로 열려 있어야 CloudShell/로컬에서 apply 가능.
-provider "kubernetes" {
-  host                   = aws_eks_cluster.this.endpoint
-  cluster_ca_certificate = base64decode(aws_eks_cluster.this.certificate_authority[0].data)
-  exec {
-    api_version = "client.authentication.k8s.io/v1beta1"
-    command     = "aws"
-    args        = ["eks", "get-token", "--cluster-name", aws_eks_cluster.this.name, "--region", var.region]
-  }
-}
-
-provider "helm" {
-  kubernetes {
-    host                   = aws_eks_cluster.this.endpoint
-    cluster_ca_certificate = base64decode(aws_eks_cluster.this.certificate_authority[0].data)
-    exec {
-      api_version = "client.authentication.k8s.io/v1beta1"
-      command     = "aws"
-      args        = ["eks", "get-token", "--cluster-name", aws_eks_cluster.this.name, "--region", var.region]
-    }
-  }
-}
+# kubernetes/helm provider 는 root 에서 제거됨.
+# 클러스터/노드그룹/ALB 등 AWS 리소스만 root 에서 관리하므로 import/plan/destroy 가
+# 클러스터 생성 이전이라도 깨끗하게 동작한다.
+# 모든 kubernetes_*/helm_release/TargetGroupBinding 은 ./k8s 스테이지에서 적용한다.
+# (k8s/providers.tf 가 data "aws_eks_cluster" 로 클러스터를 이름 조회하여 인증)

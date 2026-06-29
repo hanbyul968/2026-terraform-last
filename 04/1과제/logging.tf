@@ -46,13 +46,6 @@ resource "aws_iam_role_policy" "fluentbit" {
   })
 }
 
-resource "kubernetes_service_account_v1" "fluentbit" {
-  metadata {
-    name      = "fluent-bit"
-    namespace = kubernetes_namespace_v1.logging.metadata[0].name
-  }
-}
-
 resource "aws_eks_pod_identity_association" "fluentbit" {
   cluster_name    = aws_eks_cluster.this.name
   namespace       = "logging"
@@ -61,25 +54,7 @@ resource "aws_eks_pod_identity_association" "fluentbit" {
   depends_on      = [aws_eks_addon.pod_identity]
 }
 
-# Fluent Bit Helm. 노드는 인터넷이 없으므로 이미지를 ECR pull-through 로 가져온다.
-resource "helm_release" "fluentbit" {
-  name       = "fluent-bit"
-  repository = "https://aws.github.io/eks-charts"
-  chart      = "aws-for-fluent-bit"
-  namespace  = kubernetes_namespace_v1.logging.metadata[0].name
-
-  values = [templatefile("${path.module}/k8s/fluentbit-values.yaml.tftpl", {
-    log_group  = aws_cloudwatch_log_group.pod.name
-    log_stream = "/wsc/app/log"
-    region     = local.region
-    registry   = local.registry
-    sa_name    = kubernetes_service_account_v1.fluentbit.metadata[0].name
-  })]
-
-  depends_on = [
-    aws_eks_pod_identity_association.fluentbit,
-    aws_eks_node_group.addon,
-    aws_eks_node_group.app,
-    helm_release.lb_controller,
-  ]
-}
+# NOTE: fluent-bit ServiceAccount 와 aws-for-fluent-bit Helm 차트는
+#       2단계(k8s/) 스테이지(k8s/main.tf)로 분리되었다.
+#       Pod Identity Association 은 namespace/service_account 를 이름(문자열)으로
+#       매핑하므로 여기(root)에 남아 있어도 k8s SA 리소스에 의존하지 않는다.

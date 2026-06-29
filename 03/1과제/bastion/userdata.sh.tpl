@@ -52,14 +52,19 @@ chmod -R 777 /opt/task1
 # 루트 변수는 모두 default 가 있으므로 terraform.tfvars 를 따로 쓰지 않는다.
 cat > /opt/task1/run.sh <<'RUN'
 #!/bin/bash
-# main(루트 1과제) 인프라를 한 번에 배포한다. (docker build/push 포함)
 set -e
+# 1단계 (AWS 레이어): VPC/KMS/S3/CloudFront/WAF/ECR(빌드)/DynamoDB/EKS/노드그룹/IAM/ALB-SG
 cd /opt/task1
+terraform init -input=false
+terraform apply -auto-approve
+# 2단계 (k8s/helm 레이어): book Deployment/Service/Ingress, AWS LB Controller,
+#   kube-prometheus-stack, Fluent Bit, ALB 대기, 그리고 마지막에 EKS public->private 전환(finalize)
+cd /opt/task1/k8s
 terraform init -input=false
 terraform apply -auto-approve
 echo ""
 echo "================= OUTPUTS ================="
-terraform output || true
+cd /opt/task1 && terraform output || true
 RUN
 chmod +x /opt/task1/run.sh
 

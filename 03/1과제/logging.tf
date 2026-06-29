@@ -1,8 +1,7 @@
 # ═══════════════════════════════════════════════════════════════
-# Logging  (과제 11 - Fluent Bit)
-#   - Fluent Bit DaemonSet -> CloudWatch Logs
-#   - 실제 API 요청 로그만 수집(/health 등 제외)
-#   - key=value/JSON 파싱하여 method, path, status, duration 구조화
+# Logging — AWS 레이어  (과제 11 - Fluent Bit)
+#   Fluent Bit DaemonSet(helm) 와 SA 는 ./k8s 스테이지로 이동했다.
+#   이 파일에는 CloudWatch 로그 그룹과 Fluent Bit 의 IAM / Pod Identity 만 남긴다.
 #   - 로그 그룹 CMK(eks-kms) 암호화
 # ═══════════════════════════════════════════════════════════════
 
@@ -46,37 +45,10 @@ resource "aws_iam_role_policy" "fluentbit" {
   })
 }
 
-resource "kubernetes_service_account_v1" "fluentbit" {
-  metadata {
-    name      = "fluent-bit"
-    namespace = kubernetes_namespace_v1.obs.metadata[0].name
-  }
-}
-
 resource "aws_eks_pod_identity_association" "fluentbit" {
   cluster_name    = aws_eks_cluster.this.name
   namespace       = local.obs_namespace
   service_account = "fluent-bit"
   role_arn        = aws_iam_role.fluentbit.arn
   depends_on      = [aws_eks_addon.pod_identity]
-}
-
-resource "helm_release" "fluentbit" {
-  name       = "fluent-bit"
-  repository = "https://aws.github.io/eks-charts"
-  chart      = "aws-for-fluent-bit"
-  namespace  = kubernetes_namespace_v1.obs.metadata[0].name
-
-  values = [templatefile("${path.module}/k8s/fluentbit-values.yaml.tftpl", {
-    log_group = aws_cloudwatch_log_group.app.name
-    region    = local.region
-    sa_name   = kubernetes_service_account_v1.fluentbit.metadata[0].name
-  })]
-
-  depends_on = [
-    aws_eks_pod_identity_association.fluentbit,
-    aws_eks_node_group.addon,
-    aws_eks_node_group.workload,
-    helm_release.lb_controller,
-  ]
 }

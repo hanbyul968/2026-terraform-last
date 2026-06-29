@@ -53,14 +53,21 @@ chmod -R 777 /opt/task1
 # ---- 6) 원클릭 실행 스크립트 ----
 cat > /opt/task1/run.sh <<'RUN'
 #!/bin/bash
-# main(루트 1과제) 인프라를 한 번에 배포한다. (docker build/push 포함)
 set -e
+# 1단계 (AWS 레이어): VPC/KMS/S3/CloudFront/ECR(빌드/푸시)/DynamoDB/EKS/노드그룹/
+#   ALB/TG/리스너/IAM/PodIdentity/Lambda/로그그룹
 cd /opt/task1
+terraform init -input=false
+terraform apply -auto-approve
+# 2단계 (k8s/helm 레이어): book Namespace/SA/ConfigMap/Deployment/Service,
+#   StorageClass, AWS LB Controller(helm)+TargetGroupBinding, monitoring(prometheus/grafana),
+#   logging(fluent-bit). 클러스터는 이름으로 data 조회.
+cd /opt/task1/k8s
 terraform init -input=false
 terraform apply -auto-approve
 echo ""
 echo "================= OUTPUTS ================="
-terraform output || true
+cd /opt/task1 && terraform output || true
 RUN
 chmod +x /opt/task1/run.sh
 

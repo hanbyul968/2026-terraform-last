@@ -39,27 +39,9 @@ resource "aws_security_group" "alb" {
 }
 
 # ── ingress 가 만든 ALB 를 CloudFront origin 으로 쓰기 위해 조회 ──
-# LBC 가 ALB 를 프로비저닝하는 데 시간이 걸리므로 active 까지 대기.
-resource "null_resource" "wait_alb" {
-  triggers = { ingress = local.ingress_name }
-  provisioner "local-exec" {
-    interpreter = ["/bin/bash", "-c"]
-    environment = { REGION = local.region, ALB = local.alb_name }
-    command     = <<-EOT
-      set -euo pipefail
-      for i in $(seq 1 60); do
-        state=$(aws elbv2 describe-load-balancers --region "$REGION" --names "$ALB" --query "LoadBalancers[0].State.Code" --output text 2>/dev/null || true)
-        if [ "$state" = "active" ]; then exit 0; fi
-        sleep 15
-      done
-      echo "ALB $ALB not active in time" >&2
-      exit 1
-    EOT
-  }
-  depends_on = [kubernetes_ingress_v1.book]
-}
-
+# ALB 는 ./k8s 스테이지의 ingress(LBC) 가 프로비저닝하며,
+# active 까지 대기하는 null_resource.wait_alb 도 ./k8s 로 이동했다.
+# (apply 순서상 root CloudFront 는 ./k8s apply 이후 ALB 가 존재해야 조회된다)
 data "aws_lb" "app" {
-  name       = local.alb_name
-  depends_on = [null_resource.wait_alb]
+  name = local.alb_name
 }

@@ -1,3 +1,17 @@
+> # 🚀 배포 방법 (2단계 — 이 안내가 최신/정답)
+> 아래 본문의 로컬 `terraform apply` 류 설명은 구버전입니다. **로컬에서 bastion 만 띄우고, bastion 안에서 main 을 apply** 합니다.
+> ```powershell
+> cd C:\Users\competitor\2026-terraform\03\1과제\bastion
+> terraform init; terraform apply -auto-approve
+> terraform output -raw ssm_connect_command
+> ```
+> ```bash
+> until [ -f /opt/task1/READY ]; do sleep 5; done
+> cd /opt/task1 && bash run.sh 2>&1 | tee /tmp/apply.log    # 끝에 finalize 가 EKS private-only 전환
+> ```
+> ⚠️ 구 `bastion.tf` 는 `bastion.tf.OLD-in-main` 으로 비활성. default VPC 없음 → `bastion/main.tf` 를 전용 VPC 로 교체 필요(01 참고).
+
+
 # WSC2026 제1과제 Terraform (인천기능경기대회 v2)
 
 문제지(`과제지_v2.pdf`) + 채점기준표(`채점기준표_v2.pdf`) 기준으로 작성.

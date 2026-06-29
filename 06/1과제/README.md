@@ -1,3 +1,18 @@
+> # 🚀 배포 방법 (2단계 — 이 안내가 최신/정답)
+> 아래 본문의 "Step 1 로컬에서 `terraform apply`" 는 구버전입니다. **로컬에서 bastion 만 띄우고, bastion 안에서 apply** 합니다.
+> ```powershell
+> cd C:\Users\competitor\2026-terraform\06\1과제\bastion
+> terraform init; terraform apply -auto-approve
+> terraform output -raw ssm_connect_command
+> ```
+> ```bash
+> until [ -f /opt/task1/READY ]; do sleep 5; done
+> cd /opt/task1 && bash run.sh 2>&1 | tee /tmp/apply.log
+> # EKS/이미지/모니터링 k8s 작업은 manifest/apply.sh (docker/eksctl/helm 필요)
+> ```
+> ⚠️ default VPC 없음 → `bastion/main.tf` 를 전용 VPC 로 교체 필요(01 참고).
+
+
 # 1과제 실행 가이드
 
 ---

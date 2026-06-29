@@ -1,3 +1,21 @@
+> # 🚀 배포 방법 (2단계 — 이 안내가 최신/정답)
+> 아래 본문의 "로컬에서 `terraform apply`" 류 설명은 **구버전(단일 스택)** 입니다.
+> 실제로는 **로컬에서 bastion 만 띄우고, bastion(Linux) 안에서 main 전체를 apply** 합니다
+> (루트가 `/bin/bash` provisioner·docker·kubernetes/helm 에 의존 → 로컬 직접 apply 불가).
+> ```powershell
+> # 1) 로컬 PowerShell
+> cd C:\Users\competitor\2026-terraform\02\1과제\bastion
+> terraform init; terraform apply -auto-approve
+> terraform output -raw ssm_connect_command
+> ```
+> ```bash
+> # 2) SSM 접속 후 bastion 에서 (코드는 /opt/task1, 홈 아님)
+> until [ -f /opt/task1/READY ]; do sleep 5; done
+> cd /opt/task1 && bash run.sh 2>&1 | tee /tmp/apply.log
+> ```
+> ⚠️ 이 계정엔 default VPC 가 없어 `bastion/main.tf` 의 default VPC 참조를 전용 VPC 로 교체해야 합니다(01/1과제 bastion 참고).
+
+
 # 제1과제 — Web Service Provisioning (과제지_vf 기준)
 
 2026 전국기능경기대회 클라우드컴퓨팅 **제1과제(`과제지_vf`)** Terraform 구성.

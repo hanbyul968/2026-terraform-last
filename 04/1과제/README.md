@@ -1,3 +1,18 @@
+> # 🚀 배포 방법 (2단계 — 이 안내가 최신/정답)
+> 아래 본문의 "새 컴퓨터 설치 + 로컬 `terraform apply`" 설명 중 **로컬 apply 부분은 구버전**입니다(로컬엔 docker/kubectl 불필요).
+> 실제로는 **로컬에서 bastion 만 띄우고, bastion 안에서 main 을 apply** 합니다.
+> ```powershell
+> cd C:\Users\competitor\2026-terraform\04\1과제\bastion
+> terraform init; terraform apply -auto-approve
+> terraform output -raw ssm_connect_command
+> ```
+> ```bash
+> until [ -f /opt/task1/READY ]; do sleep 5; done
+> cd /opt/task1 && bash run.sh 2>&1 | tee /tmp/apply.log    # 끝에 finalize 가 EKS private-only 전환
+> ```
+> ⚠️ 루트 `bastion.tf`(in-VPC bastion)는 채점용으로 유지 → bastion 2개 생성됨. default VPC 없음 → `bastion/main.tf` 전용 VPC 로 교체 필요(01 참고).
+
+
 # 제1과제 (인천 v2) — Terraform
 
 2026 전국기능경기대회 클라우드컴퓨팅 제1과제(`과제지_v2`)를 Terraform 으로 구성한다.

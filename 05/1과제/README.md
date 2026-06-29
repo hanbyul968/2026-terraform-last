@@ -1,3 +1,17 @@
+> # 🚀 배포 방법 (2단계 — 이 안내가 최신/정답)
+> **로컬에서 bastion 만 띄우고, bastion(Linux) 안에서 main 을 apply** 합니다(로컬 직접 apply 불가).
+> ```powershell
+> cd C:\Users\competitor\2026-terraform\05\1과제\bastion
+> terraform init; terraform apply -auto-approve
+> terraform output -raw ssm_connect_command
+> ```
+> ```bash
+> until [ -f /opt/task1/READY ]; do sleep 5; done
+> cd /opt/task1 && bash run.sh 2>&1 | tee /tmp/apply.log
+> ```
+> ⚠️ default VPC 없음 → `bastion/main.tf` 를 전용 VPC 로 교체 필요(01 참고). 아래 본문의 "로컬 PC terraform apply → EC2 bastion" 설명은 구버전입니다.
+
+
 # 1과제 실행 가이드
 
 ## 전체 흐름

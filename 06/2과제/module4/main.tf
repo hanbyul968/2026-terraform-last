@@ -24,7 +24,7 @@ resource "aws_vpc" "main" {
   cidr_block           = "10.0.0.0/16"
   enable_dns_support   = true
   enable_dns_hostnames = true
-  tags = { Name = "o11y-vpc" }
+  tags                 = { Name = "o11y-vpc" }
 }
 
 resource "aws_internet_gateway" "main" {
@@ -38,9 +38,9 @@ resource "aws_subnet" "pub_a" {
   availability_zone       = "ap-northeast-1a"
   map_public_ip_on_launch = true
   tags = {
-    Name                                = "o11y-pub-a"
+    Name                                 = "o11y-pub-a"
     "kubernetes.io/cluster/o11y-cluster" = "shared"
-    "kubernetes.io/role/elb"            = "1"
+    "kubernetes.io/role/elb"             = "1"
   }
 }
 
@@ -50,9 +50,9 @@ resource "aws_subnet" "pub_c" {
   availability_zone       = "ap-northeast-1c"
   map_public_ip_on_launch = true
   tags = {
-    Name                                = "o11y-pub-c"
+    Name                                 = "o11y-pub-c"
     "kubernetes.io/cluster/o11y-cluster" = "shared"
-    "kubernetes.io/role/elb"            = "1"
+    "kubernetes.io/role/elb"             = "1"
   }
 }
 
@@ -86,8 +86,8 @@ resource "aws_iam_role" "eks_cluster" {
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Action = "sts:AssumeRole"
-      Effect = "Allow"
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
       Principal = { Service = "eks.amazonaws.com" }
     }]
   })
@@ -117,8 +117,8 @@ resource "aws_iam_role" "node_group" {
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Action = "sts:AssumeRole"
-      Effect = "Allow"
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
       Principal = { Service = "ec2.amazonaws.com" }
     }]
   })
@@ -190,9 +190,9 @@ resource "aws_iam_role" "ebs_csi" {
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Effect = "Allow"
+      Effect    = "Allow"
       Principal = { Federated = aws_iam_openid_connect_provider.eks.arn }
-      Action = "sts:AssumeRoleWithWebIdentity"
+      Action    = "sts:AssumeRoleWithWebIdentity"
       Condition = {
         StringEquals = {
           "${local.oidc_provider}:sub" = "system:serviceaccount:kube-system:ebs-csi-controller-sa"
@@ -232,9 +232,9 @@ resource "aws_iam_role" "alb_controller" {
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Effect = "Allow"
+      Effect    = "Allow"
       Principal = { Federated = aws_iam_openid_connect_provider.eks.arn }
-      Action = "sts:AssumeRoleWithWebIdentity"
+      Action    = "sts:AssumeRoleWithWebIdentity"
       Condition = {
         StringEquals = {
           "${local.oidc_provider}:sub" = "system:serviceaccount:kube-system:aws-load-balancer-controller"

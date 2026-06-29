@@ -50,9 +50,9 @@ resource "aws_cloudfront_distribution" "cdn" {
     domain_name = aws_lb.alb.dns_name
     origin_id   = "alb"
     vpc_origin_config {
-      vpc_origin_id              = aws_cloudfront_vpc_origin.alb.id
-      origin_read_timeout        = 30
-      origin_keepalive_timeout   = 5
+      vpc_origin_id            = aws_cloudfront_vpc_origin.alb.id
+      origin_read_timeout      = 30
+      origin_keepalive_timeout = 5
     }
   }
 
@@ -80,34 +80,34 @@ resource "aws_cloudfront_distribution" "cdn" {
 
   # /v1* -> ALB (no cache, forward all query strings)
   ordered_cache_behavior {
-    path_pattern           = "/v1*"
-    target_origin_id       = "alb"
-    viewer_protocol_policy = "redirect-to-https"
-    allowed_methods        = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
-    cached_methods         = ["GET", "HEAD"]
-    cache_policy_id        = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # CachingDisabled
+    path_pattern             = "/v1*"
+    target_origin_id         = "alb"
+    viewer_protocol_policy   = "redirect-to-https"
+    allowed_methods          = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
+    cached_methods           = ["GET", "HEAD"]
+    cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # CachingDisabled
     origin_request_policy_id = "216adef6-5c7f-47e4-b989-5492eafa07d3" # AllViewer
   }
 
   # /grafana* -> ALB (no cache)
   ordered_cache_behavior {
-    path_pattern           = "/grafana*"
-    target_origin_id       = "alb"
-    viewer_protocol_policy = "redirect-to-https"
-    allowed_methods        = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
-    cached_methods         = ["GET", "HEAD"]
-    cache_policy_id        = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
+    path_pattern             = "/grafana*"
+    target_origin_id         = "alb"
+    viewer_protocol_policy   = "redirect-to-https"
+    allowed_methods          = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
+    cached_methods           = ["GET", "HEAD"]
+    cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
     origin_request_policy_id = "216adef6-5c7f-47e4-b989-5492eafa07d3"
   }
 
   # /reservation* -> Lambda (no cache, forward query strings)
   ordered_cache_behavior {
-    path_pattern           = "/reservation*"
-    target_origin_id       = "lambda"
-    viewer_protocol_policy = "redirect-to-https"
-    allowed_methods        = ["GET", "HEAD"]
-    cached_methods         = ["GET", "HEAD"]
-    cache_policy_id        = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
+    path_pattern             = "/reservation*"
+    target_origin_id         = "lambda"
+    viewer_protocol_policy   = "redirect-to-https"
+    allowed_methods          = ["GET", "HEAD"]
+    cached_methods           = ["GET", "HEAD"]
+    cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
     origin_request_policy_id = "b689b0a8-53d0-40ab-baf2-68738e2966ac" # AllViewerExceptHostHeader
   }
 

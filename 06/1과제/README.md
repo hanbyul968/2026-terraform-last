@@ -508,3 +508,27 @@ $TF aws_lb_listener.grafana                             $G_LISTENER_ARN
 | 리전 변경 시 추가 | `manifest/deployment.yaml` | env `AWS_REGION` |
 | 리전 변경 시 추가 | `manifest/apply.sh` | 8번째 줄 `REGION=`, 47번째 줄 ECR URL 리전 |
 | 비번호 | `terraform apply` | 프롬프트 입력 또는 `-var="number=<비번호>"` |
+
+
+
+---
+
+## 🚀 Apply — 2단계 (로컬 PowerShell → Bastion)
+
+로컬에서는 **bastion 만** 띄우고, **bastion(Linux) 안에서 main**을 apply 합니다.
+
+```powershell
+cd C:\Users\competitor\2026-terraform\06\1과제\bastion
+terraform init ; terraform apply -auto-approve
+terraform output -raw ssm_connect_command
+```
+```bash
+until [ -f /opt/task1/READY ]; do sleep 5; done
+bash /opt/task1/run.sh        # 루트 terraform apply
+#  EKS/이미지/모니터링 등 k8s 작업은 manifest/apply.sh 로 수행 (docker/eksctl/helm 필요)
+```
+```powershell
+cd C:\Users\competitor\2026-terraform\06\1과제\bastion ; terraform destroy -auto-approve
+```
+
+> ⚠️ **default VPC 없음**: `bastion/main.tf` 의 default VPC 참조를 전용 VPC 로 교체해야 apply 됩니다(01/1과제 bastion 참고).

@@ -32,8 +32,9 @@ resource "null_resource" "build_push_book" {
     tag        = local.image_tag
   }
 
+  # main 은 Linux Bastion 에서 apply 된다 (bastion/ 1단계 참고). bash + docker.
   provisioner "local-exec" {
-    interpreter = ["powershell", "-NoProfile", "-Command"]
+    interpreter = ["/bin/bash", "-c"]
     environment = {
       REGION   = local.region
       REGISTRY = local.registry
@@ -41,14 +42,10 @@ resource "null_resource" "build_push_book" {
       CTX      = "${path.module}/files"
     }
     command = <<-EOT
-      $ErrorActionPreference = 'Stop'
-      $pw = (aws ecr get-login-password --region $env:REGION) | Out-String
-      docker login --username AWS --password $pw.Trim() $env:REGISTRY
-      if ($LASTEXITCODE -ne 0) { throw "docker login failed" }
-      docker build --platform linux/amd64 --provenance=false -t $env:IMAGE $env:CTX
-      if ($LASTEXITCODE -ne 0) { throw "docker build failed" }
-      docker push $env:IMAGE
-      if ($LASTEXITCODE -ne 0) { throw "docker push failed" }
+      set -euo pipefail
+      aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$REGISTRY"
+      docker build --platform linux/amd64 --provenance=false -t "$IMAGE" "$CTX"
+      docker push "$IMAGE"
     EOT
   }
 

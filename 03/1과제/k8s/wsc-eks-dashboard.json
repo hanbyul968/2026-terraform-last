@@ -1,6 +1,6 @@
 {
-  "uid": "wsc-eks-dashboard",
-  "title": "wsc-eks-dashboard",
+  "uid": "wsc2026-grafana-dashboard",
+  "title": "wsc2026-grafana-dashboard",
   "tags": ["wsc"],
   "timezone": "browser",
   "schemaVersion": 39,
@@ -25,7 +25,7 @@
       "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "expr": "count(kube_pod_labels{namespace=\"wsc\", label_app=\"wsc-deploy\"})" }
+        { "refId": "A", "expr": "count(kube_pod_labels{namespace=\"wsc2026\", label_app=\"wsc2026-book\"})" }
       ]
     },
     {
@@ -55,7 +55,7 @@
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"wsc\", pod=~\"wsc-deploy.*\", container!=\"\"}[5m]))" }
+        { "refId": "A", "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"wsc2026\", pod=~\"wsc2026-book-deploy.*\", container!=\"\"}[5m]))" }
       ]
     },
     {
@@ -65,7 +65,34 @@
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=\"wsc\", pod=~\"wsc-deploy.*\", container!=\"\"})" }
+        { "refId": "A", "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=\"wsc2026\", pod=~\"wsc2026-book-deploy.*\", container!=\"\"})" }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Active Alerts",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 22 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "ALERTS{alertstate=\"firing\"}", "instant": true, "format": "table" }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Application Logs",
+      "type": "logs",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 30 },
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "options": { "showTime": true, "wrapLogMessage": true, "dedupStrategy": "none" },
+      "targets": [
+        {
+          "refId": "A",
+          "queryMode": "Logs",
+          "region": "ap-northeast-2",
+          "logGroupNames": ["/wsc2026/app/log"],
+          "expression": "fields @timestamp, @message | sort @timestamp desc | limit 100"
+        }
       ]
     }
   ]

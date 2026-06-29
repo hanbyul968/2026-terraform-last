@@ -1,0 +1,53 @@
+# 비번호(<비번호>)를 본인 번호로 치환하세요: adminUser=wsc2026-admin-<비번호>, adminPassword=admin<비번호>!
+adminUser: "wsc2026-admin-000"
+adminPassword: "admin000!"
+service:
+  type: LoadBalancer
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+datasources:
+  datasources.yaml:
+    apiVersion: 1
+    datasources:
+      - name: Loki
+        type: loki
+        access: proxy
+        url: http://loki.wsc-logging.svc.cluster.local:3100
+        isDefault: true
+dashboardProviders:
+  dashboardproviders.yaml:
+    apiVersion: 1
+    providers:
+      - name: wsc
+        orgId: 1
+        folder: ""
+        type: file
+        disableDeletion: false
+        editable: true
+        options:
+          path: /var/lib/grafana/dashboards/wsc
+dashboards:
+  wsc:
+    wsc2026-container-logs:
+      json: |
+        {
+          "title": "WSC2026 Container Logs",
+          "uid": "wsc2026-container-logs",
+          "schemaVersion": 39,
+          "refresh": "5s",
+          "time": { "from": "now-1h", "to": "now" },
+          "panels": [
+            { "id": 1, "title": "Any Log", "type": "logs", "gridPos": {"h":8,"w":24,"x":0,"y":0},
+              "datasource": {"type":"loki"},
+              "targets": [{"expr": "{namespace=\"wsc-app-log\"}"}] },
+            { "id": 2, "title": "INFO Log Count", "type": "timeseries", "gridPos": {"h":8,"w":8,"x":0,"y":8},
+              "datasource": {"type":"loki"},
+              "targets": [{"expr": "count_over_time({namespace=\"wsc-app-log\"} |= \"INFO\" [1m])"}] },
+            { "id": 3, "title": "ERROR Log Count", "type": "timeseries", "gridPos": {"h":8,"w":8,"x":8,"y":8},
+              "datasource": {"type":"loki"},
+              "targets": [{"expr": "count_over_time({namespace=\"wsc-app-log\"} |= \"ERROR\" [1m])"}] },
+            { "id": 4, "title": "WARNING Log Count", "type": "timeseries", "gridPos": {"h":8,"w":8,"x":16,"y":8},
+              "datasource": {"type":"loki"},
+              "targets": [{"expr": "count_over_time({namespace=\"wsc-app-log\"} |= \"WARNING\" [1m])"}] }
+          ]
+        }

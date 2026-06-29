@@ -507,8 +507,8 @@ resource "aws_s3_object" "m_keda" {
 
 # deploy.sh 가 source 할 환경변수 파일 (apply 시점 값으로 렌더링)
 resource "aws_s3_object" "env_sh" {
-  bucket = aws_s3_bucket.deploy.id
-  key    = "env.sh"
+  bucket  = aws_s3_bucket.deploy.id
+  key     = "env.sh"
   content = <<-EOT
     export REGION="${data.aws_region.current.name}"
     export ECR_REPO="${aws_ecr_repository.app.repository_url}"

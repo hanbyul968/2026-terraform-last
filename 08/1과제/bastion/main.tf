@@ -4,10 +4,16 @@
 #          + docker build/push 를 수행한다.
 #  - 접속: SSM Session Manager (SSH 키/인바운드 불필요)
 #  - 권한: 인스턴스 프로파일(AdministratorAccess)로 terraform이 자격증명 자동 사용
+#  - 자동화: 로컬의 "현재" 1과제 코드(app/book, static/* 포함)를 zip으로 묶어
+#           부트스트랩 S3 버킷에 업로드 → user_data가 내려받아 /opt/task1에 준비.
+#           SSM 접속 후 `bash /opt/task1/run.sh` 한 줄이면 main 인프라가 배포된다.
 #
 # ※ 이 폴더(state)는 main과 분리되어 있다. 채점 전 이 폴더에서만
-#   `terraform destroy` 하면 Bastion만 제거되어 8-2(불필요 리소스) 감점을 피한다.
+#   `terraform destroy` 하면 Bastion(+부트스트랩 버킷)만 제거되어
+#   8-2(불필요 리소스) 감점을 피한다. (채점은 CloudShell에서 진행)
 # =============================================================================
+
+data "aws_caller_identity" "current" {}
 
 # ---- 기본 VPC / 서브넷 사용 (main VPC와 무관) ----
 data "aws_vpc" "default" {
@@ -34,6 +40,54 @@ data "aws_ami" "al2023" {
     name   = "architecture"
     values = ["x86_64"]
   }
+}
+
+# =============================================================================
+# 로컬 1과제 코드 번들링 → 부트스트랩 S3 업로드
+#  - source_dir : 상위 1과제 폴더(현재 로컬 파일)
+#  - 제외       : bastion 폴더, .terraform, state, lock, plan (리눅스에서 새로 init)
+#  - 번들 zip은 1과제 폴더 "밖"(08/)에 생성하여 자기 자신을 포함하지 않게 한다.
+# =============================================================================
+data "archive_file" "task1" {
+  type        = "zip"
+  source_dir  = "${path.module}/.."
+  output_path = "${path.module}/../../.task1_bundle.zip"
+
+  excludes = [
+    "bastion",
+    "bastion/**",
+    ".terraform",
+    ".terraform/**",
+    ".terraform.lock.hcl",
+    "terraform.tfstate",
+    "terraform.tfstate.backup",
+    "*.tfplan",
+    ".gitignore",
+  ]
+}
+
+resource "aws_s3_bucket" "bootstrap" {
+  bucket        = "${var.player_id}-bastion-bootstrap-${data.aws_caller_identity.current.account_id}"
+  force_destroy = true
+
+  tags = {
+    Name = "${var.player_id}-bastion-bootstrap"
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "bootstrap" {
+  bucket                  = aws_s3_bucket.bootstrap.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_object" "task1_bundle" {
+  bucket = aws_s3_bucket.bootstrap.id
+  key    = "task1-bundle.zip"
+  source = data.archive_file.task1.output_path
+  etag   = data.archive_file.task1.output_md5
 }
 
 # ---- IAM Role + Instance Profile (SSM + 배포 권한) ----
@@ -88,30 +142,14 @@ resource "aws_security_group" "bastion" {
   }
 }
 
-# ---- user_data: terraform / docker / buildx / git 설치 ----
+# ---- user_data: 도구 설치 + 코드 번들 자동 준비 ----
 locals {
-  user_data = <<-EOT
-    #!/bin/bash
-    set -eux
-
-    # 기본 도구
-    dnf install -y git docker yum-utils
-
-    # terraform
-    yum-config-manager --add-repo https://rpm.releases.hashicorp.com/AmazonLinux/hashicorp.repo
-    dnf install -y terraform
-
-    # docker 시작 + 권한
-    systemctl enable --now docker
-    usermod -aG docker ec2-user
-    usermod -aG docker ssm-user || true
-
-    # docker buildx 플러그인 (main ecr.tf가 buildx 사용)
-    mkdir -p /usr/libexec/docker/cli-plugins
-    curl -SL https://github.com/docker/buildx/releases/download/v0.17.1/buildx-v0.17.1.linux-amd64 \
-      -o /usr/libexec/docker/cli-plugins/docker-buildx
-    chmod +x /usr/libexec/docker/cli-plugins/docker-buildx
-  EOT
+  user_data = templatefile("${path.module}/userdata.sh.tpl", {
+    bucket    = aws_s3_bucket.bootstrap.id
+    key       = aws_s3_object.task1_bundle.key
+    region    = var.region
+    player_id = var.player_id
+  })
 }
 
 resource "aws_instance" "bastion" {
@@ -120,7 +158,14 @@ resource "aws_instance" "bastion" {
   subnet_id              = tolist(data.aws_subnets.default.ids)[0]
   iam_instance_profile   = aws_iam_instance_profile.bastion.name
   vpc_security_group_ids = [aws_security_group.bastion.id]
-  user_data              = local.user_data
+
+  # 번들 내용이 바뀌면 user_data 해시가 바뀌어 인스턴스가 교체된다.
+  user_data = local.user_data
+
+  metadata_options {
+    http_tokens   = "required" # IMDSv2 강제
+    http_endpoint = "enabled"
+  }
 
   root_block_device {
     volume_size = 30
@@ -130,4 +175,6 @@ resource "aws_instance" "bastion" {
   tags = {
     Name = "${var.player_id}-bastion"
   }
+
+  depends_on = [aws_s3_object.task1_bundle]
 }

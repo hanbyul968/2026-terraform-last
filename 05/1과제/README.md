@@ -332,3 +332,26 @@ prefix가 `gj2026-` → 다른 값으로 바뀌면 아래를 **일괄 찾아 바
 - `main.tf`, `eks.tf`, `alb.tf`, `cloudfront.tf`, `dynamodb.tf`, `ecr.tf`, `kms.tf`, `lambda.tf`, `s3.tf`, `waf.tf`, `aws-auth.tf` 전체에서 `gj2026` 검색 후 교체
 - `userdata.sh` 에서 `gj2026` 검색 후 교체
 - `k8s/grafana-values.yaml` 에서 role annotation (`gj2026-grafana-role`) 교체
+
+
+
+---
+
+## 🚀 Apply — 2단계 (로컬 PowerShell → Bastion)
+
+로컬에서는 **bastion 만** 띄우고, **bastion(Linux) 안에서 main 전체**를 apply 합니다.
+
+```powershell
+cd C:\Users\competitor\2026-terraform\05\1과제\bastion
+terraform init ; terraform apply -auto-approve
+terraform output -raw ssm_connect_command
+```
+```bash
+until [ -f /opt/task1/READY ]; do sleep 5; done
+bash /opt/task1/run.sh
+```
+```powershell
+cd C:\Users\competitor\2026-terraform\05\1과제\bastion ; terraform destroy -auto-approve
+```
+
+> ⚠️ **default VPC 없음**: `bastion/main.tf` 의 default VPC 참조를 전용 VPC(10.250.0.0/16 + public subnet + IGW + route)로 교체해야 apply 됩니다(01/1과제 bastion 참고).

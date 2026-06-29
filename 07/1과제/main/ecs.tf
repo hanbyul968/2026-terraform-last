@@ -21,9 +21,9 @@ resource "aws_ecs_task_definition" "book" {
   task_role_arn            = aws_iam_role.ecs_task.arn
 
   container_definitions = jsonencode([{
-    name      = "skills-book-container"
-    image     = "${aws_ecr_repository.book.repository_url}:latest"
-    essential = true
+    name         = "skills-book-container"
+    image        = "${aws_ecr_repository.book.repository_url}:latest"
+    essential    = true
     portMappings = [{ containerPort = 8080, protocol = "tcp" }]
     environment = [
       { name = "AWS_REGION", value = "ap-northeast-2" },
@@ -59,6 +59,6 @@ resource "aws_ecs_service" "book" {
     container_port   = 8080
   }
 
-  depends_on = [aws_lb_listener.http, aws_instance.bastion]
+  depends_on = [aws_lb_listener.http, terraform_data.docker_push]
   tags       = { Name = "skills-book-service" }
 }

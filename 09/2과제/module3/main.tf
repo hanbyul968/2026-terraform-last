@@ -29,7 +29,7 @@ resource "aws_vpc" "main" {
   cidr_block           = "10.0.0.0/16"
   enable_dns_support   = true
   enable_dns_hostnames = true
-  tags = { Name = "wsc-msk-vpc" }
+  tags                 = { Name = "wsc-msk-vpc" }
 }
 
 resource "aws_internet_gateway" "main" {
@@ -43,7 +43,7 @@ resource "aws_subnet" "public_a" {
   cidr_block              = "10.0.1.0/24"
   availability_zone       = "ap-northeast-3a"
   map_public_ip_on_launch = true
-  tags = { Name = "wsc-msk-public-a" }
+  tags                    = { Name = "wsc-msk-public-a" }
 }
 
 resource "aws_subnet" "public_c" {
@@ -51,7 +51,7 @@ resource "aws_subnet" "public_c" {
   cidr_block              = "10.0.2.0/24"
   availability_zone       = "ap-northeast-3c"
   map_public_ip_on_launch = true
-  tags = { Name = "wsc-msk-public-c" }
+  tags                    = { Name = "wsc-msk-public-c" }
 }
 
 # Private Subnets (A, C)
@@ -59,14 +59,14 @@ resource "aws_subnet" "private_a" {
   vpc_id            = aws_vpc.main.id
   cidr_block        = "10.0.3.0/24"
   availability_zone = "ap-northeast-3a"
-  tags = { Name = "wsc-msk-private-a" }
+  tags              = { Name = "wsc-msk-private-a" }
 }
 
 resource "aws_subnet" "private_c" {
   vpc_id            = aws_vpc.main.id
   cidr_block        = "10.0.4.0/24"
   availability_zone = "ap-northeast-3c"
-  tags = { Name = "wsc-msk-private-c" }
+  tags              = { Name = "wsc-msk-private-c" }
 }
 
 # NAT Gateways (one per AZ)

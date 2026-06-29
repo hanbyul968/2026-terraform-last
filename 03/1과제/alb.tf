@@ -43,16 +43,17 @@ resource "aws_security_group" "alb" {
 resource "null_resource" "wait_alb" {
   triggers = { ingress = local.ingress_name }
   provisioner "local-exec" {
-    interpreter = ["powershell", "-NoProfile", "-Command"]
+    interpreter = ["/bin/bash", "-c"]
     environment = { REGION = local.region, ALB = local.alb_name }
     command     = <<-EOT
-      $ErrorActionPreference = 'Stop'
-      for ($i=0; $i -lt 60; $i++) {
-        $arn = (aws elbv2 describe-load-balancers --region $env:REGION --names $env:ALB --query "LoadBalancers[0].State.Code" --output text 2>$null)
-        if ($arn -eq 'active') { exit 0 }
-        Start-Sleep -Seconds 15
-      }
-      throw "ALB $env:ALB not active in time"
+      set -euo pipefail
+      for i in $(seq 1 60); do
+        state=$(aws elbv2 describe-load-balancers --region "$REGION" --names "$ALB" --query "LoadBalancers[0].State.Code" --output text 2>/dev/null || true)
+        if [ "$state" = "active" ]; then exit 0; fi
+        sleep 15
+      done
+      echo "ALB $ALB not active in time" >&2
+      exit 1
     EOT
   }
   depends_on = [kubernetes_ingress_v1.book]

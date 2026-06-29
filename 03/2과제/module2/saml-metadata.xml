@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- PLACEHOLDER metadata. Keycloak Realm(wsc2026-aws) 구성 후 실제 SAML descriptor 로 교체하세요.
+     교체 방법: Keycloak Admin > Realm settings > Endpoints > SAML 2.0 Identity Provider Metadata 를
+     내려받아 이 파일(saml-metadata.xml)을 덮어쓰고 module2 를 재apply 하면 IAM SAML Provider 가 갱신됩니다.
+     아래 더미 X509 인증서/엔티티는 terraform 의 길이검증(>=1000 chars)을 통과시키기 위한 자리표시자입니다. -->
+<EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata" entityID="https://keycloak.placeholder.local/realms/wsc2026-aws">
+  <IDPSSODescriptor WantAuthnRequestsSigned="false" protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
+    <KeyDescriptor use="signing">
+      <KeyInfo xmlns="http://www.w3.org/2000/09/xmldsig#">
+        <X509Data>
+          <X509Certificate>MIIBPLACEHOLDERCERTIFICATEDATA0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000PLACEHOLDER</X509Certificate>
+        </X509Data>
+      </KeyInfo>
+    </KeyDescriptor>
+    <SingleLogoutService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" Location="https://keycloak.placeholder.local/realms/wsc2026-aws/protocol/saml"/>
+    <NameIDFormat>urn:oasis:names:tc:SAML:2.0:nameid-format:persistent</NameIDFormat>
+    <SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" Location="https://keycloak.placeholder.local/realms/wsc2026-aws/protocol/saml"/>
+    <SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" Location="https://keycloak.placeholder.local/realms/wsc2026-aws/protocol/saml"/>
+  </IDPSSODescriptor>
+</EntityDescriptor>

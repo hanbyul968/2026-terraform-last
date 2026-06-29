@@ -39,8 +39,8 @@ resource "aws_iam_role" "lambda" {
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Action = "sts:AssumeRole"
-      Effect = "Allow"
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
       Principal = { Service = "lambda.amazonaws.com" }
     }]
   })
@@ -68,12 +68,15 @@ resource "aws_iam_role_policy" "lambda" {
 
 # Lambda Layer
 resource "null_resource" "layer_build" {
+  # apply 가 Linux Bastion 에서 수행되므로 bash 로 변환 (기존 PowerShell 버전 대체).
+  # nested heredoc 없이 printf 로 .env 를 인라인 생성 → lambda.py 의 os.getenv("tableName") 와 일치.
   provisioner "local-exec" {
-    interpreter = ["PowerShell", "-Command"]
-    command = <<-EOT
-      New-Item -ItemType Directory -Force -Path "${path.module}/layer/python" | Out-Null
-      pip install python-dotenv -t "${path.module}/layer/python" --quiet
-      Set-Content -Path "${path.module}/layer/python/.env" -Value "tableName=wsc2026-worldschool-table"
+    interpreter = ["/bin/bash", "-c"]
+    command     = <<-EOT
+      set -e
+      mkdir -p "${path.module}/layer/python"
+      pip3 install python-dotenv -t "${path.module}/layer/python" --quiet
+      printf 'tableName=wsc2026-worldschool-table' > "${path.module}/layer/python/.env"
     EOT
   }
 

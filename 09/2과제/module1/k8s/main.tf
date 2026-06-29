@@ -132,7 +132,7 @@ resource "kubectl_manifest" "namespace" {
 }
 
 resource "kubectl_manifest" "service_account" {
-  yaml_body = <<-YAML
+  yaml_body  = <<-YAML
     apiVersion: v1
     kind: ServiceAccount
     metadata:
@@ -161,7 +161,7 @@ resource "kubectl_manifest" "app_code" {
 }
 
 resource "kubectl_manifest" "deployment" {
-  yaml_body = <<-YAML
+  yaml_body  = <<-YAML
     apiVersion: apps/v1
     kind: Deployment
     metadata:
@@ -206,7 +206,7 @@ resource "kubectl_manifest" "deployment" {
 }
 
 resource "kubectl_manifest" "scaledobject" {
-  yaml_body = <<-YAML
+  yaml_body  = <<-YAML
     apiVersion: keda.sh/v1alpha1
     kind: ScaledObject
     metadata:
@@ -229,7 +229,7 @@ resource "kubectl_manifest" "scaledobject" {
 }
 
 resource "kubectl_manifest" "nodeclass" {
-  yaml_body = <<-YAML
+  yaml_body  = <<-YAML
     apiVersion: karpenter.k8s.aws/v1
     kind: EC2NodeClass
     metadata:
@@ -248,7 +248,7 @@ resource "kubectl_manifest" "nodeclass" {
 }
 
 resource "kubectl_manifest" "nodepool" {
-  yaml_body = <<-YAML
+  yaml_body  = <<-YAML
     apiVersion: karpenter.sh/v1
     kind: NodePool
     metadata:

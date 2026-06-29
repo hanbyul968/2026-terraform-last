@@ -1,0 +1,85 @@
+# OpenTelemetry Collector (helm: open-telemetry/opentelemetry-collector)
+#  release: wsc2026-otel-collector  ns: wsc2026-logging  mode: deployment
+#  - 수신: OTLP HTTP(4318)/gRPC(4317)  <- Fluent Bit
+#  - 가공: resource(cluster 속성) + transform(JSON body -> level/message/service 속성)
+#  - 로그 파이프라인 -> Loki Push(OTLP) / count connector
+#  - 메트릭 파이프라인 -> count(log_record_count_total{level}) -> prometheus exporter(8889)
+mode: deployment
+replicaCount: 1
+
+image:
+  repository: otel/opentelemetry-collector-contrib
+
+ports:
+  otlp:
+    enabled: true
+    containerPort: 4317
+    servicePort: 4317
+    protocol: TCP
+  otlp-http:
+    enabled: true
+    containerPort: 4318
+    servicePort: 4318
+    protocol: TCP
+  prometheus:
+    enabled: true
+    containerPort: 8889
+    servicePort: 8889
+    protocol: TCP
+
+config:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+  processors:
+    batch: {}
+    resource:
+      attributes:
+        - key: cluster
+          value: wsc2026-logging-cluster
+          action: upsert
+    transform/logs:
+      log_statements:
+        - context: log
+          statements:
+            - merge_maps(attributes, ParseJSON(body), "upsert") where IsMatch(body, "^\\{")
+            - set(attributes["level"], attributes["level"]) where attributes["level"] != nil
+            - set(attributes["message"], attributes["message"]) where attributes["message"] != nil
+            - set(attributes["service"], attributes["service"]) where attributes["service"] != nil
+
+  connectors:
+    count:
+      logs:
+        log_record_count_total:
+          description: Count of log records by level
+          attributes:
+            - key: level
+
+  exporters:
+    otlphttp/loki:
+      logs_endpoint: http://wsc2026-loki.wsc2026-logging.svc.cluster.local:3100/otlp/v1/logs
+      tls:
+        insecure: true
+    prometheus:
+      endpoint: 0.0.0.0:8889
+      enable_open_metrics: true
+      resource_to_telemetry_conversion:
+        enabled: true
+    debug:
+      verbosity: basic
+
+  service:
+    pipelines:
+      logs:
+        receivers: [otlp]
+        processors: [resource, transform/logs, batch]
+        exporters: [otlphttp/loki, count, debug]
+      metrics:
+        receivers: [count]
+        processors: [batch]
+        exporters: [prometheus]

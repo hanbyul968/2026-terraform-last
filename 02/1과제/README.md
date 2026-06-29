@@ -149,3 +149,32 @@ apply 순서 의존성은 `depends_on` 으로 처리되어 있으나, EKS/헬름
 4. **Grafana LB** — Service type LoadBalancer 로 생성(AWS LB Controller). 채점 명령
    `kubectl get svc grafana -n monitoring` 로 주소 확인 가능하게 구성됨.
 5. apply 후 CloudFront 배포(Deployed)까지 수 분 소요. 8-4 채점 전 Status 확인.
+
+
+
+---
+
+## 🚀 Apply — 2단계 (로컬 PowerShell → Bastion)
+
+로컬에서는 **bastion 만** 띄우고, **bastion(Linux) 안에서 main 전체**를 apply 합니다(루트가 `/bin/bash`·docker·kubectl 에 의존).
+
+```powershell
+# 1) 로컬 — Bastion 생성
+cd C:\Users\competitor\2026-terraform\02\1과제\bastion
+terraform init
+terraform apply -auto-approve
+terraform output -raw ssm_connect_command
+```
+```bash
+# 2) SSM 접속 후 — main 배포
+until [ -f /opt/task1/READY ]; do sleep 5; done
+bash /opt/task1/run.sh
+```
+```powershell
+# 3) 채점 후 — Bastion 제거
+cd C:\Users\competitor\2026-terraform\02\1과제\bastion ; terraform destroy -auto-approve
+```
+
+> ⚠️ **default VPC 없음 대응**: 이 계정엔 default VPC 가 없습니다. `bastion/main.tf` 의
+> `data "aws_vpc" "default"`/`data "aws_subnets" "default"` 를 전용 VPC(10.250.0.0/16 + public subnet + IGW + route)로
+> 교체해야 apply 됩니다(01/1과제 bastion 참고).

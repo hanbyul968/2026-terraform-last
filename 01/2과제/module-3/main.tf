@@ -15,8 +15,8 @@ resource "aws_dynamodb_table" "target" {
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "id"
   attribute {
-     name = "id"
-     type = "S" 
+    name = "id"
+    type = "S"
   }
 }
 
@@ -35,7 +35,7 @@ resource "aws_s3_bucket_notification" "eb" {
 resource "aws_iam_role" "transform" {
   name = "wsc2026-transform-lambda-role"
   assume_role_policy = jsonencode({
-    Version = "2012-10-17"
+    Version   = "2012-10-17"
     Statement = [{ Effect = "Allow", Principal = { Service = "lambda.amazonaws.com" }, Action = "sts:AssumeRole" }]
   })
 }
@@ -46,7 +46,7 @@ resource "aws_iam_role_policy" "transform" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      { Effect = "Allow", Action = ["s3:GetObject","s3:ListBucket"], Resource = [aws_s3_bucket.inbound.arn, "${aws_s3_bucket.inbound.arn}/*"] },
+      { Effect = "Allow", Action = ["s3:GetObject", "s3:ListBucket"], Resource = [aws_s3_bucket.inbound.arn, "${aws_s3_bucket.inbound.arn}/*"] },
       { Effect = "Allow", Action = ["logs:*"], Resource = "*" }
     ]
   })
@@ -73,7 +73,7 @@ resource "aws_lambda_function" "transform" {
 resource "aws_iam_role" "sfn" {
   name = "wsc2026-sfn-role"
   assume_role_policy = jsonencode({
-    Version = "2012-10-17"
+    Version   = "2012-10-17"
     Statement = [{ Effect = "Allow", Principal = { Service = "states.amazonaws.com" }, Action = "sts:AssumeRole" }]
   })
 }
@@ -140,7 +140,7 @@ resource "aws_sfn_state_machine" "wf" {
 resource "aws_iam_role" "eb" {
   name = "wsc2026-eb-sfn-role"
   assume_role_policy = jsonencode({
-    Version = "2012-10-17"
+    Version   = "2012-10-17"
     Statement = [{ Effect = "Allow", Principal = { Service = "events.amazonaws.com" }, Action = "sts:AssumeRole" }]
   })
 }
@@ -149,7 +149,7 @@ resource "aws_iam_role_policy" "eb" {
   name = "policy"
   role = aws_iam_role.eb.id
   policy = jsonencode({
-    Version = "2012-10-17"
+    Version   = "2012-10-17"
     Statement = [{ Effect = "Allow", Action = "states:StartExecution", Resource = aws_sfn_state_machine.wf.arn }]
   })
 }

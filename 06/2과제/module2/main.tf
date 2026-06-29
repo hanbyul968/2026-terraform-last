@@ -170,9 +170,9 @@ resource "aws_cloudfront_response_headers_policy" "security" {
 
 # CloudFront Distribution
 resource "aws_cloudfront_distribution" "ab" {
-  comment         = "skillsphone-cdn-ab-distribution"
-  enabled         = true
-  price_class     = "PriceClass_All"
+  comment             = "skillsphone-cdn-ab-distribution"
+  enabled             = true
+  price_class         = "PriceClass_All"
   default_root_object = "index.html"
 
   origin {
@@ -182,11 +182,11 @@ resource "aws_cloudfront_distribution" "ab" {
   }
 
   default_cache_behavior {
-    allowed_methods          = ["GET", "HEAD"]
-    cached_methods           = ["GET", "HEAD"]
-    target_origin_id         = "s3-landing"
-    viewer_protocol_policy   = "redirect-to-https"
-    cache_policy_id          = aws_cloudfront_cache_policy.ab.id
+    allowed_methods            = ["GET", "HEAD"]
+    cached_methods             = ["GET", "HEAD"]
+    target_origin_id           = "s3-landing"
+    viewer_protocol_policy     = "redirect-to-https"
+    cache_policy_id            = aws_cloudfront_cache_policy.ab.id
     response_headers_policy_id = aws_cloudfront_response_headers_policy.security.id
 
     function_association {

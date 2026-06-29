@@ -1,73 +1,99 @@
-# 제1과제 - Solution Architecture (ap-northeast-2)
+# 제1과제 - Solution Architecture (WorldPay / ap-northeast-2)
 
-## 실행 순서
+2단계 구조로 구성되어 있습니다.
 
-> **로컬(PowerShell)** 과 **Bastion(bash)** 을 구분하여 표기합니다.
+- **1단계 (로컬 PowerShell) — `bootstrap/`** : VPC(서브넷·IGW·라우팅·VPC Endpoint) + Bastion EC2 + 2단계 코드 배포용 S3 버킷
+- **2단계 (Bastion bash) — `app/`** : KMS·DynamoDB·S3·ECR·ALB·CloudFront·IAM·LogGroup·manifest 버킷 (EKS/k8s 는 `manifest/setup.sh`)
+
+> Full Private EKS(Public Endpoint 비활성)라서 kubectl·채점은 VPC 내부의 `worldpay-bastion` 에서만 가능합니다.
+> 그래서 **VPC/Bastion 까지만 로컬에서 만들고, 나머지 AWS 리소스 + EKS 는 Bastion 안에서** 생성합니다.
 
 ---
 
-### 1. Terraform 실행 — 로컬 PowerShell
+## 디렉토리 구조
+
+```
+1과제/
+├── bootstrap/          # ★ 1단계: 로컬에서 apply (VPC + Bastion + 코드버킷)
+│   ├── main.tf
+│   └── outputs.tf
+├── app/                # ★ 2단계: Bastion 안에서 apply (나머지 전부)
+│   ├── main.tf
+│   └── outputs.tf
+├── modules/            # 공용 모듈 (VPC, KMS, DynamoDB, S3, ECR, CloudFront)
+├── manifest/           # k8s 매니페스트 + setup.sh (EKS 구축)
+├── 배포파일/            # book 바이너리, index.html, main.jpeg
+├── main.tf.OLD-single-stage      # (구) 단일스택 - 참고용, 사용 안 함
+└── outputs.tf.OLD-single-stage   # (구) 단일스택 - 참고용, 사용 안 함
+```
+
+> ⚠️ **루트(`1과제/`)에서는 `terraform` 명령을 실행하지 마세요.**
+> 과거 단일스택 시절의 `terraform.tfstate` 가 루트에 남아 있습니다. 루트에는 더 이상 활성 `.tf` 가 없으므로,
+> 루트에서 `terraform plan/apply` 를 돌리면 **기존 리소스를 전부 삭제하려는 계획**이 생깁니다.
+> 구 스택을 정리하려면: `main.tf.OLD-single-stage`/`outputs.tf.OLD-single-stage` 를 `.tf` 로 되돌린 뒤 `terraform destroy` → 그 후 `bootstrap`/`app` 으로 새로 진행.
+
+---
+
+## 실행 순서
+
+### 1단계 — 로컬 PowerShell (Bastion 띄우기)
 
 ```powershell
-cd C:\Users\competitor\2026-terraform\09\1과제
+cd C:\Users\competitor\2026-terraform\09\1과제\bootstrap
 terraform init
 terraform apply -auto-approve
 ```
 
-> 완료까지 약 5~10분 소요 (VPC Endpoint 다수 생성)
-
----
-
-### 2. Bastion 접속 — 로컬 PowerShell
+출력값 확인:
 
 ```powershell
-# Bastion 퍼블릭 IP 확인
-$BASTION_IP = aws ec2 describe-instances `
-  --filters Name=tag:Name,Values=worldpay-bastion `
-  --query "Reservations[0].Instances[0].PublicIpAddress" --output text
-echo $BASTION_IP
-
-# SSH 접속 (패스워드 인증)
-ssh ec2-user@$BASTION_IP
-# 패스워드: worldpay2026!
+terraform output            # bastion_public_ip, code_bucket, ssh_command
 ```
 
----
+> `bootstrap` 이 끝나면 Bastion user_data 가 자동으로
+> ① awscli/kubectl/eksctl/**terraform**/git 설치, ② `app`·`modules`·`manifest`·`배포파일` 을 코드버킷에서
+> `/home/ec2-user/project/` 로 내려받아 둡니다. (user_data 완료까지 1~2분)
 
-### 3. setup.sh 실행 — Bastion bash
+### 2단계 — Bastion bash (나머지 apply)
+
+```powershell
+# 로컬에서 SSH (패스워드: worldpay2026!)
+ssh ec2-user@<bastion_public_ip>
+```
+
+```bash
+# user_data 가 코드를 받아둠. 못 받았으면 아래로 수동 다운로드:
+#   BUCKET=$(cat ~/CODE_BUCKET.txt); aws s3 cp s3://$BUCKET/ ~/project --recursive --region ap-northeast-2
+
+cd ~/project/app
+terraform init
+terraform apply -auto-approve      # KMS/DynamoDB/S3/ECR/ALB/CloudFront/IAM/LogGroup/manifest버킷
+```
+
+### 3단계 — Bastion bash (EKS + k8s 구축)
 
 ```bash
 BUCKET=$(aws s3 ls | grep worldpay-manifest | awk '{print $3}')
 mkdir -p /tmp/worldpay && cd /tmp/worldpay
 aws s3 cp s3://$BUCKET/ . --recursive
 chmod +x setup.sh
-./setup.sh 2>&1 | tee /tmp/setup.log
+./setup.sh 2>&1 | tee /tmp/setup.log     # 약 30~40분
 ```
 
-> 완료까지 약 30~40분 소요
-
----
-
-### 4. 완료 확인 — Bastion bash
+### 4단계 — 완료 확인 (Bastion bash)
 
 ```bash
-# CloudFront 도메인
+# CloudFront
 aws cloudfront list-distributions --query 'DistributionList.Items[0].DomainName' --output text
-
-# Grafana URL (admin / worldpay2026!)
-echo "http://$(aws elbv2 describe-load-balancers --names grafana-alb \
-  --query 'LoadBalancers[0].DNSName' --output text)"
-
+# Grafana (admin / worldpay2026!)
+echo "http://$(aws elbv2 describe-load-balancers --names grafana-alb --query 'LoadBalancers[0].DNSName' --output text)"
 # API 테스트
 CF=$(aws cloudfront list-distributions --query 'DistributionList.Items[0].DomainName' --output text)
-curl -s -X POST https://$CF/v1/book \
-  -H 'Content-Type: application/json' \
+curl -s -X POST https://$CF/v1/book -H 'Content-Type: application/json' \
   -d '{"client_id":"C001","username":"Alice","email":"a@a.com","concert_name":"Test"}' | jq .
 ```
 
----
-
-### 5. 채점 스크립트 실행 — Bastion bash
+### 5단계 — 채점 (Bastion bash)
 
 ```bash
 aws configure set region ap-northeast-2
@@ -77,382 +103,194 @@ bash /home/ec2-user/mark.sh
 
 ---
 
-### manifest 파일 수정 후 재적용
+## 재적용 / manifest 수정 후
 
-**로컬 PowerShell** — S3 업로드
+**`app` 리소스 수정 시** — Bastion `~/project/app` 에서 `terraform apply` 다시 실행.
 
-```powershell
-cd C:\Users\competitor\2026-terraform\09\1과제
-terraform apply -auto-approve   # etag 변경 감지 → 변경된 파일만 S3 재업로드
-```
-
-**Bastion bash** — 내려받아서 재적용
+**manifest 파일 수정 시** — `app` 의 manifest 버킷은 `terraform apply` 시 etag 변경분만 재업로드됩니다.
 
 ```bash
+cd ~/project/app && terraform apply -auto-approve      # 변경된 manifest 만 S3 재업로드
 cd /tmp/worldpay
 BUCKET=$(aws s3 ls | grep worldpay-manifest | awk '{print $3}')
 aws s3 cp s3://$BUCKET/ . --recursive
-
-# fluentbit 재적용
 ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
-sed -i "s|ACCOUNT_ID|$ACCOUNT|g" fluentbit.yaml
-kubectl apply -f fluentbit.yaml
-kubectl rollout restart daemonset worldpay-fluentbit -n logging
-kubectl rollout status daemonset/worldpay-fluentbit -n logging --timeout=120s
-
-# deployment 재적용
-sed -i "s|ACCOUNT_ID|$ACCOUNT|g" deployment.yaml
+sed -i "s|ACCOUNT_ID|$ACCOUNT|g" deployment.yaml fluentbit.yaml
 kubectl apply -f deployment.yaml
 kubectl rollout restart deployment book-deploy -n worldpay
-kubectl rollout status deployment/book-deploy -n worldpay --timeout=120s
+```
+
+> ⚠️ `bootstrap` 의 코드버킷은 **로컬에서 `bootstrap` 을 다시 apply** 해야 갱신됩니다(로컬 `app/*.tf` 변경분 업로드). Bastion 안에서 `app/*.tf` 를 직접 고친 경우엔 그 파일을 그대로 쓰면 됩니다.
+
+---
+
+# 📌 수정 가이드 (대회 시 과제 변경 대응 / 최대 30%)
+
+> 모든 라인 번호는 현재 파일 기준입니다. 값 변경 시 **연관된 모든 파일**을 함께 수정해야 채점이 통과합니다.
+> "단계" = 어디서 apply 하는지: **로컬=bootstrap**, **Bastion=app/manifest**.
+
+## 0. 시험 시작 시 체크리스트
+
+```
+[ ] 프로젝트 접두어        worldpay → ?
+[ ] 리전                   ap-northeast-2 → ?
+[ ] VPC CIDR               10.0.0.0/16 → ?
+[ ] 서브넷 CIDR/이름/AZ     10.0.0~3.0/24, a/c → ?
+[ ] DynamoDB 테이블/PK     Concerts / booking_id → ?
+[ ] ECR 리포 / 이미지태그   worldpay-book / v1.0.0 → ?
+[ ] EKS 이름/버전/노드타입  worldpay-cluster / 1.35 / t3.large → ?
+[ ] 앱 포트                8080 → ?
+[ ] Log Group / 보존       /worldpay/application / 7 → ?
+[ ] Grafana 비번/DS 이름   worldpay2026! / worldpay-prometheus·worldpay-logs → ?
+[ ] CloudFront 이름/OAC/경로 worldpay-cdn / worldpay-s3-oac / /v1/* → ?
+[ ] Bastion 타입/비번      t3.small / worldpay2026! → ?
 ```
 
 ---
 
-### Terraform Import (리소스가 이미 존재할 때)
+## 1. 프로젝트 접두어 (worldpay → newname)
+전체 하드코딩. 아래 파일에서 `worldpay` 전부 치환.
 
-`terraform apply` 시 리소스가 이미 존재한다는 오류가 나면 import 후 재시도합니다.
-모든 명령은 **로컬 PowerShell** 에서 실행합니다.
+| 단계 | 파일 | 비고 |
+|------|------|------|
+| bootstrap | `bootstrap/main.tf` | VPC 이름·서브넷 이름·Bastion 리소스·태그 |
+| app | `app/main.tf` | VPC/서브넷 **조회 필터(L28·L39·L50)**, 모든 리소스명·alias·태그 |
+| manifest | `manifest/setup.sh` | 클러스터/역할/버킷/이미지/서브넷 이름 전부 |
+| manifest | `manifest/cluster.yaml` | `name: worldpay-cluster`, nodegroup, instanceName |
+| manifest | `manifest/deployment.yaml`,`serviceaccount.yaml`,`service.yaml` | namespace·이름·이미지 |
+| manifest | `manifest/fluentbit.yaml` | DaemonSet명, namespace, log_group, 로그경로필터(L43) |
+| manifest | `manifest/grafana-values.yaml` | datasource명, 대시보드명, log group ARN |
+
+> ⚠️ `bootstrap/main.tf` 의 서브넷/VPC 이름과 `app/main.tf` 의 **data source 필터값(L28·L39·L50)** 은 **반드시 동일**해야 합니다. 다르면 2단계에서 VPC/서브넷을 못 찾아 apply 실패합니다.
+
+---
+
+## 2. 리전 변경 (ap-northeast-2 → 다른 리전)
+- **`bootstrap/main.tf` L22** `region = "ap-northeast-2"`
+- **`app/main.tf` L18** provider region
+- **`manifest/setup.sh` L4** `REGION=ap-northeast-2`
+- **`manifest/cluster.yaml` L6** `region: ap-northeast-2`
+- **`manifest/deployment.yaml` L25** `AWS_REGION` 값
+- **`manifest/fluentbit.yaml`** `[OUTPUT] region` (L84 부근)
+- **`modules/VPC/main.tf`** VPC Endpoint `service_name` 의 `com.amazonaws.ap-northeast-2.*` (locals + s3/dynamodb) — 리전 문자열 하드코딩이므로 전부 치환
+- AZ도 함께 변경 (아래 4번)
+
+---
+
+## 3. VPC / 네트워크
+
+### VPC CIDR (`10.0.0.0/16`)
+- **`bootstrap/main.tf` L29** `vpc_cidr`
+- **`manifest/setup.sh` L73** `--cidr 10.0.0.0/16` (EKS SG 443 ingress)
+- VPC Endpoint SG ingress 는 `var.vpc_cidr` 참조 → 자동 반영
+
+### 서브넷 CIDR
+- **`bootstrap/main.tf` L30** `public_subnets_cidr`
+- **`bootstrap/main.tf` L31** `isolated_subnets_cidr`
+
+### 서브넷 이름
+- **`bootstrap/main.tf` L33-34** `public_subnet_names`, `isolated_subnet_names`
+- **`app/main.tf` L39** public 서브넷 조회 필터
+- **`app/main.tf` L50** isolated 서브넷 조회 필터
+- **`manifest/setup.sh` L49-50** isolated 서브넷 이름(EKS 노드 배치)
+
+### VPC 이름
+- **`bootstrap/main.tf` L28** `vpc_name`
+- **`app/main.tf` L28** VPC 조회 필터
+- **`manifest/setup.sh`** `Values=worldpay-vpc` (cluster.yaml placeholder 치환부)
+
+### 가용영역 (2a/2c → 2a/2b 등)
+- **`bootstrap/main.tf` L32** `availability_zones`
+- **`manifest/cluster.yaml` L13-14** `ap-northeast-2a/2c`
+
+---
+
+## 4. Bastion
+- 인스턴스 타입: **`bootstrap/main.tf` L138** `instance_type = "t3.small"`
+- 로그인 비번: **`bootstrap/main.tf` L154** `echo 'ec2-user:worldpay2026!'`
+- Bastion terraform 버전: **`bootstrap/main.tf` L174** (1.13.4)
+
+---
+
+## 5. DynamoDB
+- 테이블명: **`app/main.tf` L64** `table_name = "Concerts"` + **`manifest/deployment.yaml` L27** `TABLE_NAME` 값
+- Partition Key: **`app/main.tf` L65** `hash_key = "booking_id"`
+- KMS alias: **`app/main.tf` L57** `db_key_alias`
+
+## 6. S3 호스팅
+- 버킷명 접두어: **`app/main.tf` L72** `bucket_name`
+- KMS alias: **`app/main.tf` L58** `s3_key_alias`
+- (정적파일 업로드는 `manifest/setup.sh` 의 `HOSTING_BUCKET` + `app` manifest 버킷)
+
+## 7. ECR
+- 리포명: **`app/main.tf` L79** `repository_name = "worldpay-book"`
+  - **`manifest/setup.sh` L27-28** `$ECR/worldpay-book:v1.0.0`
+  - **`manifest/deployment.yaml` L19** 이미지 경로
+- 이미지 태그(v1.0.0): **`manifest/setup.sh` L27-28**, **`manifest/deployment.yaml` L19**
+
+---
+
+## 8. EKS (manifest 영역)
+- 클러스터명: **`manifest/cluster.yaml` L5** + `manifest/setup.sh` 전체
+- K8s 버전: **`manifest/cluster.yaml` L7** `version: "1.35"`
+- 노드 인스턴스 타입: **`manifest/cluster.yaml` L24** + **`manifest/setup.sh` L65** `--instance-types t3.large`
+- 노드 수: **`manifest/cluster.yaml` L25-27**(desired/min/max) + **`manifest/setup.sh` L65** `--scaling-config`
+
+---
+
+## 9. Load Balancer / 앱 포트
+- book ALB TG 포트: **`app/main.tf` L165** `port = 8080`, 헬스체크 **L173** `port = "8080"`
+- grafana ALB TG 포트: **`app/main.tf` L219** `port = 3000`
+- 앱 포트(8080) 변경 시 함께:
+  - **`manifest/deployment.yaml` L22** `containerPort`, liven/readiness probe 포트
+  - **`manifest/setup.sh` L76** EKS SG ingress `--port 8080`
+- grafana 포트(3000) 변경 시 **`manifest/setup.sh` L77** `--port 3000`
+
+---
+
+## 10. CloudFront
+- Distribution명: **`app/main.tf` L287** `distribution_name = "worldpay-cdn"`
+- OAC명: **`app/main.tf` L288** `oac_name = "worldpay-s3-oac"`
+- API 경로 패턴(/v1/* → /api/* 등): **`modules/CloudFront/main.tf` L53** `path_pattern = "/v1/*"`
+- Default Root Object: `modules/CloudFront/main.tf` `default_root_object = "index.html"`
+
+---
+
+## 11. Logging (FluentBit)
+- Log Group명: **`app/main.tf` L244** `name = "/worldpay/application"`
+  - **`manifest/fluentbit.yaml` L85** `log_group_name`
+  - **`manifest/grafana-values.yaml`** APP_LOGS 패널 log group ARN (L57 부근)
+- 보존기간: **`app/main.tf` L245** `retention_in_days = 7`
+- Log Stream Prefix: **`manifest/fluentbit.yaml` L86** `log_stream_prefix book-`
+- 수집 대상 namespace: **`manifest/fluentbit.yaml` L43** `Path .../*_worldpay_*.log`
+
+---
+
+## 12. Monitoring (Grafana / Prometheus)
+- Grafana 비번: **`manifest/grafana-values.yaml` L2** `adminPassword`
+- Datasource명: **`manifest/grafana-values.yaml` L10** `worldpay-prometheus`, **L15** `worldpay-logs`
+  - 대시보드 패널의 `"datasource"` 값도 동일하게 수정
+- 대시보드명/패널명(POD_CPU 등): `manifest/grafana-values.yaml` 의 dashboards JSON
+- Prometheus 레플리카: **`manifest/prometheus-values.yaml` L2** `replicaCount`
+
+---
+
+# Terraform Import (리소스가 이미 존재할 때)
+
+`bootstrap` / `app` 각 디렉토리에서 해당 리소스만 import 후 재 apply.
 
 ```powershell
-# 공통 변수
-$ACCOUNT = aws sts get-caller-identity --query Account --output text
-```
-
-#### VPC
-```powershell
-$VPC_ID = aws ec2 describe-vpcs --filters Name=tag:Name,Values=worldpay-vpc `
-  --query "Vpcs[0].VpcId" --output text
+# 예) bootstrap 에서 VPC import
+$VPC_ID = aws ec2 describe-vpcs --filters Name=tag:Name,Values=worldpay-vpc --query "Vpcs[0].VpcId" --output text
 terraform import module.VPC.aws_vpc.this $VPC_ID
 ```
 
-#### Subnet
-```powershell
-# public subnet a
-$SID = aws ec2 describe-subnets --filters Name=tag:Name,Values=worldpay-public-subnet-a `
-  --query "Subnets[0].SubnetId" --output text
-terraform import 'module.VPC.aws_subnet.public[0]' $SID
-
-# public subnet c
-$SID = aws ec2 describe-subnets --filters Name=tag:Name,Values=worldpay-public-subnet-c `
-  --query "Subnets[0].SubnetId" --output text
-terraform import 'module.VPC.aws_subnet.public[1]' $SID
-
-# isolated subnet a
-$SID = aws ec2 describe-subnets --filters Name=tag:Name,Values=worldpay-isolated-subnet-a `
-  --query "Subnets[0].SubnetId" --output text
-terraform import 'module.VPC.aws_subnet.isolated[0]' $SID
-
-# isolated subnet c
-$SID = aws ec2 describe-subnets --filters Name=tag:Name,Values=worldpay-isolated-subnet-c `
-  --query "Subnets[0].SubnetId" --output text
-terraform import 'module.VPC.aws_subnet.isolated[1]' $SID
-```
-
-#### Internet Gateway
-```powershell
-$IGW_ID = aws ec2 describe-internet-gateways `
-  --filters Name=tag:Name,Values=worldpay-vpc-igw `
-  --query "InternetGateways[0].InternetGatewayId" --output text
-terraform import module.VPC.aws_internet_gateway.this $IGW_ID
-```
-
-#### KMS
-```powershell
-$DB_KEY_ID = aws kms list-aliases `
-  --query "Aliases[?AliasName=='alias/worldpay-db-key'].TargetKeyId" --output text
-terraform import module.KMS.aws_kms_key.db $DB_KEY_ID
-terraform import module.KMS.aws_kms_alias.db alias/worldpay-db-key
-
-$S3_KEY_ID = aws kms list-aliases `
-  --query "Aliases[?AliasName=='alias/worldpay-s3-key'].TargetKeyId" --output text
-terraform import module.KMS.aws_kms_key.s3 $S3_KEY_ID
-terraform import module.KMS.aws_kms_alias.s3 alias/worldpay-s3-key
-```
-
-#### DynamoDB
-```powershell
+```bash
+# 예) app 에서 DynamoDB / ECR / ALB import
 terraform import module.DynamoDB.aws_dynamodb_table.this Concerts
-terraform import module.DynamoDB.aws_dynamodb_contributor_insights.this Concerts
-```
-
-#### S3 (호스팅 버킷)
-```powershell
-terraform import module.S3.aws_s3_bucket.this "worldpay-bucket-$ACCOUNT"
-```
-
-#### ECR
-```powershell
 terraform import module.ECR.aws_ecr_repository.this worldpay-book
-```
-
-#### Bastion
-```powershell
-# EIP
-$ALLOC_ID = aws ec2 describe-addresses `
-  --filters Name=tag:Name,Values=worldpay-bastion-eip `
-  --query "Addresses[0].AllocationId" --output text
-terraform import aws_eip.bastion $ALLOC_ID
-
-# IAM Role
-terraform import aws_iam_role.bastion worldpay-bastion-role
-
-# Instance
-$INSTANCE_ID = aws ec2 describe-instances `
-  --filters Name=tag:Name,Values=worldpay-bastion `
-  --query "Reservations[0].Instances[0].InstanceId" --output text
-terraform import aws_instance.bastion $INSTANCE_ID
-```
-
-#### ALB
-```powershell
-$BOOK_ALB_ARN = aws elbv2 describe-load-balancers --names book-alb `
-  --query "LoadBalancers[0].LoadBalancerArn" --output text
-terraform import aws_lb.book $BOOK_ALB_ARN
-
-$BOOK_TG_ARN = aws elbv2 describe-target-groups --names book-tg `
-  --query "TargetGroups[0].TargetGroupArn" --output text
-terraform import aws_lb_target_group.book $BOOK_TG_ARN
-
-$GRAFANA_ALB_ARN = aws elbv2 describe-load-balancers --names grafana-alb `
-  --query "LoadBalancers[0].LoadBalancerArn" --output text
-terraform import aws_lb.grafana $GRAFANA_ALB_ARN
-
-$GRAFANA_TG_ARN = aws elbv2 describe-target-groups --names grafana-tg `
-  --query "TargetGroups[0].TargetGroupArn" --output text
-terraform import aws_lb_target_group.grafana $GRAFANA_TG_ARN
-```
-
-#### CloudWatch Log Group
-```powershell
+terraform import aws_lb.book $(aws elbv2 describe-load-balancers --names book-alb --query "LoadBalancers[0].LoadBalancerArn" --output text)
 terraform import aws_cloudwatch_log_group.app /worldpay/application
 ```
 
-#### CloudFront
-```powershell
-$DIST_ID = aws cloudfront list-distributions `
-  --query "DistributionList.Items[?contains(Aliases.Items, 'worldpay-cdn') || Tags.Items[?Key=='Name'&&Value=='worldpay-cdn']].Id | [0]" `
-  --output text
-
-# 위 명령이 None이면 태그로 직접 검색
-foreach ($i in (aws cloudfront list-distributions --query 'DistributionList.Items[].Id' --output text).Split()) {
-  $tag = aws cloudfront list-tags-for-resource `
-    --resource "arn:aws:cloudfront::${ACCOUNT}:distribution/$i" `
-    --query "Tags.Items[?Key=='Name'].Value|[0]" --output text
-  if ($tag -eq "worldpay-cdn") { $DIST_ID = $i; break }
-}
-terraform import module.CloudFront.aws_cloudfront_distribution.this $DIST_ID
-```
-
-#### Pod Identity IAM Role (Book / ALBC)
-```powershell
-terraform import aws_iam_role.book_app worldpay-book-app-role
-terraform import aws_iam_role.albc worldpay-albc-role
-```
-
----
-
-# 수정 가이드 (대회 시 과제 변경 대응)
-
-## 빠른 체크리스트 (시험 시작 시 확인 순서)
-
-```
-[ ] 프로젝트명/접두어 (worldpay → ?)
-[ ] VPC CIDR (10.0.0.0/16 → ?)
-[ ] 서브넷 CIDR 4개 및 이름
-[ ] 가용영역 (2a/2c → ?)
-[ ] EKS 버전 (1.35 → ?)
-[ ] 노드 인스턴스 타입 (t3.large → ?)
-[ ] DynamoDB 테이블명 / Partition Key
-[ ] ECR 리포지토리명 / 이미지 태그
-[ ] Bastion 인스턴스 타입 / 패스워드
-[ ] CloudWatch Log Group 이름 / 보존기간
-[ ] Grafana 패스워드 / datasource 이름
-[ ] CloudFront API 경로 패턴 (/v1/*)
-```
-
----
-
-## 1. 프로젝트명 / 접두어 변경 (예: worldpay → newname)
-
-전체에 걸쳐 `worldpay`가 하드코딩되어 있습니다. 아래 파일 모두 치환 필요.
-
-| 파일 | 수정 위치 |
-|------|----------|
-| `main.tf` | 모든 `worldpay` 문자열 |
-| `manifest/cluster.yaml` | `name: worldpay-cluster`, `worldpay-nodegroup`, `instanceName: worldpay-node` |
-| `manifest/namespace.yaml` | namespace name |
-| `manifest/deployment.yaml` | `namespace`, `name: book-deploy`, `name: book-sa` |
-| `manifest/serviceaccount.yaml` | `name: book-sa`, `namespace` |
-| `manifest/service.yaml` | `namespace` |
-| `manifest/fluentbit.yaml` | DaemonSet name, namespace, log_group_name, 로그 경로 필터 |
-| `manifest/grafana-values.yaml` | adminPassword, datasource name, dashboard title, log group ARN |
-| `manifest/setup.sh` | 클러스터명, 역할명, 버킷명, 이미지 경로 전체 |
-
----
-
-## 2. VPC / 네트워크 변경
-
-### VPC CIDR 변경
-- **`main.tf` 21번 줄** `vpc_cidr = "10.0.0.0/16"`
-- **`manifest/setup.sh` 72번 줄** `--cidr 10.0.0.0/16` (EKS SG ingress 허용 범위)
-- `modules/VPC/main.tf`의 VPC Endpoint SG ingress는 `var.vpc_cidr`을 참조하므로 자동 반영됨
-
-### 서브넷 CIDR 변경
-- **`main.tf` 21~22번 줄**
-  ```hcl
-  public_subnets_cidr   = ["10.0.0.0/24", "10.0.1.0/24"]
-  isolated_subnets_cidr = ["10.0.2.0/24", "10.0.3.0/24"]
-  ```
-
-### 서브넷 이름 변경
-- **`main.tf` 24~25번 줄**
-  ```hcl
-  public_subnet_names   = ["worldpay-public-subnet-a", "worldpay-public-subnet-c"]
-  isolated_subnet_names = ["worldpay-isolated-subnet-a", "worldpay-isolated-subnet-c"]
-  ```
-- **`manifest/setup.sh` 48~49번 줄** `Values=worldpay-isolated-subnet-a`, `Values=worldpay-isolated-subnet-c`
-- **`manifest/fluentbit.yaml` 43번 줄** INPUT Path `*_worldpay_*.log` → namespace 이름 기반이므로 namespace 변경 시 함께 수정
-
-### 가용영역 변경 (예: 2a/2c → 2a/2b)
-- **`main.tf` 23번 줄** `availability_zones = ["ap-northeast-2a", "ap-northeast-2c"]`
-- **`manifest/cluster.yaml` 12~13번 줄** `ap-northeast-2a`, `ap-northeast-2c`
-
----
-
-## 3. EKS 클러스터 변경
-
-### 클러스터 이름 변경
-- **`manifest/cluster.yaml` 5번 줄** `name: worldpay-cluster`
-- **`manifest/setup.sh`** `worldpay-cluster` 전체 치환 (update-kubeconfig, create-access-entry, create-pod-identity-association 등)
-
-### Kubernetes 버전 변경
-- **`manifest/cluster.yaml` 7번 줄** `version: "1.35"`
-
-### 노드 인스턴스 타입 변경
-- **`manifest/cluster.yaml` 24번 줄** `instanceType: t3.large`
-- **`manifest/setup.sh` 64번 줄** `--instance-types t3.large`
-
-### 노드 최소/최대 수 변경
-- **`manifest/cluster.yaml` 25~27번 줄** `desiredCapacity`, `minSize`, `maxSize`
-- **`manifest/setup.sh` 64번 줄** `--scaling-config minSize=2,maxSize=4,desiredSize=2`
-
----
-
-## 4. DynamoDB 변경
-
-### 테이블 이름 변경
-- **`main.tf` 38번 줄** `table_name = "Concerts"`
-- **`manifest/deployment.yaml` 27번 줄** `value: "Concerts"` (TABLE_NAME 환경변수)
-
-### Partition Key 변경
-- **`main.tf` 39번 줄** `hash_key = "booking_id"`
-
-### KMS 키 alias 변경
-- **`main.tf` 31번 줄** `db_key_alias = "alias/worldpay-db-key"`
-
----
-
-## 5. S3 / 호스팅 변경
-
-### S3 버킷 이름 접두어 변경
-- **`main.tf` 46번 줄** `bucket_name = "worldpay-bucket-${data.aws_caller_identity.current.account_id}"`
-
-### KMS 키 alias 변경
-- **`main.tf` 32번 줄** `s3_key_alias = "alias/worldpay-s3-key"`
-
----
-
-## 6. ECR 변경
-
-### 리포지토리 이름 변경
-- **`main.tf` 53번 줄** `repository_name = "worldpay-book"`
-- **`manifest/setup.sh` 27번 줄** `$ECR/worldpay-book:v1.0.0`
-- **`manifest/deployment.yaml` 19번 줄** 이미지 경로 중 `worldpay-book`
-
-### 이미지 태그 변경
-- **`manifest/setup.sh` 26~27번 줄** `imageTag=v1.0.0`, `$ECR/worldpay-book:v1.0.0`
-- **`manifest/deployment.yaml` 19번 줄** 이미지 경로 태그 `v1.0.0`
-
----
-
-## 7. Bastion 변경
-
-### 인스턴스 타입 변경
-- **`main.tf` 113번 줄** `instance_type = "t3.small"`
-
-### 로그인 패스워드 변경
-- **`main.tf` 122번 줄** `echo 'ec2-user:worldpay2026!' | chpasswd`
-
----
-
-## 8. CloudFront 변경
-
-### Distribution 이름 변경
-- **`main.tf` 332번 줄** `distribution_name = "worldpay-cdn"`
-
-### OAC 이름 변경
-- **`main.tf` 333번 줄** `oac_name = "worldpay-s3-oac"`
-
-### API 경로 패턴 변경 (예: /v1/* → /api/*)
-- **`modules/CloudFront/main.tf` 52번 줄** `path_pattern = "/v1/*"`
-
----
-
-## 9. 로깅 (FluentBit) 변경
-
-### Log Group 이름 변경
-- **`main.tf` 289번 줄** `name = "/worldpay/application"`
-- **`manifest/fluentbit.yaml` 83번 줄** `log_group_name    /worldpay/application`
-- **`manifest/grafana-values.yaml` 57번 줄** log group ARN 경로 `/worldpay/application`
-
-### Log Stream Prefix 변경
-- **`manifest/fluentbit.yaml` 84번 줄** `log_stream_prefix book-`
-
-### Log Retention 변경
-- **`main.tf` 290번 줄** `retention_in_days = 7`
-
-### 수집 대상 Namespace 변경
-- **`manifest/fluentbit.yaml` 43번 줄** `Path /var/log/containers/*_worldpay_*.log` → 새 namespace로 수정
-
----
-
-## 10. Grafana / Prometheus 변경
-
-### Grafana 패스워드 변경
-- **`manifest/grafana-values.yaml` 2번 줄** `adminPassword: "worldpay2026!"`
-
-### Datasource 이름 변경
-- **`manifest/grafana-values.yaml` 10번 줄** `name: worldpay-prometheus`
-- **`manifest/grafana-values.yaml` 15번 줄** `name: worldpay-logs`
-- **`manifest/grafana-values.yaml` 43, 50, 54, 62번 줄** 대시보드 패널 내 `"datasource"` 값도 동일하게 수정
-
-### 대시보드 이름 변경
-- **`manifest/grafana-values.yaml` 38번 줄** `"title": "worldpay-dashboard"`
-
-### Prometheus 레플리카 수 변경
-- **`manifest/prometheus-values.yaml` 2번 줄** `replicaCount: 2`
-
----
-
-## 11. 앱 포트 변경 (8080 → 다른 포트)
-
-| 파일 | 위치 |
-|------|------|
-| `manifest/deployment.yaml` | `containerPort`, livenessProbe/readinessProbe `port` |
-| `main.tf` 208번 줄 | book ALB target group `port = 8080` |
-| `main.tf` 217번 줄 | health_check `port = "8080"` |
-| `manifest/setup.sh` 75번 줄 | EKS SG ingress `--port 8080` |
-| `manifest/setup.sh` 128번 줄 | 타겟 등록 `Port=8080` |
-
----
-
-## 12. Application 환경변수 변경
-
-### AWS_REGION 변경
-- **`manifest/deployment.yaml` 25번 줄** `value: "ap-northeast-2"`
-- **`main.tf` 11번 줄** provider `region = "ap-northeast-2"`
-
-### TABLE_NAME 변경
-- **`manifest/deployment.yaml` 27번 줄** `value: "Concerts"`
-- **`main.tf` 38번 줄** `table_name = "Concerts"` (위 4번 DynamoDB 항목과 동일)
+> VPC/Subnet 은 **bootstrap** state, 그 외는 **app** state 에 들어갑니다. import 대상 디렉토리를 혼동하지 마세요.

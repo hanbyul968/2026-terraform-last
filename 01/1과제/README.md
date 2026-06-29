@@ -155,3 +155,33 @@ terraform destroy
 - `terraform fmt` / `terraform validate` 통과 (구성 유효).
 - 실제 `apply`(EKS 프로비저닝/도커 빌드/헬름)는 환경에서 직접 1회 수행하여 최종 확인 필요.
 - DynamoDB AWS Backup 은 `dynamodb_backup.tf`(AWS CLI null_resource)로 생성 — EFS 자동백업 vault 시드 후 plan/selection 등록.
+
+
+
+---
+
+## 🚀 Apply — 2단계 (로컬 PowerShell → Bastion)
+
+이 과제는 **로컬에서 직접 apply 하지 않습니다** (루트 구성이 `/bin/bash` provisioner·docker build·kubectl 에 의존). 로컬에서는 **bastion 만** 띄우고, **bastion(Linux) 안에서 main 전체**를 apply 합니다.
+
+```powershell
+# 1) 로컬 Windows PowerShell — Bastion 생성
+cd C:\Users\competitor\2026-terraform\01\1과제\bastion
+terraform init
+terraform apply -auto-approve
+terraform output -raw ssm_connect_command   # 접속 명령 출력
+```
+```bash
+# 2) SSM 접속 후 Bastion 에서 — main 배포 (docker build/push + EKS + helm)
+until [ -f /opt/task1/READY ]; do sleep 5; done
+bash /opt/task1/run.sh
+#  → 마지막 finalize 단계에서 EKS public endpoint 를 끄고 private-only 로 전환(채점 5-1)
+```
+```powershell
+# 3) 채점 후 — 로컬에서 Bastion 제거
+cd C:\Users\competitor\2026-terraform\01\1과제\bastion
+terraform destroy -auto-approve
+```
+
+> ✅ 이 bastion 은 **자체 VPC(10.250.0.0/16)** 를 생성하므로 default VPC 가 없는 계정에서도 동작합니다.
+> ⚠️ main destroy(=`/opt/task1` 에서 `terraform destroy`) 전에는 EKS public 을 잠시 재오픈해야 k8s 리소스를 정리할 수 있습니다.

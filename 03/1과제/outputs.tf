@@ -23,7 +23,6 @@ output "alb_dns" {
   value = data.aws_lb.app.dns_name
 }
 
-output "bastion_public_ip" {
-  description = "Bastion EIP (VPC 내부에서 kubectl/apply 용)"
-  value       = aws_eip.bastion.public_ip
-}
+# (제거됨) bastion_public_ip — VPC 내부 배포용 bastion 은 외부 bastion/ 스테이지로
+# 대체되어 bastion.tf 가 bastion.tf.OLD-in-main 으로 비활성화되었다.
+

@@ -1,0 +1,7 @@
+[
+  { "order_id": "ORD-1001", "product_id": "PROD-A100", "quantity": 2, "unit_price": 25.0, "payment_method": "CARD" },
+  { "order_id": "ORD-1002", "product_id": "PROD-B200", "quantity": 1, "unit_price": 1000, "payment_method": "BANK_TRANSFER" },
+  { "order_id": "BAD-1003", "product_id": "PROD-C300", "quantity": 1, "unit_price": 500, "payment_method": "CARD" },
+  { "order_id": "ORD-1004", "product_id": "", "quantity": 3, "unit_price": 100, "payment_method": "CARD" },
+  { "order_id": "ORD-1005", "product_id": "PROD-D400", "quantity": 0, "unit_price": -5, "payment_method": "WIRE" }
+]

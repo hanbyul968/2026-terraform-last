@@ -2,7 +2,7 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.0"
+      version = "~> 6.0"
     }
     archive = {
       source  = "hashicorp/archive"
@@ -370,7 +370,7 @@ resource "aws_lambda_function" "updater" {
   function_name    = "gj2026-event-updater"
   role             = aws_iam_role.lambda.arn
   handler          = "updater.lambda_handler"
-  runtime          = "python3.12" # PDF 명세: python3.14
+  runtime          = "python3.14"
   filename         = data.archive_file.updater.output_path
   source_code_hash = data.archive_file.updater.output_base64sha256
   timeout          = 60
@@ -399,7 +399,7 @@ resource "aws_lambda_function" "recovery" {
   function_name    = "gj2026-event-recovery"
   role             = aws_iam_role.lambda.arn
   handler          = "recovery.lambda_handler"
-  runtime          = "python3.12"
+  runtime          = "python3.14"
   filename         = data.archive_file.recovery.output_path
   source_code_hash = data.archive_file.recovery.output_base64sha256
   timeout          = 120

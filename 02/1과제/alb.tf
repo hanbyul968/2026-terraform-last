@@ -207,7 +207,7 @@ resource "null_resource" "book_tgb" {
     tg = aws_lb_target_group.book.arn
   }
   provisioner "local-exec" {
-    interpreter = ["powershell", "-NoProfile", "-Command"]
+    interpreter = ["/bin/bash", "-c"]
     environment = {
       REGION  = local.region
       CLUSTER = aws_eks_cluster.this.name
@@ -215,29 +215,28 @@ resource "null_resource" "book_tgb" {
       NS      = local.namespace
     }
     command = <<-EOT
-      $ErrorActionPreference = 'Stop'
-      aws eks update-kubeconfig --region $env:REGION --name $env:CLUSTER | Out-Null
-      $yaml = @"
-apiVersion: elbv2.k8s.aws/v1beta1
-kind: TargetGroupBinding
-metadata:
-  name: wskorea26-book-tgb
-  namespace: $env:NS
-spec:
-  serviceRef:
-    name: wskorea26-book-svc
-    port: 80
-  targetType: ip
-  targetGroupARN: $env:TG_ARN
-"@
-      $f = Join-Path ([System.IO.Path]::GetTempPath()) 'wskorea26-book-tgb.yaml'
-      $yaml | Out-File -Encoding ascii $f
-      for ($i=0; $i -lt 30; $i++) {
-        kubectl apply -f $f
-        if ($LASTEXITCODE -eq 0) { exit 0 }
-        Start-Sleep -Seconds 10
-      }
-      throw "TargetGroupBinding apply failed"
+      set -euo pipefail
+      aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER" >/dev/null
+      f=$(mktemp)
+      {
+        echo "apiVersion: elbv2.k8s.aws/v1beta1"
+        echo "kind: TargetGroupBinding"
+        echo "metadata:"
+        echo "  name: wskorea26-book-tgb"
+        echo "  namespace: $NS"
+        echo "spec:"
+        echo "  serviceRef:"
+        echo "    name: wskorea26-book-svc"
+        echo "    port: 80"
+        echo "  targetType: ip"
+        echo "  targetGroupARN: $TG_ARN"
+      } > "$f"
+      for i in $(seq 1 30); do
+        if kubectl apply -f "$f"; then exit 0; fi
+        sleep 10
+      done
+      echo "TargetGroupBinding apply failed (CRD not ready?)" >&2
+      exit 1
     EOT
   }
   depends_on = [helm_release.lb_controller, aws_lb_target_group.book, kubernetes_service_v1.book]

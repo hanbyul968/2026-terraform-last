@@ -319,8 +319,8 @@ resource "null_resource" "oidc_provider" {
   }
 
   provisioner "local-exec" {
-    interpreter = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
-    command     = "& '${path.module}/oidc.ps1' -InstanceId '${aws_instance.keycloak.id}' -Region 'eu-central-1'"
+    interpreter = ["/bin/bash", "-c"]
+    command     = "bash '${path.module}/oidc.sh' '${aws_instance.keycloak.id}' 'eu-central-1'"
   }
 }
 
@@ -412,8 +412,8 @@ resource "null_resource" "iam_roles" {
   }
 
   provisioner "local-exec" {
-    interpreter = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
-    command     = "& '${path.module}/iam-roles.ps1' -InstanceId '${aws_instance.keycloak.id}' -Region 'eu-central-1' -DevPolicyArn '${aws_iam_policy.dev.arn}' -SecPolicyArn '${aws_iam_policy.sec.arn}'"
+    interpreter = ["/bin/bash", "-c"]
+    command     = "bash '${path.module}/iam-roles.sh' '${aws_instance.keycloak.id}' 'eu-central-1' '${aws_iam_policy.dev.arn}' '${aws_iam_policy.sec.arn}'"
   }
 }
 

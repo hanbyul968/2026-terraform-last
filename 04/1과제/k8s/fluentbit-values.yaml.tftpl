@@ -1,5 +1,11 @@
 # aws-for-fluent-bit values
 # 이미지: ECR pull-through cache 경유 (노드 인터넷 없음)
+
+# DaemonSet 이름을 정확히 "fluent-bit" 로 고정 (과제10 DaemonSet Name, 채점 12-1-C:
+# `kubectl rollout restart daemonset fluent-bit`). override 없으면 chart fullname 이
+# "fluent-bit-aws-for-fluent-bit" 가 되어 채점 명령과 불일치한다.
+fullnameOverride: fluent-bit
+
 image:
   repository: ${registry}/ecr-public/aws-observability/aws-for-fluent-bit
   tag: stable

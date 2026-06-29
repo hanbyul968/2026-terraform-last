@@ -10,9 +10,9 @@ provider "aws" { region = "ap-northeast-1" }
 
 data "aws_caller_identity" "current" {}
 locals {
-     region = "ap-northeast-1"
-     azs = ["ap-northeast-1a", "ap-northeast-1c"] 
-  }
+  region = "ap-northeast-1"
+  azs    = ["ap-northeast-1a", "ap-northeast-1c"]
+}
 
 # VPC
 resource "aws_vpc" "db" {
@@ -23,30 +23,30 @@ resource "aws_vpc" "db" {
 }
 
 resource "aws_subnet" "db_a" {
-  vpc_id = aws_vpc.db.id
-  cidr_block = "10.0.1.0/24"
+  vpc_id            = aws_vpc.db.id
+  cidr_block        = "10.0.1.0/24"
   availability_zone = local.azs[0]
-  tags = { Name = "wsc2026-db-sn-a" }
+  tags              = { Name = "wsc2026-db-sn-a" }
 }
 resource "aws_subnet" "db_c" {
-  vpc_id = aws_vpc.db.id
-  cidr_block = "10.0.2.0/24"
+  vpc_id            = aws_vpc.db.id
+  cidr_block        = "10.0.2.0/24"
   availability_zone = local.azs[1]
-  tags = { Name = "wsc2026-db-sn-c" }
+  tags              = { Name = "wsc2026-db-sn-c" }
 }
 resource "aws_subnet" "pub_a" {
-  vpc_id = aws_vpc.db.id
-  cidr_block = "10.0.3.0/24"
-  availability_zone = local.azs[0]
+  vpc_id                  = aws_vpc.db.id
+  cidr_block              = "10.0.3.0/24"
+  availability_zone       = local.azs[0]
   map_public_ip_on_launch = true
-  tags = { Name = "wsc2026-pub-sn-a" }
+  tags                    = { Name = "wsc2026-pub-sn-a" }
 }
 resource "aws_subnet" "pub_c" {
-  vpc_id = aws_vpc.db.id
-  cidr_block = "10.0.4.0/24"
-  availability_zone = local.azs[1]
+  vpc_id                  = aws_vpc.db.id
+  cidr_block              = "10.0.4.0/24"
+  availability_zone       = local.azs[1]
   map_public_ip_on_launch = true
-  tags = { Name = "wsc2026-pub-sn-c" }
+  tags                    = { Name = "wsc2026-pub-sn-c" }
 }
 
 resource "aws_internet_gateway" "db" {
@@ -57,8 +57,8 @@ resource "aws_internet_gateway" "db" {
 resource "aws_route_table" "pub" {
   vpc_id = aws_vpc.db.id
   route {
-     cidr_block = "0.0.0.0/0"
-     gateway_id = aws_internet_gateway.db.id 
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.db.id
   }
   tags = { Name = "wsc2026-pub-rt" }
 }
@@ -73,30 +73,30 @@ resource "aws_route_table_association" "pub_c" {
 
 # Security Groups
 resource "aws_security_group" "rds" {
-  name = "wsc2026-rds-sg"
+  name   = "wsc2026-rds-sg"
   vpc_id = aws_vpc.db.id
   ingress {
-     from_port = 3306
-  to_port = 3306
-  protocol = "tcp"
-     cidr_blocks = ["10.0.0.0/16"] 
+    from_port   = 3306
+    to_port     = 3306
+    protocol    = "tcp"
+    cidr_blocks = ["10.0.0.0/16"]
   }
   egress {
-     from_port = 0
-  to_port = 0
-  protocol = "-1"
-     cidr_blocks = ["0.0.0.0/0"] 
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
   }
 }
 
 resource "aws_security_group" "lambda" {
-  name = "wsc2026-lambda-sg"
+  name   = "wsc2026-lambda-sg"
   vpc_id = aws_vpc.db.id
   egress {
-     from_port = 0
-  to_port = 0
-  protocol = "-1"
-     cidr_blocks = ["0.0.0.0/0"] 
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
   }
 }
 
@@ -108,19 +108,19 @@ resource "aws_db_subnet_group" "db" {
 
 # RDS Instance
 resource "aws_db_instance" "mysql" {
-  identifier              = "wsc2026-rds-instance"
-  engine                  = "mysql"
-  engine_version          = "8.4.9"
-  instance_class          = "db.t3.micro"
-  allocated_storage       = 20
-  username                = "admin"
-  password                = "Wsc2026Admin!"
-  db_subnet_group_name    = aws_db_subnet_group.db.name
-  vpc_security_group_ids  = [aws_security_group.rds.id]
-  publicly_accessible     = false
-  skip_final_snapshot     = true
-  multi_az                = false
-  tags                    = { Name = "wsc2026-rds-instance" }
+  identifier             = "wsc2026-rds-instance"
+  engine                 = "mysql"
+  engine_version         = "8.4.9"
+  instance_class         = "db.t3.micro"
+  allocated_storage      = 20
+  username               = "admin"
+  password               = "Wsc2026Admin!"
+  db_subnet_group_name   = aws_db_subnet_group.db.name
+  vpc_security_group_ids = [aws_security_group.rds.id]
+  publicly_accessible    = false
+  skip_final_snapshot    = true
+  multi_az               = false
+  tags                   = { Name = "wsc2026-rds-instance" }
 }
 
 # Secrets Manager
@@ -145,7 +145,7 @@ resource "aws_secretsmanager_secret_version" "rds" {
 resource "aws_iam_role" "proxy" {
   name = "wsc2026-rds-proxy-role"
   assume_role_policy = jsonencode({
-    Version = "2012-10-17"
+    Version   = "2012-10-17"
     Statement = [{ Effect = "Allow", Principal = { Service = "rds.amazonaws.com" }, Action = "sts:AssumeRole" }]
   })
 }
@@ -154,8 +154,8 @@ resource "aws_iam_role_policy" "proxy" {
   name = "secrets"
   role = aws_iam_role.proxy.id
   policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue","secretsmanager:DescribeSecret"], Resource = aws_secretsmanager_secret.rds.arn }]
+    Version   = "2012-10-17"
+    Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"], Resource = aws_secretsmanager_secret.rds.arn }]
   })
 }
 
@@ -193,13 +193,14 @@ resource "aws_db_proxy_target" "proxy" {
 resource "null_resource" "pymysql_layer" {
   triggers = { always = timestamp() }
   provisioner "local-exec" {
-    interpreter = ["powershell", "-NoProfile", "-Command"]
-    command = <<-EOT
-      $dir = "${path.module}/layer"
-      Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
-      New-Item -ItemType Directory -Force "$dir/python" | Out-Null
-      pip install pymysql -t "$dir/python" --quiet
-      Compress-Archive -Path "$dir/python" -DestinationPath "${path.module}/pymysql-layer.zip" -Force
+    interpreter = ["/bin/bash", "-c"]
+    command     = <<-EOT
+      set -e
+      dir="${path.module}/layer"
+      rm -rf "$dir"
+      mkdir -p "$dir/python"
+      pip3 install pymysql -t "$dir/python" --quiet
+      (cd "$dir" && zip -r "${path.module}/pymysql-layer.zip" python > /dev/null)
     EOT
   }
 }
@@ -215,7 +216,7 @@ resource "aws_lambda_layer_version" "pymysql" {
 resource "aws_iam_role" "lambda" {
   name = "wsc2026-db-client-role"
   assume_role_policy = jsonencode({
-    Version = "2012-10-17"
+    Version   = "2012-10-17"
     Statement = [{ Effect = "Allow", Principal = { Service = "lambda.amazonaws.com" }, Action = "sts:AssumeRole" }]
   })
 }

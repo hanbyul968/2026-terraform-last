@@ -196,3 +196,27 @@ terraform apply -var="eks_public_access=false"
    채점 기대값(노드 6, app pod 2)과 맞는지 확인. metric 라벨(instance/node)이 다르면 조정.
 8. **CloudFront VPC Origin** — 신규 기능. provider 버전(aws ~>6)에서 `aws_cloudfront_vpc_origin`
    생성/연결이 정상인지 확인.
+
+
+
+---
+
+## 🚀 Apply — 2단계 (로컬 PowerShell → Bastion)
+
+로컬에서는 **bastion 만** 띄우고, **bastion(Linux) 안에서 main 전체**를 apply 합니다.
+
+```powershell
+cd C:\Users\competitor\2026-terraform\04\1과제\bastion
+terraform init ; terraform apply -auto-approve
+terraform output -raw ssm_connect_command
+```
+```bash
+until [ -f /opt/task1/READY ]; do sleep 5; done
+bash /opt/task1/run.sh        # EKS + helm, finalize 에서 EKS private-only 전환(채점 6-1)
+```
+```powershell
+cd C:\Users\competitor\2026-terraform\04\1과제\bastion ; terraform destroy -auto-approve
+```
+
+> ⚠️ 루트 `bastion.tf`(in-VPC bastion)는 채점(EKS access/Bastion) 용도로 **유지**됩니다 → main apply 시 외부 bastion 과 함께 2개 생성.
+> ⚠️ **default VPC 없음**: `bastion/main.tf` 의 default VPC 참조를 전용 VPC 로 교체해야 apply 됩니다(01/1과제 bastion 참고).

@@ -179,36 +179,35 @@ resource "null_resource" "target_group_binding" {
   }
 
   provisioner "local-exec" {
-    interpreter = ["powershell", "-NoProfile", "-Command"]
+    interpreter = ["/bin/bash", "-c"]
     environment = {
       REGION  = local.region
       CLUSTER = aws_eks_cluster.this.name
       TG_ARN  = aws_lb_target_group.book.arn
     }
     command = <<-EOT
-      $ErrorActionPreference = 'Stop'
-      aws eks update-kubeconfig --region $env:REGION --name $env:CLUSTER | Out-Null
-      $yaml = @"
-apiVersion: elbv2.k8s.aws/v1beta1
-kind: TargetGroupBinding
-metadata:
-  name: book-tgb
-  namespace: book
-spec:
-  serviceRef:
-    name: book
-    port: 8080
-  targetType: ip
-  targetGroupARN: $env:TG_ARN
-"@
-      $f = Join-Path ([System.IO.Path]::GetTempPath()) 'wsc-book-tgb.yaml'
-      $yaml | Out-File -Encoding ascii $f
-      for ($i=0; $i -lt 30; $i++) {
-        kubectl apply -f $f
-        if ($LASTEXITCODE -eq 0) { exit 0 }
-        Start-Sleep -Seconds 10
-      }
-      throw "TargetGroupBinding apply failed (CRD not ready?)"
+      set -euo pipefail
+      aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER" >/dev/null
+      f=$(mktemp)
+      {
+        echo "apiVersion: elbv2.k8s.aws/v1beta1"
+        echo "kind: TargetGroupBinding"
+        echo "metadata:"
+        echo "  name: book-tgb"
+        echo "  namespace: book"
+        echo "spec:"
+        echo "  serviceRef:"
+        echo "    name: book"
+        echo "    port: 8080"
+        echo "  targetType: ip"
+        echo "  targetGroupARN: $TG_ARN"
+      } > "$f"
+      for i in $(seq 1 30); do
+        if kubectl apply -f "$f"; then exit 0; fi
+        sleep 10
+      done
+      echo "TargetGroupBinding apply failed (CRD not ready?)" >&2
+      exit 1
     EOT
   }
 

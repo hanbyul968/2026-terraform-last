@@ -8,12 +8,12 @@ New-Item -ItemType Directory -Force $pkg | Out-Null
 
 Copy-Item (Join-Path $PSScriptRoot "lambda\rotate.py") $pkg
 
-# Lambda(python3.12, manylinux) 대상 Pillow 설치
+# Lambda(python3.14, manylinux) 대상 Pillow 설치
 python -m pip install `
   --platform manylinux2014_x86_64 `
   --target $pkg `
   --implementation cp `
-  --python-version 3.12 `
+  --python-version 3.14 `
   --only-binary=:all: `
   Pillow
 

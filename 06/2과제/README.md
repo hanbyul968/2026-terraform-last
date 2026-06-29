@@ -410,3 +410,42 @@ terraform destroy -var="competitor_number=<선수등번호>"
 cd ../module1 && terraform destroy
 cd ../module2 && terraform destroy
 ```
+
+
+
+---
+
+## ⚠️ 채점자(CloudShell) EKS 접근 권한 설정 — 필수
+
+2단계 구조에서는 `terraform apply`가 **Bastion 인스턴스 역할(AdministratorAccess)** 로 실행됩니다.
+그 결과 두 EKS 클러스터의 access entry(cluster creator admin)가 **Bastion 역할**로 매핑되어,
+채점자가 쓰는 **CloudShell IAM principal** 은 `kubectl` 접근이 막힙니다(`aws eks update-kubeconfig` 후 `kubectl get` 시 Unauthorized).
+
+배포(deploy.sh) 완료 후, **CloudShell에서** 본인(또는 채점) principal 을 두 클러스터에 ClusterAdmin 으로 등록하세요.
+
+```bash
+# 현재 CloudShell의 IAM principal ARN
+MYARN=$(aws sts get-caller-identity --query Arn --output text)
+
+# module3 EKS — skm-eks-cluster (ap-northeast-2)
+aws eks create-access-entry --region ap-northeast-2 --cluster-name skm-eks-cluster \
+  --principal-arn "$MYARN" --type STANDARD 2>/dev/null || true
+aws eks associate-access-policy --region ap-northeast-2 --cluster-name skm-eks-cluster \
+  --principal-arn "$MYARN" \
+  --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy \
+  --access-scope type=cluster
+
+# module4 Observability EKS — o11y-cluster (ap-northeast-1)
+aws eks create-access-entry --region ap-northeast-1 --cluster-name o11y-cluster \
+  --principal-arn "$MYARN" --type STANDARD 2>/dev/null || true
+aws eks associate-access-policy --region ap-northeast-1 --cluster-name o11y-cluster \
+  --principal-arn "$MYARN" \
+  --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy \
+  --access-scope type=cluster
+
+# 확인
+aws eks update-kubeconfig --region ap-northeast-2 --name skm-eks-cluster && kubectl get nodes
+aws eks update-kubeconfig --region ap-northeast-1 --name o11y-cluster   && kubectl get nodes
+```
+
+> 참고: ARN이 IAM Role(예: 페더레이션/SSO 세션)인 경우 `arn:aws:iam::<acct>:role/<RoleName>` 형태의 **역할 ARN**으로 등록해야 합니다(세션 ARN `assumed-role/.../session` 이 아님).

@@ -1,71 +1,96 @@
-# 2026 전국기능경기대회 07 - 1과제
+# 2026 전국기능경기대회 07 - 1과제 (Solution Architecture)
+
+CloudFront 단일 엔드포인트로 정적 페이지(S3)와 Book API(ECS Fargate)를 제공하는
+AWS 인프라. **2단계 구성**으로 동작한다.
+
+```
+1과제/
+├── bootstrap/        ← [1단계] 로컬(Windows)에서 apply → Bastion 생성
+│   ├── provider.tf
+│   ├── variables.tf
+│   ├── bastion.tf    # Bastion 전용 VPC/Subnet/IGW/SG, 관리자 IAM, EC2, 툴 설치 + main 업로드
+│   └── outputs.tf
+└── main/             ← [2단계] Bastion 안에서 apply → 채점 대상 인프라 생성
+    ├── provider.tf   # aws
+    ├── variables.tf  # bibunho, origin_verify_value
+    ├── vpc.tf        # VPC, Subnet, IGW, NAT, DynamoDB VPC Endpoint
+    ├── sg.tf
+    ├── alb.tf        # ALB, TG, Listener (default 403 + X-Origin-Verify forward)
+    ├── s3_cloudfront.tf
+    ├── iam.tf
+    ├── ecr 포함 ecs.tf
+    ├── build.tf      # Docker build/push (terraform 실행 머신=Bastion 에서 수행)
+    ├── dynamodb.tf
+    ├── cloudwatch.tf
+    ├── outputs.tf
+    └── app/          # Dockerfile, book(지급 바이너리), index.html, main.jpeg
+```
+
+## 왜 2단계인가
+
+- 로컬 Windows PC에는 Docker가 없어도 된다. 컨테이너 이미지 빌드/푸시는 Linux Bastion에서 수행한다.
+- 채점 대상 구성(`main/`)은 그대로 보존되고, Bastion의 관리자 인스턴스 프로파일 권한으로 적용된다.
+- 채점 대상 리소스(`skills-book-*`)와 Bastion 리소스(`skills-bastion-*`)는 완전히 분리되어,
+  main 적용 후 Bastion만 따로 삭제할 수 있다 (불필요 리소스 감점 회피).
+
+---
 
 ## 실행법 (Windows PowerShell)
 
-### Step 1. Terraform 설치
+### 사전 준비
+- Terraform 설치 (`winget install HashiCorp.Terraform`)
+- `aws configure` (region: ap-northeast-2)
+- 지급받은 `book` 바이너리를 `main\app\book` 로 복사
 
-[terraform.io/downloads](https://developer.hashicorp.com/terraform/downloads) 에서 Windows AMD64 zip 다운로드 후 `terraform.exe`를 PATH에 추가.
-
-또는 winget:
-```powershell
-winget install HashiCorp.Terraform
-```
-
-### Step 2. AWS 자격증명 설정
+### 1단계 — 로컬에서 Bastion 생성
 
 ```powershell
-aws configure
-# AWS Access Key ID, Secret, region: ap-northeast-2, output: json
-```
-
-### Step 3. 리포 클론
-
-```powershell
-git clone https://github.com/hnmly/2026-terraform.git
-cd 2026-terraform/07/1과제
-```
-
-### Step 4. 지급 바이너리 배치
-
-지급받은 `book` 바이너리를 `app\book` 으로 복사:
-
-```powershell
-Copy-Item C:\path\to\book app\book
-```
-
-### Step 5. 배포
-
-```powershell
+cd 2026-terraform\07\1과제\bootstrap
 terraform init
 terraform apply -var="bibunho=비번호" -auto-approve
 ```
 
-**동작 흐름:**
-1. VPC / 서브넷 / IGW / NAT / DynamoDB Endpoint 생성
-2. Bastion EC2 자동 생성 → SSH로 docker 빌드/푸시 → ECR에 이미지 업로드
-3. ECS Fargate 서비스 기동 (bastion 완료 후)
-4. CloudFront 배포 반영까지 **3~5분** 소요
+완료되면 `bastion-key.pem` 이 생성되고, `ssh_command` / `next_steps` 가 출력된다.
+Bastion에는 `main/` 구성과 `app/`(book 바이너리 포함)이 `/home/ec2-user/main` 으로
+업로드되고 Docker·Terraform이 설치된다.
 
-> `bastion-key.pem` 파일이 현재 디렉터리에 자동 생성됩니다 (SSH 접속 필요 시 사용).
-
-### Step 5-1. IAM Role 충돌 시 (EntityAlreadyExists 에러)
-
-이전 apply 잔재로 IAM Role이 남아 있을 때 발생. import 후 재apply:
+### 2단계 — Bastion 안에서 나머지 apply
 
 ```powershell
-terraform import aws_iam_role.ecs_execution skills-book-ecs-execution-role
-terraform import aws_iam_role.ecs_task skills-book-ecs-task-role
-terraform apply -var="bibunho=비번호" -auto-approve
+# 1단계 출력의 ssh_command 사용 (bootstrap 디렉터리에서)
+ssh -i bastion-key.pem ec2-user@<BASTION_PUBLIC_IP>
 ```
+
+```bash
+# Bastion 쉘에서
+./apply.sh        # = cd main && terraform init && terraform apply -auto-approve
+```
+
+`apply.sh` 가 ECR 이미지 빌드/푸시 → ECS/ALB/CloudFront/DynamoDB/CloudWatch 생성까지
+수행하고 `cloudfront_domain`, `alb_dns` 를 출력한다. CloudFront 반영까지 3~5분 소요.
+
+> `terraform.tfvars`(bibunho, origin_verify_value)는 1단계에서 Bastion에 자동 작성된다.
+
+### 3단계 — (선택) Bastion 정리
+
+채점 대상 인프라는 Bastion과 독립적이므로, main 생성 완료 후 로컬에서 Bastion을 삭제해도 된다.
+
+```powershell
+cd 2026-terraform\07\1과제\bootstrap
+terraform destroy -var="bibunho=비번호" -auto-approve
+```
+
+---
 
 ## 검증
 
 ```bash
-# CloudFront 정적페이지
+# (Bastion main 디렉터리에서)
+# CloudFront 정적 페이지
 curl -I https://$(terraform output -raw cloudfront_domain)/index.html
 
 # ALB 직접 접근 차단 (403)
-curl -s -o /dev/null -w "%{http_code}" http://$(terraform output -raw alb_dns)/health
+curl -s -o /dev/null -w "%{http_code}\n" http://$(terraform output -raw alb_dns)/health
 
 # Book API
 curl -X POST https://$(terraform output -raw cloudfront_domain)/v1/book \
@@ -73,28 +98,9 @@ curl -X POST https://$(terraform output -raw cloudfront_domain)/v1/book \
   -d '{"client_id":"test","username":"tester","email":"t@t.com","concert_name":"skills"}'
 ```
 
-## 구조
+---
 
-```
-├── provider.tf          # AWS Provider
-├── variables.tf         # bibunho, origin_verify_value
-├── outputs.tf           # CloudFront domain, ALB DNS
-├── vpc.tf               # VPC, Subnet, IGW, NAT, DynamoDB VPC Endpoint
-├── sg.tf                # Security Group
-├── alb.tf               # ALB, TG, Listener (default 403 + header forward)
-├── s3_cloudfront.tf     # S3 + CloudFront OAC + /v1/* -> ALB
-├── iam.tf               # Execution Role, Task Role (DynamoDB+KMS)
-├── ecs.tf               # ECR + Docker build/push + ECS Cluster/Service
-├── dynamodb.tf          # DynamoDB + KMS CMK
-├── cloudwatch.tf        # Log Group, Metric Filters, Alarms
-└── app/
-    ├── Dockerfile
-    ├── book             # 지급 바이너리
-    ├── index.html
-    └── main.jpeg
-```
-
-## 주요 리소스명
+## 주요 리소스명 (채점 대상)
 
 | 리소스 | 이름 |
 |--------|------|
@@ -117,94 +123,66 @@ curl -X POST https://$(terraform output -raw cloudfront_domain)/v1/book \
 
 ## 대회 당일 변경 가이드 (최대 30% 수정 대응)
 
-과제지가 수정될 경우 아래 표를 참고해 해당 파일의 해당 위치만 수정하세요.
+채점 대상 구성은 모두 `main/` 안에 있다. 아래 표의 파일 경로는 `main/` 기준이다.
 
 ### VPC / 네트워크
-
 | 변경 항목 | 파일 | 수정 위치 |
 |-----------|------|-----------|
-| VPC CIDR 변경 | `vpc.tf` | `aws_vpc.main` 블록의 `cidr_block = "10.0.0.0/16"` |
-| Public Subnet CIDR 변경 | `vpc.tf` | `aws_subnet.public` 의 `cidr_block = cidrsubnet(...)` 수식 (8, count.index 부분) |
-| Private Subnet CIDR 변경 | `vpc.tf` | `aws_subnet.private` 의 `cidr_block = cidrsubnet(...)` 수식 (8, count.index + 10 부분) |
-| Subnet 개수 변경 (2→N) | `vpc.tf` | `aws_subnet.public` 과 `aws_subnet.private` 의 `count = 2` |
-| VPC Name Tag 변경 | `vpc.tf` | `aws_vpc.main` 의 `tags = { Name = "skills-book-vpc" }` |
-| DynamoDB VPC Endpoint 제거 | `vpc.tf` | `aws_vpc_endpoint.dynamodb` 블록 전체 삭제 |
+| VPC CIDR 변경 | `vpc.tf` | `aws_vpc.main` 의 `cidr_block` |
+| Public/Private Subnet CIDR | `vpc.tf` | `aws_subnet.public/private` 의 `cidrsubnet(...)` |
+| Subnet 개수 (2→N) | `vpc.tf` | `aws_subnet.public/private` 의 `count` |
+| VPC Name Tag | `vpc.tf` | `aws_vpc.main` 의 `tags` |
+| DynamoDB VPC Endpoint 제거 | `vpc.tf` | `aws_vpc_endpoint.dynamodb` 블록 삭제 |
 
 ### S3 / CloudFront
-
 | 변경 항목 | 파일 | 수정 위치 |
 |-----------|------|-----------|
-| S3 버킷 이름 변경 | `s3_cloudfront.tf` | `aws_s3_bucket.static` 의 `bucket = "skills-book-static-2026-${var.bibunho}"` |
-| CloudFront 기본 루트 객체 변경 | `s3_cloudfront.tf` | `aws_cloudfront_distribution.main` 의 `default_root_object = "index.html"` |
-| ALB Origin 경로 패턴 변경 (`/v1/*` → 다른 경로) | `s3_cloudfront.tf` | `ordered_cache_behavior` 블록의 `path_pattern = "/v1/*"` |
-| CloudFront Custom Header 이름 변경 (`X-Origin-Verify`) | `s3_cloudfront.tf` + `alb.tf` | `custom_header { name = ... }` (s3_cloudfront.tf) 와 `http_header_name = ...` (alb.tf) 동시 변경 |
-| CloudFront Custom Header 값 변경 | `variables.tf` | `origin_verify_value` default 값 (또는 apply 시 `-var="origin_verify_value=..."`) |
-| S3에 업로드할 정적 파일 추가 | `s3_cloudfront.tf` | `aws_s3_object` 블록 추가 (index.html, main.jpeg 참고) |
+| S3 버킷 이름 | `s3_cloudfront.tf` | `aws_s3_bucket.static` 의 `bucket` |
+| Default Root Object | `s3_cloudfront.tf` | `default_root_object` |
+| ALB Origin 경로 패턴 (`/v1/*`) | `s3_cloudfront.tf` | `ordered_cache_behavior` 의 `path_pattern` |
+| Custom Header 이름 (`X-Origin-Verify`) | `s3_cloudfront.tf` + `alb.tf` | `custom_header.name` + `http_header_name` 동시 변경 |
+| Custom Header 값 | `variables.tf` | `origin_verify_value` default (또는 bootstrap `-var`) |
+| 정적 파일 추가 | `s3_cloudfront.tf` | `aws_s3_object` 블록 추가 |
 
 ### ALB
-
 | 변경 항목 | 파일 | 수정 위치 |
 |-----------|------|-----------|
-| ALB Listener 포트 변경 (80 → 다른 포트) | `alb.tf` | `aws_lb_listener.http` 의 `port = 80` |
-| Target Group 포트 변경 (8080 → 다른 포트) | `alb.tf` + `ecs.tf` | `aws_lb_target_group.ecs` 의 `port = 8080` 과 ECS container의 `containerPort = 8080` |
-| Health Check 경로 변경 (`/health` → 다른 경로) | `alb.tf` | `health_check { path = "/health" }` |
-| ALB 이름 변경 | `alb.tf` | `aws_lb.main` 의 `name = "skills-book-alb"` |
+| Listener 포트 (80) | `alb.tf` | `aws_lb_listener.http` 의 `port` |
+| Target Group 포트 (8080) | `alb.tf` + `ecs.tf` | TG `port` + container `containerPort` |
+| Health Check 경로 (`/health`) | `alb.tf` | `health_check.path` |
+| ALB 이름 | `alb.tf` | `aws_lb.main` 의 `name` |
 
 ### ECR / ECS
-
 | 변경 항목 | 파일 | 수정 위치 |
 |-----------|------|-----------|
-| ECR 리포지토리 이름 변경 | `ecs.tf` | `aws_ecr_repository.book` 의 `name = "skills-book-app"` |
-| ECS Cluster 이름 변경 | `ecs.tf` | `aws_ecs_cluster.main` 의 `name = "skills-book-cluster"` 과 `tags` |
-| ECS Service 이름 변경 | `ecs.tf` | `aws_ecs_service.book` 의 `name = "skills-book-service"` 과 `tags` |
-| Task Definition Family 변경 | `ecs.tf` | `aws_ecs_task_definition.book` 의 `family = "skills-book-task"` |
-| Container 이름 변경 | `ecs.tf` | `container_definitions` 내 `name = "skills-book-container"` 과 `aws_ecs_service.book` 의 `container_name = "skills-book-container"` |
-| Desired Count 변경 (2 → N) | `ecs.tf` | `aws_ecs_service.book` 의 `desired_count = 2` |
-| Container 포트 변경 (8080 → 다른 포트) | `ecs.tf` + `alb.tf` | `portMappings[0].containerPort` 과 `aws_lb_target_group.ecs` 의 `port` |
-| Task CPU/Memory 변경 | `ecs.tf` | `aws_ecs_task_definition.book` 의 `cpu = "256"` 과 `memory = "512"` |
-| 환경 변수 변경 (AWS_REGION, TABLE_NAME 등) | `ecs.tf` | `container_definitions` 내 `environment` 배열 |
-| CloudWatch Log Group 이름 변경 | `ecs.tf` + `cloudwatch.tf` | `awslogs-group` 값 (ecs.tf) 과 `aws_cloudwatch_log_group.ecs` 의 `name` (cloudwatch.tf) |
-| Log Stream Prefix 변경 (`book`) | `ecs.tf` | `awslogs-stream-prefix = "book"` |
-| Execution Role 이름 변경 | `iam.tf` | `aws_iam_role.ecs_execution` 의 `name` |
-| Task Role 이름 변경 | `iam.tf` | `aws_iam_role.ecs_task` 의 `name` |
+| ECR 리포 이름 | `ecs.tf` | `aws_ecr_repository.book` 의 `name` |
+| Cluster/Service/Family/Container 이름 | `ecs.tf` | 각 `name`/`family` 및 service의 `container_name` |
+| Desired Count (2→N) | `ecs.tf` | `aws_ecs_service.book` 의 `desired_count` |
+| Container 포트 (8080) | `ecs.tf` + `alb.tf` | `containerPort` + TG `port` |
+| Task CPU/Memory | `ecs.tf` | `cpu` / `memory` |
+| 환경 변수 (AWS_REGION, TABLE_NAME) | `ecs.tf` | `environment` 배열 |
+| Log Group / Stream Prefix | `ecs.tf` + `cloudwatch.tf` | `awslogs-group` / `awslogs-stream-prefix` |
+| Execution/Task Role 이름 | `iam.tf` | `aws_iam_role.ecs_execution/ecs_task` 의 `name` |
+| Docker 빌드/태그/푸시 로직 | `build.tf` | `terraform_data.docker_push` 의 local-exec |
 
 ### DynamoDB / KMS
-
 | 변경 항목 | 파일 | 수정 위치 |
 |-----------|------|-----------|
-| DynamoDB 테이블 이름 변경 | `dynamodb.tf` + `ecs.tf` | `aws_dynamodb_table.booking` 의 `name` 과 ECS `environment` 의 `TABLE_NAME` 값 |
-| Partition Key 이름/타입 변경 | `dynamodb.tf` | `hash_key = "booking_id"` 과 `attribute { name = "booking_id" type = "S" }` |
-| KMS Key Alias 변경 | `dynamodb.tf` | `aws_kms_alias.dynamodb` 의 `name = "alias/skills-book-ddb"` |
+| 테이블 이름 | `dynamodb.tf` + `ecs.tf` | `aws_dynamodb_table.booking.name` + `TABLE_NAME` |
+| Partition Key | `dynamodb.tf` | `hash_key` + `attribute` |
+| KMS Alias | `dynamodb.tf` | `aws_kms_alias.dynamodb.name` |
 
 ### CloudWatch
-
 | 변경 항목 | 파일 | 수정 위치 |
 |-----------|------|-----------|
-| Log Group 이름 변경 | `cloudwatch.tf` + `ecs.tf` | `aws_cloudwatch_log_group.ecs` 의 `name` 과 ECS `awslogs-group` 값 동시 변경 |
-| Metric Filter 이름 변경 | `cloudwatch.tf` | `aws_cloudwatch_log_metric_filter.f4xx/f5xx` 의 `name` |
-| Metric Namespace 변경 | `cloudwatch.tf` | `metric_transformation` 의 `namespace` (f4xx, f5xx, 알람 3곳 모두) |
-| Metric 이름 변경 (4xx-count 등) | `cloudwatch.tf` | `metric_transformation.name` 과 `aws_cloudwatch_metric_alarm` 의 `metric_name` 동시 변경 |
-| Metric Filter 패턴 변경 | `cloudwatch.tf` | `pattern` 값 (`[w1, date, dash, time, pipe, status=4??, ...]`) |
-| Alarm 이름 변경 | `cloudwatch.tf` | `aws_cloudwatch_metric_alarm.a4xx/a5xx` 의 `alarm_name` |
-| Alarm Threshold 변경 | `cloudwatch.tf` | `threshold = 1` |
-| Alarm Period 변경 | `cloudwatch.tf` | `period = 60` |
-| Alarm Evaluation Periods 변경 | `cloudwatch.tf` | `evaluation_periods = 1` |
+| Log Group 이름 | `cloudwatch.tf` + `ecs.tf` | `aws_cloudwatch_log_group.ecs.name` + `awslogs-group` |
+| Metric Filter 이름/패턴 | `cloudwatch.tf` | `f4xx/f5xx` 의 `name` / `pattern` |
+| Namespace / Metric 이름 | `cloudwatch.tf` | `metric_transformation` 및 alarm `metric_name`/`namespace` |
+| Alarm 이름/Threshold/Period/Eval | `cloudwatch.tf` | `a4xx/a5xx` 의 해당 속성 |
 
-### variables.tf (공통 변수)
-
-| 변경 항목 | 수정 위치 |
-|-----------|-----------|
-| 비번호 변경 | apply 시 `-var="bibunho=새비번호"` 또는 `default` 값 |
-| X-Origin-Verify 헤더 값 변경 | `origin_verify_value` default 값 변경 (20자 이상 유지) |
-
----
-
-## 자주 바뀌는 값 한눈에 보기
-
-```
-비번호          → variables.tf : bibunho
-VPC CIDR        → vpc.tf : aws_vpc.main.cidr_block
-컨테이너 포트    → ecs.tf : containerPort  +  alb.tf : port (TG)
-TABLE_NAME      → ecs.tf : environment TABLE_NAME  +  dynamodb.tf : name
-로그 그룹       → cloudwatch.tf : name  +  ecs.tf : awslogs-group
-```
+### Bastion (bootstrap, 채점 무관)
+| 변경 항목 | 파일 | 수정 위치 |
+|-----------|------|-----------|
+| Bastion 타입 | `bootstrap/variables.tf` | `instance_type` |
+| SSH 허용 CIDR | `bootstrap/variables.tf` | `ssh_cidr` |
+| 설치 툴 / apply 자동화 | `bootstrap/bastion.tf` | `remote-exec` provisioner |

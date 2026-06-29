@@ -314,14 +314,14 @@ resource "null_resource" "zeppelin" {
   }
 
   provisioner "local-exec" {
-    interpreter = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
-    command     = "& '${path.module}/zeppelin.ps1' -Region '${data.aws_region.current.name}' -RoleArn '${aws_iam_role.flink.arn}' -Account '${data.aws_caller_identity.current.account_id}' -Name '${local.name}-zeppelin'"
+    interpreter = ["/bin/bash", "-c"]
+    command     = "bash '${path.module}/zeppelin.sh' '${data.aws_region.current.name}' '${aws_iam_role.flink.arn}' '${data.aws_caller_identity.current.account_id}' '${local.name}-zeppelin'"
   }
 
   provisioner "local-exec" {
     when        = destroy
-    interpreter = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
-    command     = "& '${path.module}/zeppelin-delete.ps1' -Region '${self.triggers.region}' -Name '${self.triggers.name}'"
+    interpreter = ["/bin/bash", "-c"]
+    command     = "bash '${path.module}/zeppelin-delete.sh' '${self.triggers.region}' '${self.triggers.name}'"
   }
 
   depends_on = [aws_iam_role_policy.flink, aws_glue_catalog_database.analytics]

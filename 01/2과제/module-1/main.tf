@@ -1,6 +1,6 @@
 terraform {
   required_providers {
-    aws = { source = "hashicorp/aws", version = ">= 5.80" }
+    aws     = { source = "hashicorp/aws", version = ">= 5.80" }
     archive = { source = "hashicorp/archive", version = ">= 2.0" }
   }
 }
@@ -14,8 +14,8 @@ resource "aws_dynamodb_table" "api" {
   hash_key                    = "id"
   deletion_protection_enabled = true
   attribute {
-     name = "id"
-     type = "S" 
+    name = "id"
+    type = "S"
   }
 }
 
@@ -23,7 +23,7 @@ resource "aws_dynamodb_table" "api" {
 resource "aws_iam_role" "lambda" {
   name = "wsc2026-api-handler-role"
   assume_role_policy = jsonencode({
-    Version = "2012-10-17"
+    Version   = "2012-10-17"
     Statement = [{ Effect = "Allow", Principal = { Service = "lambda.amazonaws.com" }, Action = "sts:AssumeRole" }]
   })
 }
@@ -34,8 +34,8 @@ resource "aws_iam_role_policy" "lambda" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      { Effect = "Allow", Action = ["dynamodb:PutItem","dynamodb:GetItem"], Resource = aws_dynamodb_table.api.arn },
-      { Effect = "Allow", Action = ["logs:CreateLogGroup","logs:CreateLogStream","logs:PutLogEvents"], Resource = "arn:aws:logs:*:*:*" }
+      { Effect = "Allow", Action = ["dynamodb:PutItem", "dynamodb:GetItem"], Resource = aws_dynamodb_table.api.arn },
+      { Effect = "Allow", Action = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"], Resource = "arn:aws:logs:*:*:*" }
     ]
   })
 }

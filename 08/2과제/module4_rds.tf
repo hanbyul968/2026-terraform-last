@@ -15,10 +15,10 @@ locals {
 
 # Aurora MySQL 3.x (MySQL 8.0 호환) 최신 엔진 버전 조회
 data "aws_rds_engine_version" "aurora_mysql" {
-  provider             = aws.osaka
-  engine               = "aurora-mysql"
-  preferred_versions   = ["8.0.mysql_aurora.3.08.0", "8.0.mysql_aurora.3.07.1", "8.0.mysql_aurora.3.07.0"]
-  include_all          = true
+  provider           = aws.osaka
+  engine             = "aurora-mysql"
+  preferred_versions = ["8.0.mysql_aurora.3.08.0", "8.0.mysql_aurora.3.07.1", "8.0.mysql_aurora.3.07.0"]
+  include_all        = true
 }
 
 # ---- 네트워크 (ap-northeast-3에 기본 VPC가 없어 Aurora용 전용 VPC/서브넷 구성) ----

@@ -166,3 +166,27 @@ terraform output cloudfront_domain   # 채점 진입점
 5. **CloudFront ↔ ALB** — ALB SG 가 CloudFront origin-facing prefix list 만 허용(직접 접근 BLOCKED).
    `/booking`→`/v1/book` rewrite 동작 확인.
 6. **이미지 취약점 0** — `files/Dockerfile` 은 scratch 기반. 스캔 COMPLETE/취약점 0 확인.
+
+
+
+---
+
+## 🚀 Apply — 2단계 (로컬 PowerShell → Bastion)
+
+로컬에서는 **bastion 만** 띄우고, **bastion(Linux) 안에서 main 전체**를 apply 합니다.
+
+```powershell
+cd C:\Users\competitor\2026-terraform\03\1과제\bastion
+terraform init ; terraform apply -auto-approve
+terraform output -raw ssm_connect_command
+```
+```bash
+until [ -f /opt/task1/READY ]; do sleep 5; done
+bash /opt/task1/run.sh        # EKS + helm, 마지막 finalize 에서 EKS private-only 전환(채점 4-1)
+```
+```powershell
+cd C:\Users\competitor\2026-terraform\03\1과제\bastion ; terraform destroy -auto-approve
+```
+
+> ⚠️ 구 `bastion.tf` 는 `bastion.tf.OLD-in-main` 으로 비활성화됨(외부 bastion/ 스테이지로 대체).
+> ⚠️ **default VPC 없음**: `bastion/main.tf` 의 default VPC 참조를 전용 VPC 로 교체해야 apply 됩니다(01/1과제 bastion 참고).

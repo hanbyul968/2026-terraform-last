@@ -37,23 +37,24 @@ resource "null_resource" "wait_for_cluster_api" {
   }
 
   provisioner "local-exec" {
-    interpreter = ["powershell", "-NoProfile", "-Command"]
+    interpreter = ["/bin/bash", "-c"]
     environment = {
       ENDPOINT = aws_eks_cluster.cluster.endpoint
     }
     command = <<-EOT
-      $h = ([uri]$env:ENDPOINT).Host
-      for ($i = 0; $i -lt 60; $i++) {
-        try {
-          [System.Net.Dns]::GetHostEntry($h) | Out-Null
-          Write-Host "resolved $h"
-          Start-Sleep -Seconds 5
+      set -u
+      h=$(printf '%s' "$ENDPOINT" | sed -e 's#^https\?://##' -e 's#/.*$##')
+      i=0
+      while [ "$i" -lt 60 ]; do
+        if getent ahosts "$h" >/dev/null 2>&1; then
+          echo "resolved $h"
+          sleep 5
           exit 0
-        } catch {
-          Start-Sleep -Seconds 10
-        }
-      }
-      Write-Error "cluster API endpoint $h not resolvable after timeout"
+        fi
+        sleep 10
+        i=$((i + 1))
+      done
+      echo "cluster API endpoint $h not resolvable after timeout" >&2
       exit 1
     EOT
   }
@@ -69,18 +70,18 @@ resource "null_resource" "aws_auth" {
   }
 
   provisioner "local-exec" {
-    interpreter = ["powershell", "-NoProfile", "-Command"]
+    interpreter = ["/bin/bash", "-c"]
     environment = {
       CLUSTER = aws_eks_cluster.cluster.name
       REGION  = local.region
       AWSAUTH = local.aws_auth_manifest
     }
     command = <<-EOT
-      $ErrorActionPreference = 'Stop'
-      aws eks update-kubeconfig --region $env:REGION --name $env:CLUSTER | Out-Null
-      $f = Join-Path ([System.IO.Path]::GetTempPath()) 'gj2026-aws-auth.yaml'
-      $env:AWSAUTH | Out-File -Encoding ascii $f
-      kubectl apply -f $f
+      set -euo pipefail
+      aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER" >/dev/null
+      f=$(mktemp /tmp/gj2026-aws-auth.XXXXXX.yaml)
+      printf '%s' "$AWSAUTH" > "$f"
+      kubectl apply -f "$f"
     EOT
   }
 
@@ -100,7 +101,7 @@ resource "null_resource" "strip_node_access_entries" {
   }
 
   provisioner "local-exec" {
-    interpreter = ["powershell", "-NoProfile", "-Command"]
+    interpreter = ["/bin/bash", "-c"]
     environment = {
       CLUSTER = aws_eks_cluster.cluster.name
       REGION  = local.region
@@ -108,21 +109,23 @@ resource "null_resource" "strip_node_access_entries" {
       AWSAUTH = local.aws_auth_manifest
     }
     command = <<-EOT
-      $ErrorActionPreference = 'SilentlyContinue'
-      if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) {
-        Write-Error "kubectl not found in PATH"; exit 1
-      }
-      $arns = $env:ROLES.Split(',')
-      aws eks update-kubeconfig --region $env:REGION --name $env:CLUSTER | Out-Null
-      $f = Join-Path ([System.IO.Path]::GetTempPath()) 'gj2026-aws-auth.yaml'
-      $env:AWSAUTH | Out-File -Encoding ascii $f
-      for ($i = 0; $i -lt 48; $i++) {
-        foreach ($arn in $arns) {
-          aws eks delete-access-entry --region $env:REGION --cluster-name $env:CLUSTER --principal-arn $arn 2>$null
-        }
-        kubectl apply -f $f 2>$null | Out-Null
-        Start-Sleep -Seconds 20
-      }
+      set +e
+      if ! command -v kubectl >/dev/null 2>&1; then
+        echo "kubectl not found in PATH" >&2
+        exit 1
+      fi
+      aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER" >/dev/null 2>&1
+      f=$(mktemp /tmp/gj2026-aws-auth.XXXXXX.yaml)
+      printf '%s' "$AWSAUTH" > "$f"
+      i=0
+      while [ "$i" -lt 48 ]; do
+        for arn in $(printf '%s' "$ROLES" | tr ',' ' '); do
+          aws eks delete-access-entry --region "$REGION" --cluster-name "$CLUSTER" --principal-arn "$arn" 2>/dev/null
+        done
+        kubectl apply -f "$f" >/dev/null 2>&1
+        sleep 20
+        i=$((i + 1))
+      done
     EOT
   }
 

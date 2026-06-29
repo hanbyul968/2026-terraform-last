@@ -2,7 +2,7 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.0"
+      version = "~> 6.0"
     }
     archive = {
       source  = "hashicorp/archive"
@@ -116,8 +116,8 @@ resource "null_resource" "pillow_build" {
     rotate_py = filemd5("${path.module}/lambda/rotate.py")
   }
   provisioner "local-exec" {
-    interpreter = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]
-    command     = "${path.module}/build.ps1"
+    interpreter = ["/bin/bash", "-c"]
+    command     = "bash '${path.module}/build.sh'"
   }
 }
 
@@ -133,7 +133,7 @@ resource "aws_lambda_function" "rotate" {
   function_name    = "gj2026-cdn-rotate"
   role             = aws_iam_role.lambda.arn
   handler          = "rotate.lambda_handler"
-  runtime          = "python3.12" # PDF 명세: python3.14 → AWS 지원 시 변경
+  runtime          = "python3.14"
   filename         = data.archive_file.rotate.output_path
   source_code_hash = data.archive_file.rotate.output_base64sha256
   timeout          = 30
@@ -199,7 +199,7 @@ resource "aws_lambda_function" "request" {
   function_name    = "gj2026-cdn-request"
   role             = aws_iam_role.lambda.arn
   handler          = "request.lambda_handler"
-  runtime          = "python3.12"
+  runtime          = "python3.14"
   filename         = data.archive_file.request.output_path
   source_code_hash = data.archive_file.request.output_base64sha256
   publish          = true # Lambda@Edge는 publish 필수
@@ -224,7 +224,7 @@ resource "aws_lambda_function" "response" {
   function_name    = "gj2026-cdn-response"
   role             = aws_iam_role.lambda.arn
   handler          = "response.lambda_handler"
-  runtime          = "python3.12"
+  runtime          = "python3.14"
   filename         = data.archive_file.response.output_path
   source_code_hash = data.archive_file.response.output_base64sha256
   publish          = true

@@ -1,0 +1,44 @@
+# Grafana (helm: grafana/grafana, release wsc2026-grafana, ns wsc2026-logging)
+#  - 외부 노출: Service type LoadBalancer
+#  - Admin Password: Skill53@@
+#  - Datasources: Loki(loki), Prometheus(prometheus)
+#  - Dashboard: wsc2026-app-logs (deploy_k8s.sh 가 ConfigMap 으로 sidecar 주입)
+adminUser: admin
+adminPassword: "Skill53@@"
+
+service:
+  type: LoadBalancer
+  port: 80
+
+datasources:
+  datasources.yaml:
+    apiVersion: 1
+    datasources:
+      - name: Loki
+        type: loki
+        access: proxy
+        url: http://wsc2026-loki.wsc2026-logging.svc.cluster.local:3100
+        isDefault: false
+      - name: Prometheus
+        type: prometheus
+        access: proxy
+        url: http://wsc2026-prometheus-server.wsc2026-logging.svc.cluster.local
+        isDefault: true
+
+# 대시보드 자동 임포트 (grafana_dashboard=1 라벨 ConfigMap 감시)
+sidecar:
+  dashboards:
+    enabled: true
+    label: grafana_dashboard
+    labelValue: "1"
+    searchNamespace: wsc2026-logging
+    folderAnnotation: grafana_folder
+    provider:
+      foldersFromFilesStructure: true
+  datasources:
+    enabled: false
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi

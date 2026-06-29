@@ -140,4 +140,26 @@ if [ -n "$CURRENT_USER" ]; then
     --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"sts:AssumeRole\",\"Resource\":\"arn:aws:iam::${ACCOUNT}:role/unicorn-audit-role\"}]}"
 fi
 
+# --- 12. EKS Endpoint Private-Only 전환 (rubric 6-1: endpointPublicAccess=false, endpointPrivateAccess=true) ---
+# 위 모든 kubectl/helm 작업은 bastion(default VPC)에서 public endpoint 를 경유해 수행된다.
+# 모든 설치가 끝난 지금(가장 마지막 단계) public 을 끄고 private-only 로 전환한다.
+# update-cluster-config 는 비동기이므로 실제 false 로 반영될 때까지 폴링한다.
+CUR=$(aws eks describe-cluster --region $REGION --name unicorn-eks-cluster \
+  --query "cluster.resourcesVpcConfig.endpointPublicAccess" --output text)
+if [ "$CUR" = "True" ] || [ "$CUR" = "true" ]; then
+  aws eks update-cluster-config --region $REGION --name unicorn-eks-cluster \
+    --resources-vpc-config endpointPublicAccess=false,endpointPrivateAccess=true,publicAccessCidrs=[]
+fi
+# 실제 endpointPublicAccess==false 로 반영될 때까지 대기 (최대 ~10분)
+for i in $(seq 1 60); do
+  ST=$(aws eks describe-cluster --region $REGION --name unicorn-eks-cluster \
+    --query "cluster.resourcesVpcConfig.endpointPublicAccess" --output text)
+  if [ "$ST" = "False" ] || [ "$ST" = "false" ]; then
+    echo "EKS public endpoint disabled (private-only)."
+    break
+  fi
+  echo "waiting for EKS endpoint to become private-only... ($i)"
+  sleep 10
+done
+
 echo "===== All Done! ====="

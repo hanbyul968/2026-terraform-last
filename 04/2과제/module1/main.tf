@@ -7,7 +7,7 @@ terraform {
   }
 }
 
-# 4-1 EKS Scaling ??ap-northeast-2
+# 4-1 EKS Scaling â€” ap-northeast-2
 provider "aws" {
   region = "ap-northeast-2"
 }
@@ -15,12 +15,12 @@ provider "aws" {
 data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
 
-# ?€?€ SQS (KEDA scale trigger) ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# â”€â”€ SQS (KEDA scale trigger) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 resource "aws_sqs_queue" "main" {
   name = "wsc-scaling-sqs"
 }
 
-# ?€?€ VPC ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# â”€â”€ VPC â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 resource "aws_vpc" "main" {
   cidr_block           = "10.11.0.0/16"
   enable_dns_support   = true
@@ -129,7 +129,7 @@ locals {
   subnet_ids = [aws_subnet.pub_a.id, aws_subnet.pub_c.id, aws_subnet.priv_a.id, aws_subnet.priv_c.id]
 }
 
-# ?€?€ EKS Cluster ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# â”€â”€ EKS Cluster â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 resource "aws_iam_role" "eks_cluster" {
   name = "wsc-scaling-cluster-role"
   assume_role_policy = jsonencode({
@@ -162,7 +162,7 @@ resource "aws_eks_cluster" "main" {
   depends_on = [aws_iam_role_policy_attachment.eks_cluster_policy]
 }
 
-# ?€?€ Managed NodeGroup (wsc-scaling-node, labels dedicated=scaling) ?€?€?€
+# â”€â”€ Managed NodeGroup (wsc-scaling-node, labels dedicated=scaling) â”€â”€â”€
 resource "aws_iam_role" "node" {
   name = "wsc-scaling-node-role"
   assume_role_policy = jsonencode({
@@ -215,7 +215,7 @@ resource "aws_eks_node_group" "main" {
   ]
 }
 
-# ?€?€ OIDC + IRSA (KEDA, Karpenter) ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# â”€â”€ OIDC + IRSA (KEDA, Karpenter) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 resource "aws_iam_openid_connect_provider" "eks" {
   client_id_list  = ["sts.amazonaws.com"]
   thumbprint_list = ["9e99a48a9960b14926bb7f3b02e22da2b0ab7280"]
@@ -332,7 +332,7 @@ resource "aws_eks_access_entry" "karpenter_node" {
   depends_on    = [aws_eks_cluster.main]
 }
 
-# ?€?€ Bastion (wsc-scaling-bastion, public-a, EIP, Admin) ?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# â”€â”€ Bastion (wsc-scaling-bastion, public-a, EIP, Admin) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 data "aws_ami" "al2023" {
   most_recent = true
   owners      = ["amazon"]
@@ -400,7 +400,7 @@ resource "aws_instance" "bastion" {
   tags = { Name = "wsc-scaling-bastion" }
 }
 
-# ?¬ì‹œ????IP ê³ ì • (ë¬¸ì œ ?”êµ¬)
+# ìž¬ì‹œìž‘ í›„ IP ê³ ì • (ë¬¸ì œ ìš”êµ¬)
 resource "aws_eip" "bastion" {
   instance = aws_instance.bastion.id
   domain   = "vpc"
@@ -430,7 +430,7 @@ resource "aws_eks_access_policy_association" "bastion_admin" {
   depends_on = [aws_eks_access_entry.bastion]
 }
 
-# ?€?€ Outputs ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# â”€â”€ Outputs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 output "cluster_name" { value = aws_eks_cluster.main.name }
 output "cluster_endpoint" { value = aws_eks_cluster.main.endpoint }
 output "sqs_queue_url" { value = aws_sqs_queue.main.url }

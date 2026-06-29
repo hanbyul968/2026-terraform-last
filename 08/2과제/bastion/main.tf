@@ -1,9 +1,11 @@
 # =============================================================================
-# Bastion EC2 (배포 ?�용)
-#  - 로컬 ?�도?�에?????�더�?apply ?�여 Bastion EC2�?먼�? ?�성?�다.
-#  - Bastion(Amazon Linux 2023)??SSM Session Manager�??�속??2과제 4�?#    모듈??배포?�다. (Bastion?� Linux ?��?�?/bin/bash ?�존 코드???�상 ?�작)
-#  - ?�속: SSM Session Manager (?�페??22�??�트 불필??
-#  - 권한: ?�스?�스 ?�로?�일(AdministratorAccess) ??IAM User AccessKey 미사??#  - Region: ap-northeast-2 (Module1�??�일, 기본 VPC ?�용?�로 불필??VPC ?�성 방�?)
+# Bastion EC2 (배포 전용)
+#  - 로컬 윈도우에서 이 폴더를 apply 하여 Bastion EC2를 먼저 생성한다.
+#  - Bastion(Amazon Linux 2023)에 SSM Session Manager로 접속해 2과제 4개
+#    모듈을 배포한다. (Bastion은 Linux 이므로 /bin/bash 의존 코드도 정상 동작)
+#  - 접속: SSM Session Manager (키페어/22번 포트 불필요)
+#  - 권한: 인스턴스 프로파일(AdministratorAccess) → IAM User AccessKey 미사용
+#  - Region: ap-northeast-2 (Module1과 동일, 기본 VPC 사용으로 불필요 VPC 생성 방지)
 # =============================================================================
 
 terraform {
@@ -20,7 +22,7 @@ provider "aws" {
   region = "ap-northeast-2"
 }
 
-# ---- 기본 VPC / ?�브??(??VPC�?만들지 ?�아 감점 방�?) ----
+# ---- 기본 VPC / 서브넷 (새 VPC를 만들지 않아 감점 방지) ----
 data "aws_vpc" "default" {
   default = true
 }
@@ -47,7 +49,7 @@ data "aws_ami" "al2023" {
   }
 }
 
-# ---- IAM Role (SSM ?�속 + 멀?�리??배포 권한) ----
+# ---- IAM Role (SSM 접속 + 멀티리전 배포 권한) ----
 data "aws_iam_policy_document" "assume" {
   statement {
     actions = ["sts:AssumeRole"]
@@ -63,12 +65,13 @@ resource "aws_iam_role" "bastion" {
   assume_role_policy = data.aws_iam_policy_document.assume.json
 }
 
-# SSM Session Manager ?�속??resource "aws_iam_role_policy_attachment" "ssm" {
+# SSM Session Manager 접속용
+resource "aws_iam_role_policy_attachment" "ssm" {
   role       = aws_iam_role.bastion.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
-# 2과제 4�?모듈(멀??리전)??배포?�려�?광범?�한 권한???�요
+# 2과제 4개 모듈(멀티 리전)을 배포하려면 광범위한 권한이 필요
 resource "aws_iam_role_policy_attachment" "admin" {
   role       = aws_iam_role.bastion.name
   policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
@@ -79,7 +82,7 @@ resource "aws_iam_instance_profile" "bastion" {
   role = aws_iam_role.bastion.name
 }
 
-# ---- Security Group (SSM�??�용?��?�??�바?�드 ?�음, ?�웃바운?�만 ?�용) ----
+# ---- Security Group (SSM만 사용하므로 인바운드 없음, 아웃바운드만 허용) ----
 resource "aws_security_group" "bastion" {
   name        = "bastion-sg"
   description = "Bastion egress only (SSM Session Manager)"
@@ -106,7 +109,7 @@ resource "aws_instance" "bastion" {
   vpc_security_group_ids      = [aws_security_group.bastion.id]
   associate_public_ip_address = true
 
-  # 부????git / terraform ?�치 (aws cli v2??AL2023 기본 ?�재)
+  # 부팅 시 git / terraform 설치 (aws cli v2는 AL2023 기본 탑재)
   user_data = <<-EOF
     #!/bin/bash
     set -eux
@@ -121,11 +124,11 @@ resource "aws_instance" "bastion" {
 }
 
 output "bastion_instance_id" {
-  description = "Bastion EC2 ?�스?�스 ID"
+  description = "Bastion EC2 인스턴스 ID"
   value       = aws_instance.bastion.id
 }
 
 output "ssm_connect_command" {
-  description = "Bastion ?�속 명령 (로컬 ?�도??PowerShell?�서 ?�행)"
+  description = "Bastion 접속 명령 (로컬 윈도우 PowerShell에서 실행)"
   value       = "aws ssm start-session --target ${aws_instance.bastion.id} --region ap-northeast-2"
 }

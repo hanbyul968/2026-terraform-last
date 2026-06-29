@@ -5,7 +5,7 @@ terraform {
   }
 }
 
-# 2-4 MSK ??ap-northeast-1
+# 2-4 MSK â€” ap-northeast-1
 provider "aws" {
   region = "ap-northeast-1"
 }
@@ -17,7 +17,7 @@ variable "bibunho" {
   default = "000"
 }
 
-# ?€?€ VPC msk-vpc 192.168.0.0/16 ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# â”€â”€ VPC msk-vpc 192.168.0.0/16 â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 resource "aws_vpc" "main" {
   cidr_block           = "192.168.0.0/16"
   enable_dns_support   = true
@@ -102,7 +102,7 @@ resource "aws_route_table_association" "priv_b" {
   route_table_id = aws_route_table.priv_b.id
 }
 
-# ?€?€ MSK (IAM auth, private, HA) ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# â”€â”€ MSK (IAM auth, private, HA) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 resource "aws_security_group" "msk" {
   name   = "wsc2026-msk-sg"
   vpc_id = aws_vpc.main.id
@@ -144,7 +144,7 @@ resource "aws_msk_cluster" "main" {
   }
 }
 
-# ?€?€ Producer EC2 (private, min IAM) ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# â”€â”€ Producer EC2 (private, min IAM) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 data "aws_ami" "al2023" {
   most_recent = true
   owners      = ["amazon"]
@@ -205,14 +205,14 @@ resource "aws_instance" "producer" {
     #!/bin/bash
     set -eux
     dnf install -y java-17-amazon-corretto python3-pip
-    # ë°°í¬?Œì¼ Application.hwp ??producer ??ë°°ì¹˜ + ? í”½ ?ì„±:
-    #   wsc2026-sensor-raw(?Œí‹°??,ë³µì œ2), wsc2026-sensor-alert(?Œí‹°??,ë³µì œ2)
+    # ë°°í¬íŒŒì¼ Application.hwp ì˜ producer ì•± ë°°ì¹˜ + í† í”½ ìƒì„±:
+    #   wsc2026-sensor-raw(íŒŒí‹°ì…˜3,ë³µì œ2), wsc2026-sensor-alert(íŒŒí‹°ì…˜1,ë³µì œ2)
     mkdir -p /opt/app
   EOF
   tags                   = { Name = "wsc2026-sensor-producer" }
 }
 
-# ?€?€ Storage: DynamoDB, S3, SNS ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# â”€â”€ Storage: DynamoDB, S3, SNS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 resource "aws_dynamodb_table" "sensor" {
   name         = "wsc2026-sensor-data"
   billing_mode = "PAY_PER_REQUEST"
@@ -235,7 +235,7 @@ resource "aws_sns_topic" "alert" {
   name = "wsc2026-sensor-alert"
 }
 
-# ?€?€ Consumer Lambdas (MSK trigger, min IAM) ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# â”€â”€ Consumer Lambdas (MSK trigger, min IAM) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 resource "aws_iam_role" "lambda" {
   name = "wsc2026-msk-lambda-role"
   assume_role_policy = jsonencode({

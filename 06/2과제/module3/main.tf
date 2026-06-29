@@ -7,7 +7,7 @@ terraform {
   }
 }
 
-# Bastion ??Amazon Linux 2023 AMI
+# Bastion 용 Amazon Linux 2023 AMI
 data "aws_ami" "al2023" {
   most_recent = true
   owners      = ["amazon"]
@@ -131,12 +131,14 @@ resource "aws_eks_cluster" "main" {
   depends_on = [aws_iam_role_policy_attachment.eks_cluster_policy]
 }
 
-# === 채점?? terraform???�행??IAM 주체??EKS Cluster Admin 부??===
-# ?�????terraform??apply??계정(IAM User/Role)??CloudShell?�서 kubectl�?# 채점?????�도�? ?�출 주체??AmazonEKSClusterAdminPolicy access entry�??�결?�다.
+# === 채점용: terraform을 실행한 IAM 주체에 EKS Cluster Admin 부여 ===
+# 대회 때 terraform을 apply한 계정(IAM User/Role)이 CloudShell에서 kubectl로
+# 채점할 수 있도록, 호출 주체에 AmazonEKSClusterAdminPolicy access entry를 연결한다.
 locals {
   caller_arn = data.aws_caller_identity.current.arn
-  # STS assumed-role ?�션 ARN(arn:aws:sts::...:assumed-role/ROLE/SESSION)??  # access entry가 ?�구?�는 IAM Role ARN(arn:aws:iam::...:role/ROLE)?�로 변??
-  # IAM User ARN(arn:aws:iam::...:user/NAME)?� 그�?�??�용.
+  # STS assumed-role 세션 ARN(arn:aws:sts::...:assumed-role/ROLE/SESSION)을
+  # access entry가 요구하는 IAM Role ARN(arn:aws:iam::...:role/ROLE)으로 변환.
+  # IAM User ARN(arn:aws:iam::...:user/NAME)은 그대로 사용.
   grader_principal_arn = can(regex(":assumed-role/", local.caller_arn)) ? format(
     "arn:aws:iam::%s:role/%s",
     data.aws_caller_identity.current.account_id,
@@ -434,10 +436,10 @@ output "cluster_name" {
 
 
 # ============================================================
-# ?�공?�일(app/) 빌드 & 배포??Bastion EC2 ?�서 ?�행?�다.
-# terraform apply ??ECR/S3/Bastion 까�?�?만들�? ?�제 docker build·helm·kubectl
-# ?� SSM Session Manager �?Bastion ???�속??/opt/deploy/deploy.sh �??�행?�다.
-# (로컬??Docker Desktop 불필????로컬?� terraform apply �?
+# 제공파일(app/) 빌드 & 배포는 Bastion EC2 에서 수행한다.
+# terraform apply 는 ECR/S3/Bastion 까지만 만들고, 실제 docker build·helm·kubectl
+# 은 SSM Session Manager 로 Bastion 에 접속해 /opt/deploy/deploy.sh 를 실행한다.
+# (로컬에 Docker Desktop 불필요 — 로컬은 terraform apply 만)
 # ============================================================
 
 resource "aws_ecr_repository" "app" {
@@ -463,7 +465,7 @@ locals {
   })
 }
 
-# --- 배포 번들 S3 버킷 (app ?�스 + ?�더링된 매니?�스??+ env/deploy ?�크립트) ---
+# --- 배포 번들 S3 버킷 (app 소스 + 렌더링된 매니페스트 + env/deploy 스크립트) ---
 resource "aws_s3_bucket" "deploy" {
   bucket        = "skm-deploy-${data.aws_caller_identity.current.account_id}"
   force_destroy = true
@@ -503,7 +505,7 @@ resource "aws_s3_object" "m_keda" {
   content = local.rendered_keda
 }
 
-# deploy.sh 가 source ???�경변???�일 (apply ?�점 값으�??�더�?
+# deploy.sh 가 source 할 환경변수 파일 (apply 시점 값으로 렌더링)
 resource "aws_s3_object" "env_sh" {
   bucket  = aws_s3_bucket.deploy.id
   key     = "env.sh"
@@ -572,7 +574,8 @@ resource "aws_iam_instance_profile" "bastion" {
   role = aws_iam_role.bastion.name
 }
 
-# Bastion ??kubectl/helm ?�로 ?�러?�터�??�어?????�도�?EKS Admin access entry 부??resource "aws_eks_access_entry" "bastion" {
+# Bastion 이 kubectl/helm 으로 클러스터를 제어할 수 있도록 EKS Admin access entry 부여
+resource "aws_eks_access_entry" "bastion" {
   cluster_name  = aws_eks_cluster.main.name
   principal_arn = aws_iam_role.bastion.arn
   type          = "STANDARD"
@@ -588,7 +591,7 @@ resource "aws_eks_access_policy_association" "bastion" {
   depends_on = [aws_eks_access_entry.bastion]
 }
 
-# Bastion SG (?�바?�드 불필????SSM ?�용, ?�웃바운???�체 ?�용)
+# Bastion SG (인바운드 불필요 — SSM 사용, 아웃바운드 전체 허용)
 resource "aws_security_group" "bastion" {
   name        = "skm-bastion-sg"
   description = "skm bastion (SSM, egress only)"
@@ -628,7 +631,7 @@ chmod +x /usr/local/bin/kubectl
 # helm
 curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 
-# 배포 번들 ?�운로드
+# 배포 번들 다운로드
 mkdir -p /opt/deploy
 /usr/local/bin/aws s3 cp s3://${aws_s3_bucket.deploy.id}/ /opt/deploy/ --recursive --region ${data.aws_region.current.name}
 chmod +x /opt/deploy/deploy.sh
@@ -660,7 +663,7 @@ output "bastion_instance_id" {
   value = aws_instance.bastion.id
 }
 
-# SSM ?�속 ??배포 ?�행 명령 ?�내
+# SSM 접속 후 배포 실행 명령 안내
 output "deploy_command" {
-  value = "aws ssm start-session --target ${aws_instance.bastion.id} --region ${data.aws_region.current.name}   # ?�속 ??  sudo bash /opt/deploy/deploy.sh"
+  value = "aws ssm start-session --target ${aws_instance.bastion.id} --region ${data.aws_region.current.name}   # 접속 후:  sudo bash /opt/deploy/deploy.sh"
 }

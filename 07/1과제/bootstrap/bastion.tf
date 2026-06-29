@@ -1,8 +1,9 @@
 ###############################################################################
 # Bootstrap (LOCAL apply)
-# 로컬 PC(Windows)?�서 ?�행?�며, Docker/Terraform???�치??Linux Bastion???�운??
-# Bastion?�는 ../main 구성�?app 바이?�리가 ?�로?�되�? 관리자 권한 ?�스?�스
-# ?�로?�일??부?�된?? ?�제 채점 ?�???�프??skills-book-*)??Bastion ?�에??# `terraform apply` �??�성?�다.
+# 로컬 PC(Windows)에서 실행되며, Docker/Terraform이 설치된 Linux Bastion을 띄운다.
+# Bastion에는 ../main 구성과 app 바이너리가 업로드되고, 관리자 권한 인스턴스
+# 프로파일이 부여된다. 실제 채점 대상 인프라(skills-book-*)는 Bastion 안에서
+# `terraform apply` 로 생성한다.
 ###############################################################################
 
 data "aws_availability_zones" "az" { state = "available" }
@@ -16,7 +17,7 @@ data "aws_ami" "amazon_linux" {
   }
 }
 
-# --- Bastion ?�용 최소 ?�트?�크 (채점 ?�??skills-book-vpc ?� 분리) ---------
+# --- Bastion 전용 최소 네트워크 (채점 대상 skills-book-vpc 와 분리) ---------
 resource "aws_vpc" "bastion" {
   cidr_block           = "10.255.0.0/16"
   enable_dns_hostnames = true
@@ -90,7 +91,7 @@ resource "local_file" "bastion_key" {
   file_permission = "0600"
 }
 
-# --- Bastion IAM (관리자 권한: main ?�테?��? ?�체 리소?��? ?�성) -------------
+# --- Bastion IAM (관리자 권한: main 스테이지 전체 리소스를 생성) -------------
 resource "aws_iam_role" "bastion" {
   name = "skills-bastion-role"
   assume_role_policy = jsonencode({
@@ -137,12 +138,13 @@ resource "aws_instance" "bastion" {
     timeout     = "5m"
   }
 
-  # 1) main ?�테?��?(채점 ?�??구성 + app 바이?�리)�?Bastion?�로 ?�로??  provisioner "file" {
+  # 1) main 스테이지(채점 대상 구성 + app 바이너리)를 Bastion으로 업로드
+  provisioner "file" {
     source      = "${path.module}/../main"
     destination = "/home/ec2-user"
   }
 
-  # 2) Docker / Terraform ?�치 + tfvars ?�성 + apply ?�퍼 ?�성
+  # 2) Docker / Terraform 설치 + tfvars 작성 + apply 헬퍼 생성
   provisioner "remote-exec" {
     inline = [
       "set -e",

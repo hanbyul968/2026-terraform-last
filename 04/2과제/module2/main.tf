@@ -7,7 +7,7 @@ terraform {
   }
 }
 
-# 4-2 VPC Lattice ??ap-southeast-1
+# 4-2 VPC Lattice â€” ap-southeast-1
 provider "aws" {
   region = "ap-southeast-1"
 }
@@ -25,7 +25,7 @@ data "aws_ami" "al2023" {
   }
 }
 
-# ?€?€ Hub VPC (10.0.0.0/16) ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# â”€â”€ Hub VPC (10.0.0.0/16) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 resource "aws_vpc" "hub" {
   cidr_block           = "10.0.0.0/16"
   enable_dns_support   = true
@@ -67,7 +67,7 @@ resource "aws_route_table_association" "hub_pub_c" {
   route_table_id = aws_route_table.hub_pub.id
 }
 
-# ?€?€ Spoke VPC (192.168.0.0/16) ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# â”€â”€ Spoke VPC (192.168.0.0/16) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 resource "aws_vpc" "spoke" {
   cidr_block           = "192.168.0.0/16"
   enable_dns_support   = true
@@ -144,7 +144,7 @@ resource "aws_route_table_association" "spoke_priv_c" {
   route_table_id = aws_route_table.spoke_priv.id
 }
 
-# ?€?€ Hub Bastion (SSH pw Skill53##, EIP) ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# â”€â”€ Hub Bastion (SSH pw Skill53##, EIP) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 resource "aws_security_group" "hub_bastion" {
   name   = "wsc-hub-bastion-sg"
   vpc_id = aws_vpc.hub.id
@@ -182,7 +182,7 @@ resource "aws_eip" "hub_bastion" {
   tags     = { Name = "wsc-hub-bastion-eip" }
 }
 
-# ?€?€ App EC2 v1/v2 (Spoke private-a, TCP8080) ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# â”€â”€ App EC2 v1/v2 (Spoke private-a, TCP8080) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 resource "aws_security_group" "app" {
   name   = "wsc-spoke-app-sg"
   vpc_id = aws_vpc.spoke.id
@@ -202,8 +202,8 @@ resource "aws_security_group" "app" {
   tags = { Name = "wsc-spoke-app-sg" }
 }
 
-# ë°°í¬?Œì¼ version1.py / version2.py ë¥?app/ ???ê³  ê·¸ë?ë¡??¤í–‰ (?˜ì • ê¸ˆì?).
-# ?„ë˜ user_data ??app/<file> ë¥?EC2 ë¡??„ë‹¬??python3 ë¡?ê¸°ë™?œë‹¤.
+# ë°°í¬íŒŒì¼ version1.py / version2.py ë¥¼ app/ ì— ë‘ê³  ê·¸ëŒ€ë¡œ ì‹¤í–‰ (ìˆ˜ì • ê¸ˆì§€).
+# ì•„ë˜ user_data ëŠ” app/<file> ë¥¼ EC2 ë¡œ ì „ë‹¬í•´ python3 ë¡œ ê¸°ë™í•œë‹¤.
 locals {
   app_v1 = fileexists("${path.module}/app/version1.py") ? file("${path.module}/app/version1.py") : "from http.server import BaseHTTPRequestHandler,HTTPServer\nimport json\nclass H(BaseHTTPRequestHandler):\n  def do_GET(self):\n    b=json.dumps({'version':'v1'}) if self.path=='/version' else (json.dumps({'status':'ok'}) if self.path=='/healthcheck' else '')\n    self.send_response(200 if b else 404);self.send_header('Content-Type','application/json');self.end_headers();self.wfile.write(b.encode())\nHTTPServer(('0.0.0.0',8080),H).serve_forever()\n"
   app_v2 = fileexists("${path.module}/app/version2.py") ? file("${path.module}/app/version2.py") : "from http.server import BaseHTTPRequestHandler,HTTPServer\nimport json\nclass H(BaseHTTPRequestHandler):\n  def do_GET(self):\n    b=json.dumps({'version':'v2'}) if self.path=='/version' else (json.dumps({'status':'ok'}) if self.path=='/healthcheck' else '')\n    self.send_response(200 if b else 404);self.send_header('Content-Type','application/json');self.end_headers();self.wfile.write(b.encode())\nHTTPServer(('0.0.0.0',8080),H).serve_forever()\n"
@@ -240,7 +240,7 @@ resource "aws_instance" "app_v2" {
   tags                   = { Name = "wsc-spoke-app-v2" }
 }
 
-# ?€?€ Internal ALB (Spoke private) + TGs ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# â”€â”€ Internal ALB (Spoke private) + TGs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 resource "aws_security_group" "alb" {
   name   = "wsc-spoke-alb-sg"
   vpc_id = aws_vpc.spoke.id
@@ -377,7 +377,7 @@ resource "aws_lb_listener_rule" "not_found" {
   }
 }
 
-# ?€?€ VPC Lattice (Hub -> Spoke ALB, header + weighted routing) ?€?€?€?€?€?€?€?€
+# â”€â”€ VPC Lattice (Hub -> Spoke ALB, header + weighted routing) â”€â”€â”€â”€â”€â”€â”€â”€
 resource "aws_vpclattice_service_network" "main" {
   name      = "wsc-app-service-network"
   auth_type = "NONE"

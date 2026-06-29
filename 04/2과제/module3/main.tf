@@ -4,14 +4,14 @@ terraform {
   }
 }
 
-# 4-3 Container logging ??ap-northeast-1
+# 4-3 Container logging â€” ap-northeast-1
 provider "aws" {
   region = "ap-northeast-1"
 }
 
 data "aws_caller_identity" "current" {}
 
-# ?€?€ VPC (10.3.0.0/16) ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# â”€â”€ VPC (10.3.0.0/16) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 resource "aws_vpc" "main" {
   cidr_block           = "10.3.0.0/16"
   enable_dns_support   = true
@@ -104,7 +104,7 @@ resource "aws_route_table_association" "priv_c" {
   route_table_id = aws_route_table.priv.id
 }
 
-# ?€?€ EKS (wsc-logging-cluster v1.35) ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# â”€â”€ EKS (wsc-logging-cluster v1.35) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 resource "aws_iam_role" "eks_cluster" {
   name = "wsc-logging-cluster-role"
   assume_role_policy = jsonencode({
@@ -172,7 +172,7 @@ resource "aws_eks_node_group" "main" {
   ]
 }
 
-# ?€?€ App EC2 (wsc-logging-app-bastion): docker flask wsc-log-app:5000 + Fluent Bit ?€?€
+# â”€â”€ App EC2 (wsc-logging-app-bastion): docker flask wsc-log-app:5000 + Fluent Bit â”€â”€
 data "aws_ami" "al2023" {
   most_recent = true
   owners      = ["amazon"]
@@ -225,9 +225,9 @@ resource "aws_iam_instance_profile" "app" {
   role = aws_iam_role.app.name
 }
 
-# ë°°í¬?Œì¼ app.py / requirements.txt / Dockerfile ë¥?app/ ???ê³  ê·¸ë?ë¡??¬ìš© (?˜ì • ê¸ˆì?).
-# Loki NLB ?”ë“œ?¬ì¸?¸ëŠ” EKS ë°°í¬ ??ê°€ë³€?´ë?ë¡? Fluent Bit ?¤ì •/?„ì»¤ ê¸°ë™?€
-# bastion deploy.sh(?ëŠ” SSM)?ì„œ LOKI_URL ??ë°›ì•„ ?˜í–‰?œë‹¤. (manifest/app-setup.sh ì°¸ê³ )
+# ë°°í¬íŒŒì¼ app.py / requirements.txt / Dockerfile ë¥¼ app/ ì— ë‘ê³  ê·¸ëŒ€ë¡œ ì‚¬ìš© (ìˆ˜ì • ê¸ˆì§€).
+# Loki NLB ì—”ë“œí¬ì¸íŠ¸ëŠ” EKS ë°°í¬ í›„ ê°€ë³€ì´ë¯€ë¡œ, Fluent Bit ì„¤ì •/ë„ì»¤ ê¸°ë™ì€
+# bastion deploy.sh(ë˜ëŠ” SSM)ì—ì„œ LOKI_URL ì„ ë°›ì•„ ìˆ˜í–‰í•œë‹¤. (manifest/app-setup.sh ì°¸ê³ )
 resource "aws_instance" "app" {
   ami                         = data.aws_ami.al2023.id
   instance_type               = "t3.small"

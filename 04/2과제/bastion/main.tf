@@ -1,9 +1,9 @@
 # =============================================================================
-# 2과제(04) 배포??Bastion ??로컬 Windows PowerShell ?�서 apply
-#   - module1..4 (멀??리전) �?Bastion(Linux) ?�에???�서?��?apply ?�기 ?�한 진입??
-#   - ?�속: SSM Session Manager. 권한: AdministratorAccess ?�스?�스 ?�로?�일.
-#   - 2과제 코드 ?�체�?zip ?�로 묶어 부?�스?�랩 S3 ???�로????user_data 가
-#     /opt/task2 �??�려받고 deploy.sh �??�성?�다. SSM ?�속 ??`bash /opt/task2/deploy.sh`.
+# 2과제(04) 배포용 Bastion — 로컬 Windows PowerShell 에서 apply
+#   - module1..4 (멀티 리전) 를 Bastion(Linux) 안에서 순서대로 apply 하기 위한 진입점.
+#   - 접속: SSM Session Manager. 권한: AdministratorAccess 인스턴스 프로파일.
+#   - 2과제 코드 전체를 zip 으로 묶어 부트스트랩 S3 에 업로드 → user_data 가
+#     /opt/task2 로 내려받고 deploy.sh 를 생성한다. SSM 접속 후 `bash /opt/task2/deploy.sh`.
 # =============================================================================
 
 data "aws_caller_identity" "current" {}

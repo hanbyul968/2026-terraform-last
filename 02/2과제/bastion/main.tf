@@ -1,4 +1,4 @@
-# 2과제(02) 배포??Bastion ??로컬 PowerShell ?�서 apply ??SSM ??bash /opt/task2/deploy.sh
+# 2과제(02) 배포용 Bastion — 로컬 PowerShell 에서 apply → SSM → bash /opt/task2/deploy.sh
 data "aws_caller_identity" "current" {}
 data "aws_vpc" "default" { default = true }
 data "aws_subnets" "default" {

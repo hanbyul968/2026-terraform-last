@@ -505,7 +505,7 @@ EOF
   tags = { Name = "wsi-bastion" }
 }
 
-# bastion ??EKS API 443 ?ˆìš©
+# bastion â†’ EKS API 443 í—ˆìš©
 resource "aws_security_group_rule" "bastion_to_eks" {
   type                     = "ingress"
   from_port                = 443
@@ -516,7 +516,8 @@ resource "aws_security_group_rule" "bastion_to_eks" {
   description              = "Allow bastion to EKS API"
 }
 
-# bastion role ??EKS cluster-admin ?¡ì„¸??resource "aws_eks_access_entry" "bastion" {
+# bastion role â†’ EKS cluster-admin ì•¡ì„¸ìŠ¤
+resource "aws_eks_access_entry" "bastion" {
   cluster_name  = aws_eks_cluster.main.name
   principal_arn = aws_iam_role.bastion.arn
   type          = "STANDARD"
@@ -548,8 +549,8 @@ resource "aws_eks_addon" "coredns" {
   depends_on = [aws_eks_node_group.system]
 }
 
-# ?€?€ Outputs ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
-# (k8s ?´ë”ê°€ terraform_remote_state ë¡??½ì–´ê°?
+# â”€â”€ Outputs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# (k8s í´ë”ê°€ terraform_remote_state ë¡œ ì½ì–´ê°)
 
 output "sqs_queue_url" {
   value = aws_sqs_queue.main.url

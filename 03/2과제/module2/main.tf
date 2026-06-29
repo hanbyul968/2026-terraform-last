@@ -4,12 +4,12 @@ terraform {
   }
 }
 
-# 3-2 Keycloak SAML SSO ??ap-northeast-2
+# 3-2 Keycloak SAML SSO â€” ap-northeast-2
 provider "aws" {
   region = "ap-northeast-2"
 }
 
-# ?€?€ VPC ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# â”€â”€ VPC â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 resource "aws_vpc" "main" {
   cidr_block           = "10.20.0.0/16"
   enable_dns_support   = true
@@ -76,7 +76,7 @@ resource "aws_route_table_association" "priv_a" {
   route_table_id = aws_route_table.priv.id
 }
 
-# ?€?€ Security Groups ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# â”€â”€ Security Groups â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 resource "aws_security_group" "alb" {
   name   = "wsc2026-keycloak-alb-sg"
   vpc_id = aws_vpc.main.id
@@ -113,7 +113,7 @@ resource "aws_security_group" "keycloak" {
   tags = { Name = "wsc2026-keycloak-sg" }
 }
 
-# ?€?€ EC2 (Keycloak, private, SSM) ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# â”€â”€ EC2 (Keycloak, private, SSM) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 data "aws_ami" "al2023" {
   most_recent = true
   owners      = ["amazon"]
@@ -162,7 +162,7 @@ resource "aws_instance" "keycloak" {
   tags                   = { Name = "wsc2026-keycloak" }
 }
 
-# ?€?€ ALB ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# â”€â”€ ALB â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 resource "aws_lb" "main" {
   name               = "wsc2026-keycloak-alb"
   internal           = false
@@ -196,7 +196,7 @@ resource "aws_lb_listener" "http" {
   }
 }
 
-# ?€?€ SAML IdP + dev/infra Roles ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# â”€â”€ SAML IdP + dev/infra Roles â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 resource "aws_iam_saml_provider" "keycloak" {
   name                   = "wsc2026-keycloak-idp"
   saml_metadata_document = file("${path.module}/saml-metadata.xml")

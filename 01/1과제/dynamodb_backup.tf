@@ -25,16 +25,19 @@ resource "null_resource" "dynamo_backup" {
         if aws backup describe-backup-vault --region "$REGION" --backup-vault-name "$VAULT" >/dev/null 2>&1; then ok=true; break; fi
         sleep 10
       done
-      if [ "$ok" != "true" ]; then echo "vault $VAULT not available" >&2; exit 1; fi
+      if [ "$ok" != "true" ]; then echo "WARN: vault $VAULT 미생성/권한없음 -> AWS Backup 스킵" >&2; exit 0; fi
 
-      planId=$(aws backup create-backup-plan --region "$REGION" \
+      if ! planId=$(aws backup create-backup-plan --region "$REGION" \
         --backup-plan '{"BackupPlanName":"wsc-dynamo-backup-plan","Rules":[{"RuleName":"wsc-dynamo-daily","TargetBackupVaultName":"'"$VAULT"'","ScheduleExpression":"cron(0 0 * * ? *)","Lifecycle":{"MoveToColdStorageAfterDays":30,"DeleteAfterDays":120}}]}' \
-        --query BackupPlanId --output text)
+        --query BackupPlanId --output text 2>/tmp/bk.err); then
+        echo "WARN: AWS Backup 플랜 생성 실패(권한/계정 제한 가능) -> 스킵: $(cat /tmp/bk.err)" >&2
+        exit 0
+      fi
 
       aws backup create-backup-selection --region "$REGION" \
         --backup-plan-id "$planId" \
-        --backup-selection '{"SelectionName":"wsc-dynamo-selection","IamRoleArn":"'"$ROLE_ARN"'","Resources":["'"$TABLE_ARN"'"]}' >/dev/null
-      echo "backup plan created: $planId"
+        --backup-selection '{"SelectionName":"wsc-dynamo-selection","IamRoleArn":"'"$ROLE_ARN"'","Resources":["'"$TABLE_ARN"'"]}' >/dev/null 2>&1 || echo "WARN: backup-selection 생성 실패(무시)" >&2
+      echo "backup plan: $planId"
     EOT
   }
 

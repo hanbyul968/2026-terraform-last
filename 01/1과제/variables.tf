@@ -15,3 +15,9 @@ variable "azs" {
   type        = list(string)
   default     = ["ap-northeast-2a", "ap-northeast-2b"]
 }
+
+variable "grader_principal_arn" {
+  description = "채점(CloudShell 등) IAM principal ARN(역할 ARN). 설정 시 EKS ClusterAdmin access entry 생성. 비워두면 생성 안 함(클러스터 생성자=bastion 은 bootstrap 으로 이미 admin)."
+  type        = string
+  default     = ""
+}

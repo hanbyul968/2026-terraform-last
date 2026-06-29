@@ -116,17 +116,22 @@ resource "aws_iam_openid_connect_provider" "eks" {
 }
 
 ############################
-# Access entry: grading account principal -> ClusterAdmin
+# Access entry: 채점 principal -> ClusterAdmin (옵션)
+#   - bastion(클러스터 생성자)은 bootstrap_cluster_creator_admin_permissions 로 이미 admin.
+#   - 채점은 별도 principal(CloudShell)이므로, 그 ARN 을 var.grader_principal_arn 으로 주면 생성.
+#     (assumed-role 세션 ARN 이 아니라 역할/사용자 ARN 을 사용할 것)
 ############################
 resource "aws_eks_access_entry" "admin" {
+  count         = var.grader_principal_arn == "" ? 0 : 1
   cluster_name  = aws_eks_cluster.this.name
-  principal_arn = data.aws_caller_identity.current.arn
+  principal_arn = var.grader_principal_arn
   type          = "STANDARD"
 }
 
 resource "aws_eks_access_policy_association" "admin" {
+  count         = var.grader_principal_arn == "" ? 0 : 1
   cluster_name  = aws_eks_cluster.this.name
-  principal_arn = data.aws_caller_identity.current.arn
+  principal_arn = var.grader_principal_arn
   policy_arn    = "arn:${local.partition}:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
 
   access_scope {

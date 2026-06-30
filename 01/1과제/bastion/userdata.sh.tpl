@@ -54,10 +54,15 @@ cat > /opt/task1/run.sh <<'RUN'
 set -e
 # 비번호 입력 (고정값 없음): 환경변수 BIBUNHO 사용하거나, 없으면 프롬프트
 if [ -z "$BIBUNHO" ]; then read -rp "비번호(competitor_number) 입력: " BIBUNHO; fi
+# 채점(CloudShell VPC)에서 사용할 IAM 신원 ARN -> EKS ClusterAdmin access entry 자동 생성.
+#   클러스터 생성자(bastion 역할)만 자동 admin 이므로, 채점 콘솔 신원을 반드시 넣어야 kubectl 채점(5-3/5-4/7-1/7-2)이 됨.
+#   계정ID 하드코딩 없음: 대회날 계정이 바뀌면 그 계정의 신원 ARN(예: arn:aws:iam::<acct>:user/<name>)을 입력.
+#   모르면 Enter 로 생략 가능(이 경우 채점 전 access entry 를 별도로 추가해야 함).
+if [ -z "$GRADER" ]; then read -rp "채점 IAM principal ARN (CloudShell 로그인 신원, 생략 Enter): " GRADER; fi
 # 1단계 (AWS 레이어): VPC/KMS/S3/CloudFront/ECR(빌드)/DynamoDB+Backup/EKS/노드그룹/ALB/IAM
 cd /opt/task1
 terraform init -input=false
-terraform apply -auto-approve -var="competitor_number=$BIBUNHO"
+terraform apply -auto-approve -var="competitor_number=$BIBUNHO" -var="grader_principal_arn=$GRADER"
 # 2단계 (k8s/helm 레이어): book StatefulSet/Service, AWS LB Controller, kube-prometheus-stack,
 #   TargetGroupBinding, 그리고 마지막에 EKS public->private 전환(finalize)
 cd /opt/task1/k8s

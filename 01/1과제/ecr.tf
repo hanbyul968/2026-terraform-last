@@ -36,6 +36,7 @@ resource "null_resource" "build_push_book" {
     environment = {
       REGION   = local.region
       REGISTRY = local.registry
+      REPO     = aws_ecr_repository.book.name
       IMAGE    = "${aws_ecr_repository.book.repository_url}:latest"
       CTX      = "${path.module}/files"
     }
@@ -44,6 +45,14 @@ resource "null_resource" "build_push_book" {
       aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$REGISTRY"
       docker build --platform linux/amd64 --provenance=false -t "$IMAGE" "$CTX"
       docker push "$IMAGE"
+      # 채점 3-2: scanOnPush 외에 명시적으로 스캔을 시작하고 COMPLETE 까지 대기해
+      #   describe-image-scan-findings 의 findingSeverityCounts 가 채워지도록 보장한다.
+      aws ecr start-image-scan --region "$REGION" --repository-name "$REPO" --image-id imageTag=latest >/dev/null 2>&1 || true
+      for i in $(seq 1 30); do
+        ST=$(aws ecr describe-image-scan-findings --region "$REGION" --repository-name "$REPO" --image-id imageTag=latest --query 'imageScanStatus.status' --output text 2>/dev/null || echo PENDING)
+        if [ "$ST" = "COMPLETE" ]; then echo "image scan COMPLETE"; break; fi
+        sleep 10
+      done
     EOT
   }
 

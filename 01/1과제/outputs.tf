@@ -21,5 +21,5 @@ output "eks_cluster" {
 }
 
 output "kms_key_arn" {
-  value = aws_kms_key.main.arn
+  value = data.aws_kms_key.main.arn
 }

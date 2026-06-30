@@ -15,3 +15,9 @@ variable "instance_type" {
   type        = string
   default     = "t3.medium"
 }
+
+variable "azs" {
+  description = "Availability zones for subnets a/b"
+  type        = list(string)
+  default     = ["ap-northeast-2a", "ap-northeast-2b"]
+}

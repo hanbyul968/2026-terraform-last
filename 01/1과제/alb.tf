@@ -4,7 +4,7 @@
 resource "aws_security_group" "alb" {
   name        = "wsc-alb-sg"
   description = "wsc-alb security group"
-  vpc_id      = aws_vpc.this.id
+  vpc_id      = data.aws_vpc.this.id
 
   ingress {
     from_port   = 80
@@ -39,7 +39,7 @@ resource "aws_lb" "wsc" {
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb.id]
-  subnets            = [aws_subnet.pub_a.id, aws_subnet.pub_b.id]
+  subnets            = [data.aws_subnet.pub_a.id, data.aws_subnet.pub_b.id]
   tags               = { Name = "wsc-alb" }
 }
 
@@ -47,7 +47,7 @@ resource "aws_lb_target_group" "book" {
   name        = "wsc-book-tg"
   port        = 8080
   protocol    = "HTTP"
-  vpc_id      = aws_vpc.this.id
+  vpc_id      = data.aws_vpc.this.id
   target_type = "ip"
 
   health_check {

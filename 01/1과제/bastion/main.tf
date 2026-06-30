@@ -1,48 +1,23 @@
 # =============================================================================
-# 1단계 (로컬 Windows PowerShell에서 apply) - 배포용 Bastion EC2
-#   - 목적: Windows 로컬 대신 Linux Bastion 안에서 main(루트 1과제) terraform apply
-#           + docker build/push 를 수행한다. (로컬에 Docker 불필요)
+# 1단계 (로컬 Windows PowerShell에서 apply) - 네트워크 기반 + 배포용 Bastion
+#   - 이 스테이지가 wsc-vpc / 서브넷 / IGW / NAT / 라우팅 / Flow Logs / 공유 KMS 를
+#     모두 생성하고(network.tf, kms.tf), 그 안의 wsc-pub-sn-a 에 Bastion 을 띄운다.
+#   - 덕분에 Bastion 이 클러스터와 "같은 VPC" 라, EKS private-only 전환 후에도
+#     kubectl/포트포워딩이 계속 동작한다(채점 prometheus 브라우저 접속 포함).
 #   - 접속: SSM Session Manager (SSH 키/인바운드 불필요)
 #   - 권한: 인스턴스 프로파일(AdministratorAccess)로 terraform 자격증명 자동 사용
 #   - 자동화: 루트(../) 1과제 코드(files/book 포함)를 zip 으로 묶어 부트스트랩 S3 에
 #            업로드 → user_data 가 내려받아 /opt/task1 에 준비. SSM 접속 후
-#            `bash /opt/task1/run.sh` 한 줄로 main 인프라가 배포된다.
+#            `bash /opt/task1/run.sh` 한 줄로 root 인프라(EKS/ALB/S3/... )가 배포된다.
 #
-# ※ 이 폴더(state)는 루트(main)와 분리되어 있다. 채점 전 이 폴더에서만
-#   `terraform destroy` 하면 Bastion(+부트스트랩 버킷)만 제거된다.
+# ※ destroy 순서: 먼저 bastion 안에서 root(/opt/task1, /opt/task1/k8s) destroy →
+#   그 다음 이 폴더(1단계)를 destroy. (이 스테이지가 VPC/KMS 를 소유하므로 순서 중요)
 # =============================================================================
 
 data "aws_caller_identity" "current" {}
 
-# ---- Bastion 전용 최소 VPC (이 계정엔 default VPC 가 없음) ----
-resource "aws_vpc" "bastion" {
-  cidr_block           = "10.250.0.0/16"
-  enable_dns_support   = true
-  enable_dns_hostnames = true
-  tags                 = { Name = "${var.player_id}-task1-bastion-vpc" }
-}
-resource "aws_internet_gateway" "bastion" {
-  vpc_id = aws_vpc.bastion.id
-  tags   = { Name = "${var.player_id}-task1-bastion-igw" }
-}
-resource "aws_subnet" "bastion" {
-  vpc_id                  = aws_vpc.bastion.id
-  cidr_block              = "10.250.0.0/24"
-  map_public_ip_on_launch = true
-  tags                    = { Name = "${var.player_id}-task1-bastion-subnet" }
-}
-resource "aws_route_table" "bastion" {
-  vpc_id = aws_vpc.bastion.id
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.bastion.id
-  }
-  tags = { Name = "${var.player_id}-task1-bastion-rt" }
-}
-resource "aws_route_table_association" "bastion" {
-  subnet_id      = aws_subnet.bastion.id
-  route_table_id = aws_route_table.bastion.id
-}
+# ---- 네트워크(wsc-vpc/서브넷/IGW/NAT/RT/FlowLogs)는 network.tf, 공유 KMS 는 kms.tf 에서 생성 ----
+#   bastion 은 wsc-pub-sn-a(퍼블릭)에 위치하므로 EKS private-only 전환 후에도 클러스터 접근 가능.
 
 # ---- 최신 Amazon Linux 2023 AMI ----
 data "aws_ami" "al2023" {
@@ -142,7 +117,7 @@ resource "aws_iam_instance_profile" "bastion" {
 resource "aws_security_group" "bastion" {
   name        = "${var.player_id}-task1-bastion-sg"
   description = "Bastion SG - SSM outbound; 9090 open for Prometheus UI"
-  vpc_id      = aws_vpc.bastion.id
+  vpc_id      = aws_vpc.this.id
 
   # 주의: prometheus 는 인증이 없습니다. 9090 을 전 세계(0.0.0.0/0)에 개방합니다(요청에 따름).
   ingress {
@@ -177,7 +152,7 @@ locals {
 resource "aws_instance" "bastion" {
   ami                         = data.aws_ami.al2023.id
   instance_type               = var.instance_type
-  subnet_id                   = aws_subnet.bastion.id
+  subnet_id                   = aws_subnet.pub_a.id
   iam_instance_profile        = aws_iam_instance_profile.bastion.name
   vpc_security_group_ids      = [aws_security_group.bastion.id]
   associate_public_ip_address = true
@@ -197,7 +172,7 @@ resource "aws_instance" "bastion" {
 
   tags = { Name = "${var.player_id}-task1-bastion" }
 
-  depends_on = [aws_s3_object.task1_bundle]
+  depends_on = [aws_s3_object.task1_bundle, aws_route_table_association.pub_a]
 }
 
 # prometheus 상시 포트포워딩(systemd)으로 브라우저에서 바로 접속 가능한 URL

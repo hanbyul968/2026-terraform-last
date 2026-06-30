@@ -12,7 +12,7 @@ resource "aws_ecr_repository" "book" {
 
   encryption_configuration {
     encryption_type = "KMS"
-    kms_key         = aws_kms_key.main.arn
+    kms_key         = data.aws_kms_key.main.arn
   }
 
   tags = { Name = local.ecr_repo }

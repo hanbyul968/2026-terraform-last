@@ -121,8 +121,8 @@ def parse_blocks(error_text):
     results = []
     seen = set()
     for blk in raw_blocks:
-        # 리소스 주소
-        m_addr = re.search(r'with\s+([a-zA-Z0-9_.\[\]"\-]+?),', blk)
+        # 리소스 주소 ('with <주소>,' 줄 전체를 잡아 인덱스 안의 :,/,| 등도 보존)
+        m_addr = re.search(r'^\s*with\s+(.+?),\s*$', blk, re.MULTILINE)
         addr = m_addr.group(1).strip() if m_addr else None
         # 주소가 없으면 단독 주소 줄 형태도 시도
         if not addr:
@@ -153,6 +153,14 @@ def type_of(addr):
     return m2.group(1) if m2 else None
 
 
+def quote_addr(addr):
+    """인덱스(["app"])나 공백이 포함된 주소는 bash 가 안쪽 따옴표를 벗기지 않도록
+    전체를 작은따옴표로 감싼다. 예: aws_iam_role.node["app"] -> 'aws_iam_role.node["app"]'"""
+    if any(c in addr for c in '["\' '):
+        return "'" + addr + "'"
+    return addr
+
+
 def var_for(addr):
     """리소스 주소를 셸 변수명으로 변환. 예: aws_s3_bucket.static[0] -> ID_AWS_S3_BUCKET_STATIC_0"""
     safe = re.sub(r'[^a-zA-Z0-9]+', '_', addr).strip('_').upper()
@@ -170,35 +178,30 @@ def build(block, var_pairs=None):
         if v_name and v_value:
             var += f' -var="{v_name}={v_value}"'
     tf = f"terraform import{var}"
+    qaddr = quote_addr(addr)  # 인덱스/공백 있는 주소는 작은따옴표로 감쌈
 
     lines = []
     note = None
     if spec is None:
-        if rtype is None:
+        if rtype in ("null_resource", "terraform_data"):
+            # 실제 클라우드 자원이 아니라 import 대상이 아님 → 명령은 출력하지 않음
+            note = (f"'{rtype}' 는 실제 클라우드 리소스가 아니라 import 대상이 아닙니다. "
+                    f"필요하면 `terraform apply -replace='{addr}'` 로 재생성하세요.")
+        elif rtype is None:
             note = ("리소스 타입을 인식하지 못했습니다. "
                     "`terraform import <리소스주소> <ID>` 형식으로 직접 import 하세요.")
-            lines.append(f"{tf} {addr} <리소스_ID>")
-        elif rtype in ("null_resource", "terraform_data"):
-            # 실제 클라우드 자원이 아니라 import 대상이 아님
-            note = (f"'{rtype}' 는 실제 클라우드 리소스가 아니라 import 할 수 없습니다. "
-                    f"이미 state 에 있다면 그대로 두고, 재생성이 필요하면 아래처럼 replace 하세요.")
-            lines.append(f"terraform apply -replace='{addr}'")
+            lines.append(f"{tf} {qaddr} <리소스_ID>")
         else:
             note = (f"'{rtype}' 타입의 import 규칙이 등록되어 있지 않습니다. "
                     f"`terraform import {addr} <ID>` 형식으로 직접 import 하세요. "
-                    f"아래 명령으로 후보 ID 를 찾아본 뒤, 정확한 형식은 "
-                    f"Terraform Registry 해당 리소스 문서의 'Import' 섹션을 확인하세요.")
-            svc = rtype[4:] if rtype.startswith("aws_") else rtype
-            lines.append(f"# ID 후보 조회 (서비스에 맞게 수정):")
-            lines.append(f"# aws resourcegroupstaggingapi get-resources "
-                         f"--resource-type-filters {svc} --query \"ResourceTagMappingList[].ResourceARN\" --output text")
-            lines.append(f"{tf} {addr} <리소스_ID>")
+                    f"정확한 ID 형식은 Terraform Registry 해당 리소스 문서의 'Import' 섹션을 참고하세요.")
+            lines.append(f"{tf} {qaddr} <리소스_ID>")
         return {"addr": addr, "rtype": rtype, "commands": "\n".join(lines), "note": note}
 
     if spec.get("from_err") and name:
         # 이름을 그대로 import ID 로 사용 가능
         import_id = name if ("/" not in name and " " not in name) else f'"{name}"'
-        lines.append(f"{tf} {addr} {import_id}")
+        lines.append(f"{tf} {qaddr} {import_id}")
         note = f"import ID = {spec['id_kind']} (에러 메시지에서 '{name}' 자동 추출)"
     else:
         # ID 를 별도로 구해야 함
@@ -211,14 +214,14 @@ def build(block, var_pairs=None):
             v = var_for(addr)
             lines.append(f"# {spec['id_kind']} 조회 후 변수에 저장")
             lines.append(f"{v}=$({hint})")
-            lines.append(f'{tf} {addr} "${v}"')
+            lines.append(f'{tf} {qaddr} "${v}"')
             note = (f"import ID = {spec['id_kind']}. 위 두 줄을 그대로 실행하면 "
                     f"조회한 ID(`${v}`)로 바로 import 됩니다.")
         else:
             if hint:
                 lines.append(f"# {spec['id_kind']} 조회/형식:")
                 lines.append(f"# {hint}")
-            lines.append(f"{tf} {addr} <{spec['id_kind']}>")
+            lines.append(f"{tf} {qaddr} <{spec['id_kind']}>")
             extra = f" (에러에서 '{name}' 감지)" if name else ""
             note = f"import ID = {spec['id_kind']}. 위 안내대로 실제 ID를 구해 넣으세요.{extra}"
 
@@ -297,7 +300,7 @@ TEMPLATE = """
     <div class="card">
       <div class="addr">{{ r.addr }}</div>
       <div class="rtype">{{ r.rtype }}</div>
-      <pre>{{ r.commands }}</pre>
+      {% if r.commands %}<pre>{{ r.commands }}</pre>{% endif %}
       {% if r.note %}<div class="note">ℹ️ {{ r.note }}</div>{% endif %}
     </div>
   {% endfor %}
@@ -348,7 +351,8 @@ def index():
         for b in blocks:
             built = build(b, used_pairs)
             results.append(built)
-            cmd_blocks.append(built["commands"])
+            if built["commands"].strip():
+                cmd_blocks.append(built["commands"])
         all_commands = "\n\n".join(cmd_blocks)
     return render_template_string(
         TEMPLATE, error_text=error_text, var_pairs=var_pairs,

@@ -156,7 +156,7 @@ resource "null_resource" "target_group_binding" {
       TG_ARN  = data.aws_lb_target_group.book.arn
     }
     command = <<-EOT
-      set -euo pipefail
+      set -eu
       aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER" >/dev/null
       f=$(mktemp)
       {
@@ -255,7 +255,7 @@ resource "null_resource" "private_only" {
       CLUSTER = var.cluster_name
     }
     command = <<-EOT
-      set -euo pipefail
+      set -eu
       CUR=$(aws eks describe-cluster --region "$REGION" --name "$CLUSTER" --query 'cluster.resourcesVpcConfig.endpointPublicAccess' --output text)
       if [ "$CUR" = "True" ] || [ "$CUR" = "true" ]; then
         aws eks update-cluster-config --region "$REGION" --name "$CLUSTER" \

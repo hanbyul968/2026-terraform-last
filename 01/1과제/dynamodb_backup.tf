@@ -13,7 +13,7 @@ resource "null_resource" "dynamo_backup" {
       VAULT     = "aws/efs/automatic-backup-vault"
     }
     command = <<-EOT
-      set -euo pipefail
+      set -eu
 
       # 이미 백업 플랜이 있으면 스킵 (멱등성)
       existing=$(aws backup list-backup-plans --region "$REGION" --query "BackupPlansList[?BackupPlanName=='wsc-dynamo-backup-plan'].BackupPlanId | [0]" --output text)

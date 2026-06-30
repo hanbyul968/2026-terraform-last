@@ -187,7 +187,7 @@ resource "null_resource" "book_tgb" {
       NS      = var.namespace
     }
     command = <<-EOT
-      set -euo pipefail
+      set -eu
       aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER" >/dev/null
       f=$(mktemp)
       {

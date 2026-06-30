@@ -251,7 +251,7 @@ resource "null_resource" "flink" {
       ROLE   = aws_iam_role.flink.arn
     }
     command = <<-EOT
-      set -euo pipefail
+      set -eu
       if aws kinesisanalyticsv2 describe-application --region "$REGION" --application-name wsc2026-analytics-flink >/dev/null 2>&1; then
         echo "flink studio exists"; exit 0
       fi

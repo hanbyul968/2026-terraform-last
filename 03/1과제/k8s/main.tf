@@ -355,7 +355,7 @@ resource "null_resource" "wait_alb" {
     interpreter = ["/bin/bash", "-c"]
     environment = { REGION = var.region, ALB = var.alb_name }
     command     = <<-EOT
-      set -euo pipefail
+      set -eu
       for i in $(seq 1 60); do
         state=$(aws elbv2 describe-load-balancers --region "$REGION" --names "$ALB" --query "LoadBalancers[0].State.Code" --output text 2>/dev/null || true)
         if [ "$state" = "active" ]; then exit 0; fi
@@ -384,7 +384,7 @@ resource "null_resource" "private_only" {
       CLUSTER = var.cluster_name
     }
     command = <<-EOT
-      set -euo pipefail
+      set -eu
       # 현재 public 이면 끈다 (idempotent)
       CUR=$(aws eks describe-cluster --region "$REGION" --name "$CLUSTER" \
         --query 'cluster.resourcesVpcConfig.endpointPublicAccess' --output text)

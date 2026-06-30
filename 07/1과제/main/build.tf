@@ -11,7 +11,7 @@ resource "terraform_data" "docker_push" {
   provisioner "local-exec" {
     interpreter = ["/bin/bash", "-c"]
     command     = <<-EOT
-      set -euo pipefail
+      set -eu
       REGION="ap-northeast-2"
       ACCOUNT_ID="${data.aws_caller_identity.current.account_id}"
       REPO_URL="${aws_ecr_repository.book.repository_url}"

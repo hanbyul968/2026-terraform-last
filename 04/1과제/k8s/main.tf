@@ -214,7 +214,7 @@ resource "null_resource" "book_tgb" {
       TG_ARN  = data.aws_lb_target_group.book.arn
     }
     command = <<-EOT
-      set -euo pipefail
+      set -eu
       aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER" >/dev/null
       f=$(mktemp)
       {
@@ -418,7 +418,7 @@ resource "null_resource" "private_only" {
       CLUSTER = var.cluster_name
     }
     command = <<-EOT
-      set -euo pipefail
+      set -eu
       # 현재 public 이면 끈다 (idempotent)
       CUR=$(aws eks describe-cluster --region "$REGION" --name "$CLUSTER" \
         --query 'cluster.resourcesVpcConfig.endpointPublicAccess' --output text)

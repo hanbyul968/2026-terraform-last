@@ -28,7 +28,7 @@ resource "null_resource" "build_push_bootstrap" {
       CTX      = "${path.module}/bootstrap-container"
     }
     command = <<-EOT
-      set -euo pipefail
+      set -eu
       # Linux/bash 에서는 표준 방식대로 토큰을 파이프로 password-stdin 에 전달한다.
       aws ecr get-login-password --region "$REGION" \
         | docker login --username AWS --password-stdin "$REGISTRY"

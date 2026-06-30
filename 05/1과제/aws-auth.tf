@@ -77,7 +77,7 @@ resource "null_resource" "aws_auth" {
       AWSAUTH = local.aws_auth_manifest
     }
     command = <<-EOT
-      set -euo pipefail
+      set -eu
       aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER" >/dev/null
       f=$(mktemp /tmp/gj2026-aws-auth.XXXXXX.yaml)
       printf '%s' "$AWSAUTH" > "$f"

@@ -40,7 +40,7 @@ resource "null_resource" "build_push_book" {
       CTX      = "${path.module}/files"
     }
     command = <<-EOT
-      set -euo pipefail
+      set -eu
       aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$REGISTRY"
       docker build --platform linux/amd64 --provenance=false -t "$IMAGE" "$CTX"
       docker push "$IMAGE"

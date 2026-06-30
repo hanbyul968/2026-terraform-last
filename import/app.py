@@ -122,7 +122,7 @@ def parse_blocks(error_text):
     seen = set()
     for blk in raw_blocks:
         # 리소스 주소 ('with <주소>,' 줄 전체를 잡아 인덱스 안의 :,/,| 등도 보존)
-        m_addr = re.search(r'^\s*with\s+(.+?),\s*$', blk, re.MULTILINE)
+        m_addr = re.search(r'^[\s│|]*with\s+(.+?),\s*$', blk, re.MULTILINE)
         addr = m_addr.group(1).strip() if m_addr else None
         # 주소가 없으면 단독 주소 줄 형태도 시도
         if not addr:

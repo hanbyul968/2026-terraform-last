@@ -192,3 +192,71 @@ cd /opt/task1 && terraform destroy -auto-approve
 
 > ✅ bastion 은 **자체 VPC(10.250.0.0/16)** 를 생성 → default VPC 없는 계정에서도 동작.
 > ✅ AMI 는 표준 AL2023(`al2023-ami-2023.*`)만 선택 — minimal AMI 는 SSM 에이전트가 없어 접속 불가하므로 제외함.
+
+
+---
+
+## Prometheus `/alerts` 브라우저 접속 (채점 7-2)
+
+> 이 bastion 은 **SSM 전용**(SSH 키·22번 인바운드 없음)이다. 따라서 `ssh -L` 터널은 동작하지 않는다.
+> 아래 세 가지 중 하나를 쓴다. **방법 1이 가장 간단**(테라폼이 자동 구성).
+
+Prometheus Service 이름은 환경에 따라 다를 수 있으니 먼저 확인:
+```bash
+kubectl get svc -n prometheus
+# 보통: prometheus-kube-prometheus-prometheus  (9090)
+```
+
+### 방법 1) 상시 포트포워딩 + SG 9090 개방 — 코드에 내장(자동, 권장)
+bastion 부팅 시 systemd `prom-pf` 서비스가 클러스터/Prometheus 준비를 기다렸다가
+`0.0.0.0:9090` 으로 **상시 포트포워딩**하고, bastion SG 는 9090 을 열어 둔다.
+별도 작업 없이 브라우저로 접속:
+```bash
+# 로컬(bastion 폴더)에서 URL 확인
+terraform output prometheus_alerts_url
+#  -> http://<bastion-public-ip>:9090/alerts
+```
+브라우저에서 위 URL 접속 → `BookPodNotRunning` / `BokPodCrashLooping` / `BookPodNotReady` 확인.
+
+상태 점검(bastion):
+```bash
+sudo systemctl status prom-pf --no-pager
+curl -s http://localhost:9090/-/ready      # "Prometheus Server is Ready."
+```
+
+> ⚠️ Prometheus 는 무인증이다. 방법 1은 9090 을 `0.0.0.0/0` 로 연다. 시연/채점이 끝나면 닫기:
+> ```bash
+> aws ec2 revoke-security-group-ingress --group-id <bastion-sg> --protocol tcp --port 9090 --cidr 0.0.0.0/0 --region ap-northeast-2
+> ```
+
+### 방법 2) 수동 kubectl 포트포워딩 (SG 9090 이 열려 있을 때)
+방법 1의 systemd 를 안 쓰고 직접 띄울 때:
+```bash
+# bastion 에서 (0.0.0.0 바인딩해야 외부 접근 가능)
+kubectl -n prometheus port-forward --address 0.0.0.0 \
+  svc/prometheus-kube-prometheus-prometheus 9090:9090
+```
+→ 브라우저: `http://<bastion-public-ip>:9090/alerts`
+(bastion-public-ip 는 `terraform output` 또는 콘솔에서 확인)
+
+### 방법 3) SSM 포트포워딩 (SG 를 안 열고 싶을 때, 가장 안전)
+bastion SG 에 9090 을 열지 않고 **내 PC ↔ bastion** 을 SSM 으로 직접 터널한다.
+1) bastion 에서 포트포워딩을 `127.0.0.1` 로 띄운다(방법 2에서 `--address 0.0.0.0` 대신 생략/127.0.0.1):
+```bash
+kubectl -n prometheus port-forward svc/prometheus-kube-prometheus-prometheus 9090:9090
+```
+2) **내 PC** 에서 SSM 포트포워딩 세션(SSH 키 불필요, Session Manager Plugin 필요):
+```bash
+INSTANCE_ID=$(aws ec2 describe-instances \
+  --filters "Name=tag:Name,Values=*task1-bastion" "Name=instance-state-name,Values=running" \
+  --query 'Reservations[].Instances[].InstanceId' --output text --region ap-northeast-2)
+
+aws ssm start-session --target "$INSTANCE_ID" \
+  --document-name AWS-StartPortForwardingSession \
+  --parameters '{"portNumber":["9090"],"localPortNumber":["9090"]}' \
+  --region ap-northeast-2
+```
+3) 내 PC 브라우저: `http://localhost:9090/alerts`
+
+> 대회 당일(다른 PC·다른 계정)에도 위 그대로 동작한다 — 계정 ID·IP 하드코딩이 없고,
+> 인스턴스 ID 는 태그로 조회, URL 은 `terraform output` 으로 얻는다.

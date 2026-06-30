@@ -74,6 +74,42 @@ cd /opt/task1 && terraform output || true
 RUN
 chmod +x /opt/task1/run.sh
 
-# ---- 7) 완료 마커 ----
+# ---- 7) prometheus 상시 포트포워딩 (브라우저로 bastion:9090 접속) ----
+# 클러스터/prometheus 가 준비될 때까지 재시도하며 0.0.0.0:9090 으로 계속 포워딩한다.
+# (root 인스턴스프로파일=admin=클러스터 생성자라 kubeconfig 인증이 항상 성공)
+cat > /usr/local/bin/prom-portforward.sh <<'PF'
+#!/bin/bash
+export KUBECONFIG=/root/.kube/config
+SVC=prometheus-kube-prometheus-prometheus
+while true; do
+  aws eks update-kubeconfig --region __REGION__ --name wsc-eks-cluster >/dev/null 2>&1
+  if kubectl get svc -n prometheus "$SVC" >/dev/null 2>&1; then
+    kubectl -n prometheus port-forward --address 0.0.0.0 "svc/$SVC" 9090:9090 || true
+  fi
+  sleep 10
+done
+PF
+sed -i "s/__REGION__/${region}/g" /usr/local/bin/prom-portforward.sh
+chmod +x /usr/local/bin/prom-portforward.sh
+
+cat > /etc/systemd/system/prom-pf.service <<'UNIT'
+[Unit]
+Description=Persistent kubectl port-forward for Prometheus (0.0.0.0:9090)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/prom-portforward.sh
+Restart=always
+RestartSec=10
+User=root
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now prom-pf.service
+
+# ---- 8) 완료 마커 ----
 touch /opt/task1/READY
 echo "BOOTSTRAP COMPLETE"

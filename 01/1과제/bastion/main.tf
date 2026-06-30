@@ -141,8 +141,17 @@ resource "aws_iam_instance_profile" "bastion" {
 # ---- 보안 그룹: 인바운드 0개 (SSM 은 아웃바운드 443만 사용) ----
 resource "aws_security_group" "bastion" {
   name        = "${var.player_id}-task1-bastion-sg"
-  description = "Bastion SG - no inbound, SSM via outbound 443 only"
+  description = "Bastion SG - SSM outbound; 9090 open for Prometheus UI"
   vpc_id      = aws_vpc.bastion.id
+
+  # 주의: prometheus 는 인증이 없습니다. 9090 을 전 세계(0.0.0.0/0)에 개방합니다(요청에 따름).
+  ingress {
+    description = "Prometheus UI (persistent port-forward) - OPEN to all"
+    from_port   = 9090
+    to_port     = 9090
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 
   egress {
     description = "All outbound (SSM, ECR, docker pull, EKS API, helm charts)"
@@ -189,4 +198,10 @@ resource "aws_instance" "bastion" {
   tags = { Name = "${var.player_id}-task1-bastion" }
 
   depends_on = [aws_s3_object.task1_bundle]
+}
+
+# prometheus 상시 포트포워딩(systemd)으로 브라우저에서 바로 접속 가능한 URL
+output "prometheus_alerts_url" {
+  description = "Bastion 퍼블릭 IP 의 9090 으로 상시 포워딩되는 Prometheus alerts 페이지"
+  value       = "http://${aws_instance.bastion.public_ip}:9090/alerts"
 }

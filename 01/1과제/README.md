@@ -43,14 +43,14 @@ bash run.sh 2>&1 | tee /tmp/apply.log        # terraform init + apply (EKS/노�
 1. (권장, 빠름) CLI 한 줄:
 ```aws eks update-cluster-config --region ap-northeast-2 --name wsc-eks-cluster --resources-vpc-config endpointPublicAccess=false,endpointPrivateAccess=true,publicAccessCidrs=[]```
 
-aws sts get-caller-identity --query Arn --output text
-eks 액세스에 admin 부여
-
 2. **`run.sh` 가 자동 처리**: 이 구성은 **2-레이어**다 — `root`(AWS: VPC/EKS/ALB/ECR/...) 와 `k8s/`(kubernetes·helm·**finalize**). `run.sh` 는 root 를 먼저 apply 해 클러스터를 만들고(이때 public 열림), 이어서 `k8s/` 를 apply 하는데 그 마지막 `null_resource.private_only` 가 **EKS 를 private-only 로 자동 전환**한다(보통 별도 작업 불필요).
 
 > 🔧 **왜 2-레이어?** root 에는 kubernetes/helm provider 가 없어, 클러스터가 없을 때도 `terraform import`/`plan`/`destroy` 가 깨끗하게 동작한다(과거 "provider depends on values that cannot be determined until apply" 오류 해소). k8s/helm 은 `k8s/` 스테이지가 `data "aws_eks_cluster"` 로 클러스터를 조회해 적용한다.
 
 > destroy 전에는 반대로 public 을 다시 켜야 k8s/helm 리소스를 정리할 수 있다(맨 아래 참고).
+
+3. 채점 cloudshell vpc 환경에서 aws sts get-caller-identity --query Arn --output text
+eks 액세스에 admin 부여
 
 ---
 

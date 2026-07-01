@@ -15,6 +15,7 @@
 > ```
 > ⚠️ 이 계정엔 default VPC 가 없어 `bastion/main.tf` 의 default VPC 참조를 전용 VPC 로 교체해야 합니다(01/1과제 bastion 참고).
 
+eks 액세스에 로그인 한 사용자를 등록해야한다.
 
 # 제1과제 — Web Service Provisioning (과제지_vf 기준)
 

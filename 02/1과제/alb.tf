@@ -15,7 +15,7 @@
 resource "aws_security_group" "book_alb" {
   name        = "wskorea26-book-alb-sg"
   description = "book ALB - HTTP 80 open"
-  vpc_id      = aws_vpc.this.id
+  vpc_id      = data.aws_vpc.this.id
   ingress {
     description = "HTTP from anywhere"
     from_port   = 80
@@ -32,12 +32,25 @@ resource "aws_security_group" "book_alb" {
   tags = { Name = "wskorea26-book-alb-sg" }
 }
 
+# ALB -> book Pod(8080) 허용. pod ENI 는 EKS 클러스터 SG 를 사용하므로,
+# 클러스터 SG 에 ALB SG 로부터 8080 인바운드를 열어야 헬스체크/트래픽이 통한다.
+# (없으면 Target.Timeout -> 타깃 unhealthy -> ALB 502/504)
+resource "aws_security_group_rule" "pods_from_alb" {
+  type                     = "ingress"
+  description              = "ALB health check + traffic to book pods on 8080"
+  from_port                = 8080
+  to_port                  = 8080
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.book_alb.id
+  security_group_id        = aws_eks_cluster.this.vpc_config[0].cluster_security_group_id
+}
+
 resource "aws_lb" "book" {
   name               = "wskorea26-book-alb"
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.book_alb.id]
-  subnets            = [aws_subnet.pub_c.id, aws_subnet.pub_d.id]
+  subnets            = [data.aws_subnet.pub_c.id, data.aws_subnet.pub_d.id]
   tags               = { Name = "wskorea26-book-alb" }
 }
 
@@ -46,7 +59,7 @@ resource "aws_lb_target_group" "book" {
   name        = "wskorea26-book-tg"
   port        = 8080
   protocol    = "HTTP"
-  vpc_id      = aws_vpc.this.id
+  vpc_id      = data.aws_vpc.this.id
   target_type = "ip"
   health_check {
     path     = "/health"
@@ -143,8 +156,14 @@ resource "aws_iam_role" "lb_controller" {
     Version = "2012-10-17"
     Statement = [{
       Effect    = "Allow"
-      Principal = { Service = "pods.eks.amazonaws.com" }
-      Action    = ["sts:AssumeRole", "sts:TagSession"]
+      Principal = { Federated = aws_iam_openid_connect_provider.eks.arn }
+      Action    = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = {
+          "${replace(aws_iam_openid_connect_provider.eks.url, "https://", "")}:sub" = "system:serviceaccount:kube-system:aws-load-balancer-controller"
+          "${replace(aws_iam_openid_connect_provider.eks.url, "https://", "")}:aud" = "sts.amazonaws.com"
+        }
+      }
     }]
   })
 }
@@ -154,13 +173,8 @@ resource "aws_iam_role_policy_attachment" "lb_controller" {
   policy_arn = aws_iam_policy.lb_controller.arn
 }
 
-resource "aws_eks_pod_identity_association" "lb_controller" {
-  cluster_name    = aws_eks_cluster.this.name
-  namespace       = "kube-system"
-  service_account = "aws-load-balancer-controller"
-  role_arn        = aws_iam_role.lb_controller.arn
-  depends_on      = [aws_eks_addon.pod_identity]
-}
+# SA(aws-load-balancer-controller)는 ./k8s helm 이 생성하며, serviceAccount.annotations
+# 로 이 역할 ARN(eks.amazonaws.com/role-arn)을 붙여 IRSA 로 자격증명을 받는다(agent 불필요).
 
 # helm_release.lb_controller 와 TargetGroupBinding(null_resource.book_tgb) 는
 # ./k8s 스테이지(k8s/main.tf)로 이동했다. root 에는 위의 IAM/PodIdentity 만 남긴다.

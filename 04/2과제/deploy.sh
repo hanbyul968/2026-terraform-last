@@ -1,60 +1,60 @@
 #!/bin/bash
 # =============================================================================
-# 2과제(04) 배포 오케스트레이션 — Bastion(Linux)에서 실행: bash /opt/task2/deploy.sh
-#   module1 EKS Scaling(ap-ne-2) → module2 VPC Lattice(ap-se-1)
-#   → module3 Container logging(ap-ne-1) → module4 REST API(us-east-1)
+# 2과제(04) 배포 오케스트레이션 — Bastion(Linux)에서 실행:
+#     bash /opt/task2/deploy.sh [비번호]
+#
+#   1) module1        : EKS Scaling 인프라 wsc-scaling-cluster (ap-northeast-2)
+#   2) (wsc-scaling-cluster ACTIVE 대기)
+#   3) module1/k8s    : KEDA / Karpenter / Deployment / ScaledObject (helm+kubectl provider)
+#   4) module2        : VPC Lattice (ap-southeast-1) — app EC2 는 flask 자동 기동
+#   5) module3        : Container logging (ap-northeast-1)
+#                       ※ EKS 생성 후 app EC2(wsc-logging-app-bastion)가 ec2-bootstrap.sh 로
+#                          도커 컨테이너(wsc-log-app)+Loki/Grafana(helm)+Fluent Bit 을 자동 구성.
+#   6) module4        : REST API (us-east-1) — 순수 서버리스(로컬에서도 apply 가능)
 # =============================================================================
-set -euo pipefail
+exec > >(tee -a /var/log/task2-deploy.log) 2>&1
+set -u
 ROOT=/opt/task2
-cd "$ROOT"
+NM="${1:-${COMPETITOR_NUMBER:-00}}"
+SCALING_REGION=ap-northeast-2
+SCALING_CLUSTER=wsc-scaling-cluster
+
+run_tf () {
+  dir="$1"; shift
+  echo "----- terraform apply: $dir -----"
+  if ( cd "$ROOT/$dir" && terraform init -input=false && terraform apply -auto-approve "$@" ); then
+    echo "OK: $dir"
+  else
+    echo "FAIL: $dir (계속 진행)"
+  fi
+}
 
 echo "===== module1: EKS Scaling (ap-northeast-2) ====="
-cd "$ROOT/module1"
-terraform init -input=false
-terraform apply -auto-approve
-REGION=ap-northeast-2
-CLUSTER=wsc-scaling-cluster
-aws eks update-kubeconfig --name "$CLUSTER" --region "$REGION"
-KEDA_ROLE=$(terraform output -raw keda_irsa_role_arn)
-SQS_URL=$(terraform output -raw sqs_queue_url)
+run_tf module1
 
-helm repo add kedacore https://kedacore.github.io/charts >/dev/null 2>&1 || true
-helm repo update >/dev/null
-helm upgrade --install keda kedacore/keda -n keda --create-namespace \
-  --set "serviceAccount.operator.annotations.eks\.amazonaws\.com/role-arn=$KEDA_ROLE"
+echo "===== wsc-scaling-cluster ACTIVE 대기 ====="
+for i in $(seq 1 90); do
+  ST=$(aws eks describe-cluster --name "$SCALING_CLUSTER" --region "$SCALING_REGION" \
+        --query "cluster.status" --output text 2>/dev/null || true)
+  echo "status: $ST"
+  [ "$ST" = "ACTIVE" ] && break
+  sleep 20
+done
 
-KARP_ROLE=$(terraform output -raw karpenter_irsa_role_arn)
-KARP_NODE_ROLE=$(terraform output -raw karpenter_node_role_name)
-helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter -n kube-system \
-  --set "settings.clusterName=$CLUSTER" \
-  --set "serviceAccount.annotations.eks\.amazonaws\.com/role-arn=$KARP_ROLE" || \
-  echo "WARN: karpenter helm install needs a version pin; see manifest/karpenter.yaml"
-
-kubectl create namespace wsc-scaling --dry-run=client -o yaml | kubectl apply -f -
-kubectl apply -f "$ROOT/module1/manifest/deployment.yaml"
-sed "s|__SQS_URL__|$SQS_URL|g; s|__REGION__|$REGION|g" "$ROOT/module1/manifest/scaledobject.yaml" | kubectl apply -f -
-sed "s|__NODE_ROLE__|$KARP_NODE_ROLE|g; s|__CLUSTER__|$CLUSTER|g" "$ROOT/module1/manifest/karpenter.yaml" | kubectl apply -f - || true
+echo "===== module1/k8s: KEDA / Karpenter / Deployment / ScaledObject ====="
+run_tf module1/k8s
 
 echo "===== module2: VPC Lattice (ap-southeast-1) ====="
-cd "$ROOT/module2"
-terraform init -input=false
-terraform apply -auto-approve
+run_tf module2
 
 echo "===== module3: Container logging (ap-northeast-1) ====="
-cd "$ROOT/module3"
-terraform init -input=false
-terraform apply -auto-approve
-aws eks update-kubeconfig --name wsc-logging-cluster --region ap-northeast-1
-helm repo add grafana https://grafana.github.io/helm-charts >/dev/null 2>&1 || true
-helm repo update >/dev/null
-kubectl create namespace wsc-logging --dry-run=client -o yaml | kubectl apply -f -
-helm upgrade --install loki grafana/loki -n wsc-logging -f "$ROOT/module3/manifest/loki-values.yaml"
-helm upgrade --install grafana grafana/grafana -n wsc-logging -f "$ROOT/module3/manifest/grafana-values.yaml"
-echo "NOTE: app EC2(wsc-logging-app-bastion) docker flask + Fluent Bit 은 Loki NLB 주소 확인 후 SSM 으로 기동"
+run_tf module3 -var="competitor_number=$NM"
+echo "NOTE: module3 의 컨테이너(wsc-log-app)/Loki/Grafana/Fluent Bit 은 app EC2"
+echo "      (wsc-logging-app-bastion)가 ec2-bootstrap.sh 로 자동 구성한다."
+echo "      진행 확인: 해당 EC2 에 SSM 접속 후  cat /opt/ec2_ready.txt , cat /tmp/m3_setup_done.txt"
 
 echo "===== module4: REST API (us-east-1) ====="
-cd "$ROOT/module4"
-terraform init -input=false
-terraform apply -auto-approve
+run_tf module4
 
 echo "===== ALL MODULES APPLIED ====="
+echo "NOTE: Grafana admin = wsc2026-admin-$NM / admin$NM!  (module3)"

@@ -49,6 +49,7 @@ locals {
 }
 
 resource "aws_cloudfront_distribution" "this" {
+  count               = var.deploy_cdn ? 1 : 0
   enabled             = true
   is_ipv6_enabled     = true
   price_class         = "PriceClass_All"
@@ -66,7 +67,7 @@ resource "aws_cloudfront_distribution" "this" {
 
   # ── Origin 2: ALB (book 앱 POST) ──
   origin {
-    domain_name = data.aws_lb.app.dns_name
+    domain_name = data.aws_lb.app[0].dns_name
     origin_id   = "alb-app"
     custom_origin_config {
       http_port              = 80

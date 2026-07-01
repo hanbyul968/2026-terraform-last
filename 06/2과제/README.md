@@ -21,7 +21,62 @@
 
 ---
 
+## 🧭 로컬 apply vs Bastion — 모듈별 배포 위치
+
+| 모듈 | 로컬(Windows) 직접 apply | Bastion 필요 | 이유 |
+|------|:---:|:---:|------|
+| **module1** NoSQL | ✅ 가능 | — | 순수 Terraform (DynamoDB/Lambda/EC2). EC2 user_data 가 앱을 자동 기동 — **Linux 전용 provisioner 없음** |
+| **module2** CDN Function | ✅ 가능 | — | VPC 없는 순수 서버리스(S3/CloudFront/Functions/KVS). **로컬 apply 로 전부 생성됨** |
+| **module3** EKS Scaling | ❌ | ✅ 필요 | `docker build/push` + `kubectl`/`helm` (KEDA·Karpenter) 필요 |
+| **module4** Container Logging | ❌ | ✅ 필요 | `docker build/push` + `helm`(Loki/Grafana/ALB Ctrl) + `kubectl` 필요 |
+
+> **module1·module2** 는 Docker/kubectl 없이 Windows PowerShell 에서 바로 `terraform apply` 하면 됩니다(아래 개별 실행법).
+> **module3·module4** 는 in-VPC 도구가 필요하므로 아래 **2단계 Bastion 배포**로 처리합니다.
+> (Bastion `deploy.sh` 는 4개 모듈 전체를 순서대로 돌리므로, 전체를 한 번에 배포할 때도 Bastion 경로를 쓰면 됩니다.)
+
+---
+
+## 🏗️ 2단계 Bastion 배포 (권장 · 전체 자동)
+
+`docker`·`kubectl`·`helm` 이 없는 로컬 환경에서도 4개 모듈 전체를 배포할 수 있도록, `bastion/` 을
+**로컬에서 apply → Linux Bastion 안에서 `deploy.sh` 실행**하는 2단계 구조를 제공합니다.
+
+```powershell
+# ── 1단계 (로컬 Windows PowerShell): Bastion 생성 ──────────────────
+cd "C:\Users\competitor\2026-terraform\06\2과제\bastion"
+terraform init
+terraform apply -var="competitor_number=<선수등번호>"
+#   (선택) -var="player_id=<비번호>"  → Bastion 리소스/부트스트랩 버킷 이름 접두어
+
+# 접속 명령 출력
+terraform output ssm_connect_command
+#   예) aws ssm start-session --target i-xxxxxxxx --region ap-northeast-2
+```
+
+```bash
+# ── 2단계 (Bastion 접속 후): 전체 모듈 배포 ───────────────────────
+# 1) 위 ssm_connect_command 로 접속
+
+# 2) 부트스트랩 완료 대기 (READY 마커, 보통 2~3분)
+until [ -f /opt/task2/READY ]; do echo waiting...; sleep 5; done
+
+# 3) module1~4 + k8s 워크로드(KEDA/Karpenter/Loki/Grafana/OTel) 한 번에 배포
+sudo bash /opt/task2/deploy.sh <선수등번호>
+```
+
+- Bastion 은 **전용 VPC(`10.250.0.0/16`)** 에 뜨며, SSM(아웃바운드 443)만 사용 — 인바운드 0개.
+- 인스턴스 역할은 `AmazonSSMManagedInstanceCore` + `AdministratorAccess`(대회 계정 한정) 로 멀티리전 apply 수행.
+- **채점 직전(★)**: 로컬에서 Bastion 만 제거 → `cd bastion; terraform destroy -auto-approve`
+  (Bastion state 는 각 모듈 state 와 완전히 분리되어 채점 대상엔 영향 없음)
+- ⚠️ 채점자 CloudShell 의 EKS 접근 권한은 아래 **[채점자 EKS 접근 권한 설정]** 섹션 참고(필수).
+
+---
+
 ## 🚀 All-in-One 배포 (apply 한 번에 1~4 모듈 전부)
+
+> ℹ️ 이 루트 오케스트레이터(`main.tf`)는 `local-exec` 가 **`/bin/bash` 로 변환**되어 있어
+> **Linux Bastion 안**에서 실행하는 대안 경로입니다. 위 `deploy.sh` 와 동일한 순서/결과이며,
+> 표준 경로는 **`deploy.sh`** 입니다. (Windows 로컬에서 이 루트를 apply 하지 마세요.)
 
 최상위 디렉터리(`2과제/`)에 **오케스트레이터 루트**(`main.tf`)가 있습니다.
 여기서 `terraform apply` **한 번**이면 module1~4 를 순서대로 `init + apply` 하고,

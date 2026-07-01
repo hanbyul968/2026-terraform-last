@@ -5,7 +5,10 @@ terraform {
   }
 }
 
-# 2-3 Cloud event handling — eu-west-1
+# 2-3 Cloud Event Handling — eu-west-1
+# 문제지 기준: 보안/비용 위협 API 이벤트 발생 시 원래 상태로 복구하거나 관리자에게 알림.
+#   VPC(event-vpc) + EC2 + SNS + 단일 Lambda + CloudTrail(Mgmt R/W) +
+#   EventBridge 4 rules(sg-change / role-change / ec2-terminate / ec2-type-change).
 provider "aws" {
   region = "eu-west-1"
 }
@@ -54,7 +57,7 @@ resource "aws_route_table_association" "pub_b" {
   route_table_id = aws_route_table.pub.id
 }
 
-# ── EC2 (monitored) ──────────────────────────────────────────────────
+# ── EC2 (monitored) — wsc2026-event-ec2, event-pub-a ─────────────────
 data "aws_ami" "al2023" {
   most_recent = true
   owners      = ["amazon"]
@@ -84,7 +87,7 @@ resource "aws_iam_instance_profile" "ec2" {
 }
 resource "aws_security_group" "ec2" {
   name        = "wsc2026-event-sg"
-  description = "minimal"
+  description = "minimal - egress only"
   vpc_id      = aws_vpc.main.id
   egress {
     from_port   = 0
@@ -103,12 +106,14 @@ resource "aws_instance" "ec2" {
   tags                   = { Name = "wsc2026-event-ec2" }
 }
 
-# ── SNS ──────────────────────────────────────────────────────────────
+# ── SNS wsc2026-event-alert ──────────────────────────────────────────
 resource "aws_sns_topic" "alert" {
   name = "wsc2026-event-alert"
 }
 
-# ── Lambda (remediate + notify) ──────────────────────────────────────
+# ── Lambda (auto-recovery + SNS alert) — 단일 함수 ───────────────────
+# 문제지: "Lambda: auto-recovery + SNS alert; Role Name=wsc2026-event-lambda-role".
+# 4개 EventBridge Rule 이 공통으로 이 Lambda 를 target 으로 호출한다.
 resource "aws_iam_role" "lambda" {
   name = "wsc2026-event-lambda-role"
   assume_role_policy = jsonencode({
@@ -117,40 +122,42 @@ resource "aws_iam_role" "lambda" {
   })
 }
 resource "aws_iam_role_policy" "lambda" {
-  name = "remediate-min"
+  name = "event-recover-min"
   role = aws_iam_role.lambda.id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      { Effect = "Allow", Action = ["ec2:RevokeSecurityGroupIngress", "ec2:DescribeSecurityGroups"], Resource = "*" },
+      { Effect = "Allow", Action = ["ec2:RevokeSecurityGroupIngress", "ec2:DescribeSecurityGroups", "ec2:DescribeInstances", "ec2:StartInstances"], Resource = "*" },
       { Effect = "Allow", Action = ["sns:Publish"], Resource = aws_sns_topic.alert.arn },
       { Effect = "Allow", Action = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"], Resource = "arn:aws:logs:*:*:*" }
     ]
   })
 }
+
 data "archive_file" "lambda" {
   type        = "zip"
   source_dir  = "${path.module}/lambda"
-  output_path = "${path.module}/handler.zip"
+  output_path = "${path.module}/event_lambda.zip"
 }
-resource "aws_lambda_function" "remediate" {
-  function_name    = "wsc2026-event-remediator"
+
+resource "aws_lambda_function" "event" {
+  function_name    = "wsc2026-event-lambda"
   role             = aws_iam_role.lambda.arn
-  handler          = "handler.lambda_handler"
-  runtime          = "python3.14"
+  handler          = "index.handler"
+  runtime          = "python3.12"
   filename         = data.archive_file.lambda.output_path
   source_code_hash = data.archive_file.lambda.output_base64sha256
   timeout          = 30
-  environment { variables = { TOPIC_ARN = aws_sns_topic.alert.arn } }
-}
-resource "aws_lambda_permission" "events" {
-  statement_id  = "AllowEventBridge"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.remediate.function_name
-  principal     = "events.amazonaws.com"
+  environment {
+    variables = {
+      SNS_TOPIC_ARN     = aws_sns_topic.alert.arn
+      INSTANCE_ID       = aws_instance.ec2.id
+      SECURITY_GROUP_ID = aws_security_group.ec2.id
+    }
+  }
 }
 
-# ── CloudTrail (R/W management events) ───────────────────────────────
+# ── CloudTrail wsc2026-event-trail (Management R/W) ──────────────────
 resource "aws_s3_bucket" "trail" {
   bucket        = "wsc2026-event-trail-${data.aws_caller_identity.current.account_id}"
   force_destroy = true
@@ -189,6 +196,7 @@ resource "aws_cloudtrail" "main" {
   s3_bucket_name                = aws_s3_bucket.trail.id
   include_global_service_events = true
   is_multi_region_trail         = false
+  # Management Events = Read/Write (EventBridge 가 API 호출을 감지할 수 있도록)
   event_selector {
     read_write_type           = "All"
     include_management_events = true
@@ -196,29 +204,101 @@ resource "aws_cloudtrail" "main" {
   depends_on = [aws_s3_bucket_policy.trail]
 }
 
-# ── EventBridge rules (4) ────────────────────────────────────────────
-locals {
-  rules = {
-    "wsc2026-sg-change-rule"       = ["AuthorizeSecurityGroupIngress"]
-    "wsc2026-role-change-rule"     = ["AssociateIamInstanceProfile", "ReplaceIamInstanceProfileAssociation"]
-    "wsc2026-ec2-terminate-rule"   = ["TerminateInstances"]
-    "wsc2026-ec2-type-change-rule" = ["ModifyInstanceAttribute"]
-  }
-}
-resource "aws_cloudwatch_event_rule" "r" {
-  for_each = local.rules
-  name     = each.key
+# ── EventBridge Rules (각 규칙이 API 이벤트 감지 -> Lambda 호출) ──────
+# 1) SG 인바운드 규칙 추가
+resource "aws_cloudwatch_event_rule" "sg_change" {
+  name = "wsc2026-sg-change-rule"
   event_pattern = jsonencode({
     source      = ["aws.ec2"]
     detail-type = ["AWS API Call via CloudTrail"]
-    detail      = { eventName = each.value }
+    detail = {
+      eventSource = ["ec2.amazonaws.com"]
+      eventName   = ["AuthorizeSecurityGroupIngress"]
+    }
   })
 }
-resource "aws_cloudwatch_event_target" "r" {
-  for_each = local.rules
-  rule     = aws_cloudwatch_event_rule.r[each.key].name
-  arn      = aws_lambda_function.remediate.arn
+resource "aws_cloudwatch_event_target" "sg_change" {
+  rule = aws_cloudwatch_event_rule.sg_change.name
+  arn  = aws_lambda_function.event.arn
+}
+
+# 2) EC2 IAM Role 변경
+resource "aws_cloudwatch_event_rule" "role_change" {
+  name = "wsc2026-role-change-rule"
+  event_pattern = jsonencode({
+    source      = ["aws.ec2"]
+    detail-type = ["AWS API Call via CloudTrail"]
+    detail = {
+      eventSource = ["ec2.amazonaws.com"]
+      eventName   = ["AssociateIamInstanceProfile", "ReplaceIamInstanceProfileAssociation", "DisassociateIamInstanceProfile"]
+    }
+  })
+}
+resource "aws_cloudwatch_event_target" "role_change" {
+  rule = aws_cloudwatch_event_rule.role_change.name
+  arn  = aws_lambda_function.event.arn
+}
+
+# 3) EC2 인스턴스 종료
+resource "aws_cloudwatch_event_rule" "ec2_terminate" {
+  name = "wsc2026-ec2-terminate-rule"
+  event_pattern = jsonencode({
+    source      = ["aws.ec2"]
+    detail-type = ["AWS API Call via CloudTrail"]
+    detail = {
+      eventSource = ["ec2.amazonaws.com"]
+      eventName   = ["TerminateInstances"]
+    }
+  })
+}
+resource "aws_cloudwatch_event_target" "ec2_terminate" {
+  rule = aws_cloudwatch_event_rule.ec2_terminate.name
+  arn  = aws_lambda_function.event.arn
+}
+
+# 4) EC2 인스턴스 타입 변경
+resource "aws_cloudwatch_event_rule" "ec2_type_change" {
+  name = "wsc2026-ec2-type-change-rule"
+  event_pattern = jsonencode({
+    source      = ["aws.ec2"]
+    detail-type = ["AWS API Call via CloudTrail"]
+    detail = {
+      eventSource = ["ec2.amazonaws.com"]
+      eventName   = ["ModifyInstanceAttribute"]
+    }
+  })
+}
+resource "aws_cloudwatch_event_target" "ec2_type_change" {
+  rule = aws_cloudwatch_event_rule.ec2_type_change.name
+  arn  = aws_lambda_function.event.arn
+}
+
+# ── Lambda invoke permissions (rule 별) ──────────────────────────────
+locals {
+  event_rules = {
+    sg_change       = aws_cloudwatch_event_rule.sg_change.arn
+    role_change     = aws_cloudwatch_event_rule.role_change.arn
+    ec2_terminate   = aws_cloudwatch_event_rule.ec2_terminate.arn
+    ec2_type_change = aws_cloudwatch_event_rule.ec2_type_change.arn
+  }
+}
+resource "aws_lambda_permission" "events" {
+  for_each      = local.event_rules
+  statement_id  = "AllowEventBridge-${each.key}"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.event.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = each.value
 }
 
 output "sns_topic" { value = aws_sns_topic.alert.arn }
 output "trail_bucket" { value = aws_s3_bucket.trail.id }
+output "lambda_function" { value = aws_lambda_function.event.function_name }
+output "event_rules" {
+  value = [
+    aws_cloudwatch_event_rule.sg_change.name,
+    aws_cloudwatch_event_rule.role_change.name,
+    aws_cloudwatch_event_rule.ec2_terminate.name,
+    aws_cloudwatch_event_rule.ec2_type_change.name,
+  ]
+}

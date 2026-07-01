@@ -34,6 +34,6 @@ output "ecs_cluster_name" {
 }
 
 output "vpc_id" {
-  description = "생성된 VPC ID"
-  value       = aws_vpc.main.id
+  description = "조회된 VPC ID (bastion 스테이지가 생성)"
+  value       = data.aws_vpc.main.id
 }

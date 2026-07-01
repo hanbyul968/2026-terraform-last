@@ -1,7 +1,7 @@
 # aws-for-fluent-bit values
 # 이미지: ECR pull-through cache 경유 (노드 인터넷 없음)
 
-# DaemonSet 이름을 정확히 "fluent-bit" 로 고정 (과제10 DaemonSet Name, 채점 12-1-C:
+# DaemonSet 이름을 정확히 "fluent-bit" 로 고정 (과제10 DaemonSet Name, 채점:
 # `kubectl rollout restart daemonset fluent-bit`). override 없으면 chart fullname 이
 # "fluent-bit-aws-for-fluent-bit" 가 되어 채점 명령과 불일치한다.
 fullnameOverride: fluent-bit
@@ -18,40 +18,29 @@ serviceAccount:
 tolerations:
   - operator: Exists
 
-# app 컨테이너 로그만, /health 요청 라인은 제외
+# kubernetes filter + /health 제외 grep 필터.
+# 중요: aws-for-fluent-bit chart 는 커스텀 [FILTER] 를 반드시 filter.extraFilters 아래에서만
+#       렌더한다. top-level extraFilters 는 무시되어 /health 제외가 적용되지 않는다(라이브 버그 원인).
 filter:
   enabled: true
+  # 클러스터 도메인이 wsc.local 로 바뀌어 기본 FQDN(kubernetes.default.svc.cluster.local)이
+  # 해석 안 돼 kubernetes filter 가 크래시한다. 검색 도메인으로 풀리는 짧은 이름을 쓴다.
+  kubeURL: https://kubernetes.default.svc:443
+  # /health 가 포함된 라인 제외 (채점 11-2-B: /health 이벤트 0, 11-2-A: /v1/book 이벤트 >0).
+  # kubernetes filter 는 Keep_Log On 이라 원본 라인이 log 필드에 남아 grep 이 매칭된다.
+  extraFilters: |
+    [FILTER]
+        Name    grep
+        Match   *
+        Exclude log /health
 
-# 커스텀 파서/필터로 /health 제외 후 CloudWatch 전송
 input:
   enabled: true
 
+# CloudWatch 전송(기본 OUTPUT, Match *). grep 으로 /health 를 이미 걸러낸 뒤 전송된다.
 cloudWatchLogs:
   enabled: true
   region: ${region}
   logGroupName: ${log_group}
   logStreamPrefix: "app-"
   autoCreateGroup: false
-
-# /health 로그 제외 + app 로그만 보내기 위한 추가 설정
-extraOutputs: |
-  [OUTPUT]
-      Name                cloudwatch_logs
-      Match               app.*
-      region              ${region}
-      log_group_name      ${log_group}
-      log_stream_name     ${log_stream}
-      auto_create_group   false
-
-# /health 가 포함된 라인 제외 (채점 12-1-B)
-service: |
-  [SERVICE]
-      Parsers_File   /fluent-bit/parsers/parsers.conf
-      Flush          5
-      Grace          30
-
-extraFilters: |
-  [FILTER]
-      Name    grep
-      Match   *
-      Exclude log /health

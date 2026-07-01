@@ -15,36 +15,9 @@
 
 data "aws_caller_identity" "current" {}
 
-# ---- 기본 VPC / 서브넷 사용 (main VPC와 무관) ----
-# ---- Bastion 전용 VPC (이 계정엔 default VPC 가 없음) ----
-resource "aws_vpc" "bn" {
-  cidr_block           = "10.250.0.0/16"
-  enable_dns_support   = true
-  enable_dns_hostnames = true
-  tags                 = { Name = "task-bastion-vpc" }
-}
-resource "aws_internet_gateway" "bn" {
-  vpc_id = aws_vpc.bn.id
-  tags   = { Name = "task-bastion-igw" }
-}
-resource "aws_subnet" "bn" {
-  vpc_id                  = aws_vpc.bn.id
-  cidr_block              = "10.250.0.0/24"
-  map_public_ip_on_launch = true
-  tags                    = { Name = "task-bastion-subnet" }
-}
-resource "aws_route_table" "bn" {
-  vpc_id = aws_vpc.bn.id
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.bn.id
-  }
-  tags = { Name = "task-bastion-rt" }
-}
-resource "aws_route_table_association" "bn" {
-  subnet_id      = aws_subnet.bn.id
-  route_table_id = aws_route_table.bn.id
-}
+# ---- 진짜 VPC / 서브넷 / IGW / 라우팅은 network.tf 에서 이 스테이지가 생성한다 ----
+#   Bastion 은 진짜 퍼블릭 서브넷(aws_subnet.public[0])에 위치하고, 진짜 VPC(aws_vpc.main)
+#   의 SG 를 사용한다. root(ECS)는 이 네트워크를 data.* 로 조회만 한다.
 
 # ---- 최신 Amazon Linux 2023 AMI ----
 data "aws_ami" "al2023" {
@@ -146,7 +119,7 @@ resource "aws_iam_instance_profile" "bastion" {
 resource "aws_security_group" "bastion" {
   name        = "${var.player_id}-bastion-sg"
   description = "Bastion SG - no inbound, SSM via outbound 443 only"
-  vpc_id      = aws_vpc.bn.id
+  vpc_id      = aws_vpc.main.id
 
   egress {
     description = "All outbound (SSM, ECR, docker pull, etc)"
@@ -172,11 +145,12 @@ locals {
 }
 
 resource "aws_instance" "bastion" {
-  ami                    = data.aws_ami.al2023.id
-  instance_type          = var.instance_type
-  subnet_id              = aws_subnet.bn.id
-  iam_instance_profile   = aws_iam_instance_profile.bastion.name
-  vpc_security_group_ids = [aws_security_group.bastion.id]
+  ami                         = data.aws_ami.al2023.id
+  instance_type               = var.instance_type
+  subnet_id                   = aws_subnet.public[0].id
+  iam_instance_profile        = aws_iam_instance_profile.bastion.name
+  vpc_security_group_ids      = [aws_security_group.bastion.id]
+  associate_public_ip_address = true
 
   # 번들 내용이 바뀌면 user_data 해시가 바뀌어 인스턴스가 교체된다.
   user_data = local.user_data
@@ -195,5 +169,5 @@ resource "aws_instance" "bastion" {
     Name = "${var.player_id}-bastion"
   }
 
-  depends_on = [aws_s3_object.task1_bundle]
+  depends_on = [aws_s3_object.task1_bundle, aws_route_table_association.public]
 }

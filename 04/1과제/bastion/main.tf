@@ -1,49 +1,26 @@
 # =============================================================================
-# 1단계 (로컬 Windows PowerShell에서 apply) - 배포용 Bastion EC2
-#   - 목적: Windows 로컬 대신 Linux Bastion 안에서 main(루트 1과제) terraform apply
-#           + docker build/push 를 수행한다. (로컬에 Docker 불필요)
-#   - 접속: SSM Session Manager (SSH 키/인바운드 불필요)
-#   - 권한: 인스턴스 프로파일(AdministratorAccess)로 terraform 자격증명 자동 사용
-#   - 자동화: 루트(../) 1과제 코드(files/book 포함)를 zip 으로 묶어 부트스트랩 S3 에
-#            업로드 → user_data 가 내려받아 /opt/task1 에 준비. SSM 접속 후
-#            `bash /opt/task1/run.sh` 한 줄로 main 인프라가 배포된다.
+# 1단계 (로컬 Windows PowerShell에서 apply) - 네트워크 기반 + 통합 Bastion
+#   - 이 스테이지가 진짜 wsc-vpc / 서브넷 / IGW / NAT / 라우팅을 생성하고(network.tf),
+#     그 안의 wsc-public-a(진짜 퍼블릭 서브넷)에 "통합 Bastion"(wsc-bastion)을 띄운다.
+#   - 통합 Bastion 은 두 역할을 겸한다:
+#       (1) 과제 5 채점 대상 Bastion : Name=wsc-bastion, EIP, SSH(22) 비번(Skill53##),
+#           AdministratorAccess, kubectl/eksctl/sshpass 설치.
+#       (2) 배포용 Bastion : root(../) 1과제 코드를 zip 으로 묶어 부트스트랩 S3 에 업로드 →
+#           user_data 가 내려받아 /opt/task1 준비. SSH/SSM 접속 후
+#           `bash /opt/task1/run.sh` 한 줄로 root 인프라(EKS/ALB/S3/...)가 배포된다.
+#   - 접속: SSH(비번) 또는 SSM Session Manager 둘 다 가능.
+#   - 덕분에 Bastion 이 클러스터와 "같은 VPC" 라, EKS private-only 전환 후에도
+#     kubectl/포트포워딩이 계속 동작한다(채점 kubectl/브라우저 접속 포함).
 #
-# ※ 이 폴더(state)는 루트(main)와 분리되어 있다. 채점 전 이 폴더에서만
-#   `terraform destroy` 하면 Bastion(+부트스트랩 버킷)만 제거된다.
+# ※ 이 스테이지가 VPC 를 소유하므로, 채점 전에 이 스테이지를 destroy 하면 안 된다.
+#   destroy 순서: 먼저 bastion 안에서 root(/opt/task1, /opt/task1/k8s) destroy →
+#   그 다음 이 폴더(1단계)를 destroy.
 # =============================================================================
 
 data "aws_caller_identity" "current" {}
 
-# ---- 기본 VPC / 서브넷 사용 (채점 대상 VPC와 무관) ----
-# ---- Bastion 전용 VPC (이 계정엔 default VPC 가 없음) ----
-resource "aws_vpc" "bn" {
-  cidr_block           = "10.250.0.0/16"
-  enable_dns_support   = true
-  enable_dns_hostnames = true
-  tags                 = { Name = "task-bastion-vpc" }
-}
-resource "aws_internet_gateway" "bn" {
-  vpc_id = aws_vpc.bn.id
-  tags   = { Name = "task-bastion-igw" }
-}
-resource "aws_subnet" "bn" {
-  vpc_id                  = aws_vpc.bn.id
-  cidr_block              = "10.250.0.0/24"
-  map_public_ip_on_launch = true
-  tags                    = { Name = "task-bastion-subnet" }
-}
-resource "aws_route_table" "bn" {
-  vpc_id = aws_vpc.bn.id
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.bn.id
-  }
-  tags = { Name = "task-bastion-rt" }
-}
-resource "aws_route_table_association" "bn" {
-  subnet_id      = aws_subnet.bn.id
-  route_table_id = aws_route_table.bn.id
-}
+# ---- 네트워크(wsc-vpc/서브넷/IGW/NAT/RT)는 network.tf 에서 생성 ----
+#   bastion 은 wsc-public-a(퍼블릭)에 위치하므로 EKS private-only 전환 후에도 접근 가능.
 
 # ---- 최신 Amazon Linux 2023 AMI ----
 data "aws_ami" "al2023" {
@@ -107,7 +84,8 @@ resource "aws_s3_object" "task1_bundle" {
   etag   = data.archive_file.task1.output_md5
 }
 
-# ---- IAM Role + Instance Profile (SSM + 배포 권한) ----
+# ---- IAM Role + Instance Profile (SSM + 배포(Admin) 권한) ----
+#   이름은 과제 5 채점용 통합 Bastion 이므로 wsc-bastion-* 로 통일한다.
 data "aws_iam_policy_document" "ec2_assume" {
   statement {
     actions = ["sts:AssumeRole"]
@@ -119,7 +97,7 @@ data "aws_iam_policy_document" "ec2_assume" {
 }
 
 resource "aws_iam_role" "bastion" {
-  name               = "${var.player_id}-task1-bastion-role"
+  name               = "wsc-bastion-role"
   assume_role_policy = data.aws_iam_policy_document.ec2_assume.json
 }
 
@@ -136,15 +114,23 @@ resource "aws_iam_role_policy_attachment" "admin" {
 }
 
 resource "aws_iam_instance_profile" "bastion" {
-  name = "${var.player_id}-task1-bastion-profile"
+  name = "wsc-bastion-profile"
   role = aws_iam_role.bastion.name
 }
 
-# ---- 보안 그룹: 인바운드 0개 (SSM 은 아웃바운드 443만 사용) ----
+# ---- 보안 그룹: 진짜 wsc-vpc 안. SSH(22) 인바운드 허용(과제 5) + 전체 아웃바운드 ----
 resource "aws_security_group" "bastion" {
-  name        = "${var.player_id}-task1-bastion-sg"
-  description = "Bastion SG - no inbound, SSM via outbound 443 only"
-  vpc_id      = aws_vpc.bn.id
+  name        = "wsc-bastion-sg"
+  description = "Bastion SG - SSH(22) inbound + all outbound (SSM, ECR, docker, EKS API, helm)"
+  vpc_id      = aws_vpc.this.id
+
+  ingress {
+    description = "SSH from anywhere (grading uses sshpass)"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 
   egress {
     description = "All outbound (SSM, ECR, docker pull, EKS API, helm charts)"
@@ -154,31 +140,34 @@ resource "aws_security_group" "bastion" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = { Name = "${var.player_id}-task1-bastion-sg" }
+  tags = { Name = "wsc-bastion-sg" }
 }
 
-# ---- user_data: 도구 설치 + 코드 번들 자동 준비 ----
+# ---- user_data: SSH 비번 설정 + 도구 설치 + 코드 번들 자동 준비 ----
 locals {
   user_data = templatefile("${path.module}/userdata.sh.tpl", {
-    bucket    = aws_s3_bucket.bootstrap.id
-    key       = aws_s3_object.task1_bundle.key
-    region    = var.region
-    player_id = var.player_id
+    bucket       = aws_s3_bucket.bootstrap.id
+    key          = aws_s3_object.task1_bundle.key
+    region       = var.region
+    player_id    = var.player_id
+    ssh_password = var.ssh_password
+    cluster_name = local.cluster_name
   })
 }
 
 resource "aws_instance" "bastion" {
-  ami                    = data.aws_ami.al2023.id
-  instance_type          = var.instance_type
-  subnet_id              = aws_subnet.bn.id
-  iam_instance_profile   = aws_iam_instance_profile.bastion.name
-  vpc_security_group_ids = [aws_security_group.bastion.id]
+  ami                         = data.aws_ami.al2023.id
+  instance_type               = var.instance_type
+  subnet_id                   = aws_subnet.public_a.id
+  iam_instance_profile        = aws_iam_instance_profile.bastion.name
+  vpc_security_group_ids      = [aws_security_group.bastion.id]
+  associate_public_ip_address = true
 
   # 번들 내용이 바뀌면 user_data 해시가 바뀌어 인스턴스가 교체된다.
   user_data = local.user_data
 
   metadata_options {
-    http_tokens   = "required" # IMDSv2 강제
+    http_tokens   = "optional"
     http_endpoint = "enabled"
   }
 
@@ -187,7 +176,14 @@ resource "aws_instance" "bastion" {
     volume_type = "gp3"
   }
 
-  tags = { Name = "${var.player_id}-task1-bastion" }
+  tags = { Name = "wsc-bastion" }
 
-  depends_on = [aws_s3_object.task1_bundle]
+  depends_on = [aws_s3_object.task1_bundle, aws_route_table_association.public_a]
+}
+
+# 재시작해도 IP 고정 (과제 5) — Elastic IP
+resource "aws_eip" "bastion" {
+  instance = aws_instance.bastion.id
+  domain   = "vpc"
+  tags     = { Name = "wsc-bastion-eip" }
 }

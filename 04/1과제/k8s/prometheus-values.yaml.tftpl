@@ -23,7 +23,8 @@ alertmanager:
 prometheus-node-exporter:
   # node-exporter 는 모든 노드에서 수집해야 하므로 DaemonSet 그대로
   image:
-    repository: ${registry}/quay/prometheus/node-exporter
+    registry: ${registry}
+    repository: quay/prometheus/node-exporter
   tolerations:
     - operator: Exists
 
@@ -31,7 +32,7 @@ kube-state-metrics:
   nodeSelector:
     type: monitoring
   image:
-    registry: ${registry}/ecr-public
+    registry: ${registry}/k8s
     repository: kube-state-metrics/kube-state-metrics
 
 pushgateway:

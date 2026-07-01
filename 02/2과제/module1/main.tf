@@ -72,18 +72,23 @@ resource "aws_iam_role_policy" "lambda" {
 
 data "archive_file" "lambda" {
   type        = "zip"
-  source_dir  = "${path.module}/lambda"
+  source_dir  = "${path.module}/src"
   output_path = "${path.module}/score.zip"
 }
 resource "aws_lambda_function" "score" {
-  function_name    = "wsc2026-student-score-processor"
+  function_name    = "wsc2026-student-score-function"
   role             = aws_iam_role.lambda.arn
-  handler          = "score.lambda_handler"
-  runtime          = "python3.14"
+  handler          = "lambda_function.lambda_handler"
+  runtime          = "python3.12"
   filename         = data.archive_file.lambda.output_path
   source_code_hash = data.archive_file.lambda.output_base64sha256
   timeout          = 60
-  environment { variables = { TABLE_NAME = aws_dynamodb_table.score.name } }
+  environment {
+    variables = {
+      S3_BUCKET = aws_s3_bucket.score.id
+      DDB_TABLE = aws_dynamodb_table.score.name
+    }
+  }
 }
 
 # ── Step Functions ───────────────────────────────────────────────────

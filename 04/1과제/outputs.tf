@@ -1,7 +1,5 @@
-output "bastion_public_ip" {
-  description = "Bastion EIP (SSH 접속)"
-  value       = aws_eip.bastion.public_ip
-}
+# NOTE: Bastion(wsc-bastion) 은 1단계(bastion 스테이지)로 이동했다.
+#   Bastion EIP/SSH 정보는 bastion/ 스테이지의 output(bastion_public_ip 등)을 참조한다.
 
 output "cloudfront_domain" {
   description = "CloudFront 도메인 (채점 진입점)"

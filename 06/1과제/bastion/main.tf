@@ -14,36 +14,9 @@
 
 data "aws_caller_identity" "current" {}
 
-# ---- 기본 VPC / 서브넷 사용 (채점 대상 VPC와 무관) ----
-# ---- Bastion 전용 VPC (이 계정엔 default VPC 가 없음) ----
-resource "aws_vpc" "bn" {
-  cidr_block           = "10.250.0.0/16"
-  enable_dns_support   = true
-  enable_dns_hostnames = true
-  tags                 = { Name = "task-bastion-vpc" }
-}
-resource "aws_internet_gateway" "bn" {
-  vpc_id = aws_vpc.bn.id
-  tags   = { Name = "task-bastion-igw" }
-}
-resource "aws_subnet" "bn" {
-  vpc_id                  = aws_vpc.bn.id
-  cidr_block              = "10.250.0.0/24"
-  map_public_ip_on_launch = true
-  tags                    = { Name = "task-bastion-subnet" }
-}
-resource "aws_route_table" "bn" {
-  vpc_id = aws_vpc.bn.id
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.bn.id
-  }
-  tags = { Name = "task-bastion-rt" }
-}
-resource "aws_route_table_association" "bn" {
-  subnet_id      = aws_subnet.bn.id
-  route_table_id = aws_route_table.bn.id
-}
+# ---- 진짜 VPC(unicorn-vpc)는 network.tf 의 module "VPC" 가 생성한다 ----
+#   bastion 은 unicorn-subnet-pub-a(진짜 퍼블릭 서브넷)에 위치하므로 채점 대상
+#   VPC 와 같은 네트워크에 있다. (별도 throwaway VPC 제거)
 
 # ---- 최신 Amazon Linux 2023 AMI ----
 data "aws_ami" "al2023" {
@@ -73,10 +46,26 @@ data "archive_file" "task1" {
 
   excludes = [
     "bastion",
-    "bastion/**",
     ".terraform",
-    ".terraform/**",
     ".terraform.lock.hcl",
+    "modules/ALB/.terraform",
+    "modules/CloudFront/.terraform",
+    "modules/DynamoDB/.terraform",
+    "modules/ECR/.terraform",
+    "modules/IAM/.terraform",
+    "modules/KMS/.terraform",
+    "modules/Lambda/.terraform",
+    "modules/S3/.terraform",
+    "modules/VPC/.terraform",
+    "modules/ALB/.terraform.lock.hcl",
+    "modules/CloudFront/.terraform.lock.hcl",
+    "modules/DynamoDB/.terraform.lock.hcl",
+    "modules/ECR/.terraform.lock.hcl",
+    "modules/IAM/.terraform.lock.hcl",
+    "modules/KMS/.terraform.lock.hcl",
+    "modules/Lambda/.terraform.lock.hcl",
+    "modules/S3/.terraform.lock.hcl",
+    "modules/VPC/.terraform.lock.hcl",
     "terraform.tfstate",
     "terraform.tfstate.backup",
     "*.tfplan",
@@ -144,7 +133,7 @@ resource "aws_iam_instance_profile" "bastion" {
 resource "aws_security_group" "bastion" {
   name        = "${var.player_id}-task1-bastion-sg"
   description = "Bastion SG - no inbound, SSM via outbound 443 only"
-  vpc_id      = aws_vpc.bn.id
+  vpc_id      = module.VPC.vpc_id
 
   egress {
     description = "All outbound (SSM, ECR, EKS API, helm charts)"
@@ -169,11 +158,12 @@ locals {
 }
 
 resource "aws_instance" "bastion" {
-  ami                    = data.aws_ami.al2023.id
-  instance_type          = var.instance_type
-  subnet_id              = aws_subnet.bn.id
-  iam_instance_profile   = aws_iam_instance_profile.bastion.name
-  vpc_security_group_ids = [aws_security_group.bastion.id]
+  ami                         = data.aws_ami.al2023.id
+  instance_type               = var.instance_type
+  subnet_id                   = module.VPC.public_subnet_ids[0]
+  iam_instance_profile        = aws_iam_instance_profile.bastion.name
+  vpc_security_group_ids      = [aws_security_group.bastion.id]
+  associate_public_ip_address = true
 
   # 번들 내용이 바뀌면 user_data 해시가 바뀌어 인스턴스가 교체된다.
   user_data = local.user_data

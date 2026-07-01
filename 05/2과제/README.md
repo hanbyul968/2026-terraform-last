@@ -1,213 +1,221 @@
-# 05 2과제
+# 05 · 제2과제 (Small Challenge)
 
-## 모듈 구성
+제61회 인천기능경기대회 · 클라우드컴퓨팅 · 제2과제. 4개 모듈을 서로 다른 리전에 배포합니다.
 
-루트(`05/2과제/`)에서 **한 번의 `terraform apply`로 4개 모듈 전체**를 배포합니다.
-각 모듈은 서로 다른 리전이며 루트 `main.tf`에서 provider alias로 주입합니다.
+| 모듈 | 경로 | 리전 | 내용 | apply 위치 |
+|---|---|---|---|---|
+| 1 | `module1/infra/` | **us-east-1** | CDN (S3 + Lambda + Lambda@Edge + CloudFront) | **로컬(Windows) 또는 Bastion** |
+| 2 | `module2/` | **ap-southeast-1** | Kafka(KRaft) + NLB + Managed Flink(Zeppelin) + Glue | **Bastion** (bash provisioner) |
+| 3 | `module3/infra/` | **ap-northeast-2** | FastAPI + CW Agent/Alarm + SSM + EventBridge 자동복구 | 로컬 또는 Bastion (provisioner 없음) |
+| 4 | `module4/` | **eu-central-1** | Keycloak + OIDC Provider + 팀별 IAM Role | **Bastion** (bash provisioner) |
 
-| 모듈 | 경로 | 리전 | 내용 |
-|---|---|---|---|
-| 1 | `module1/infra/` | us-east-1 | CDN (S3 + Lambda + CloudFront) |
-| 2 | `module2/` | ap-southeast-1 | Kafka + Flink Studio + NLB |
-| 3 | `module3/infra/` | ap-northeast-2 | FastAPI + CW Agent + EventBridge |
-| 4 | `module4/` | eu-central-1 | Keycloak + OIDC + IAM |
+루트 `main.tf` 가 provider alias 로 4개 모듈을 **한 번의 apply** 로 오케스트레이션합니다.
 
-### 배포파일 (`files/`)
+### 배포파일 (`files/`) — 수정 없이 사용
 
-| 파일 | 사용처 | 비고 |
+| 파일 | 사용처 | 배치 방법 |
 |---|---|---|
-| `dog.png` | Module 1 | S3 `images/dog.png`로 **자동 업로드** |
-| `data-app.py` | Module 2 | EC2 `/home/ec2-user/app.py`에 **바이트 그대로** 배치 (채점 2-2 SHA256 검증) |
-| `event-app.py` | Module 3 | EC2 `/home/ec2-user/app.py`에 배치 |
+| `dog.png` | Module 1 | S3 `images/dog.png` 로 자동 업로드 |
+| `data-app.py` | Module 2 | EC2 `/home/ec2-user/app.py` 에 **바이트 그대로**(base64) — 채점 2-2 SHA256 검증 |
+| `event-app.py` | Module 3 | EC2 `/home/ec2-user/app.py` 에 base64 배치 |
 
 ---
 
-## 실행 (Windows PowerShell, 한 번에 전체 apply)
+## 아키텍처: 2단계 Bastion 패턴
 
-> ⚠️ **CloudShell 쓰지 마세요.** 홈 용량 1GB라 provider(약 700MB)+state 저장 중 `no space left on device`로 터집니다.
-> 모든 provisioner는 **Windows PowerShell 전용**으로 작성됨 (bash/Git Bash/WSL 불필요).
+이 대회 계정에는 **default VPC 가 없고**, Module 2/4 는 Linux 전용 `local-exec`(AWS CLI/openssl/jq
+provisioner: `zeppelin.sh`, `oidc.sh`, `iam-roles.sh`)를 사용합니다. 따라서 **Linux Bastion 안에서
+전체를 apply** 하는 것이 표준 흐름입니다.
 
-사전 설치(설치 후 PowerShell 새로 열기): Terraform, AWS CLI, Python — [../../사전준비/README.md](../../사전준비/README.md) 참고.
+- **STAGE 1 (로컬 Windows PowerShell)** — `bastion/` 를 로컬에서 apply.
+  - 전용 Bastion VPC(`10.250.0.0/16` + 퍼블릭 서브넷 `10.250.0.0/24` + IGW + 라우팅) 생성 (default VPC 미사용).
+  - SSM 역할(AmazonSSMManagedInstanceCore + AdministratorAccess) + 인스턴스 프로파일.
+  - 인바운드 0개(아웃바운드 443 SSM), 최신 AL2023 AMI, IMDSv2, `t3.medium`.
+  - 이 `2과제` 폴더 전체를 zip 으로 묶어 부트스트랩 S3 에 업로드 → user_data 가 `/opt/task2` 로 내려받아
+    도구(terraform/kubectl/helm/docker) 설치 후 `/opt/task2/deploy.sh` 생성. 완료 마커: `/opt/task2/READY`.
+- **STAGE 2 (Bastion 내부)** — `bash /opt/task2/deploy.sh` 가 루트 `terraform init && apply` 로
+  4개 모듈을 의존순서대로 배포. bash provisioner 들이 apply 중 올바른 시점에 자동 호출됨.
+
+> `bastion/` 은 루트(2과제)와 **분리된 state**. 채점 직전 `bastion` 에서만 destroy 하면 Bastion(+부트스트랩
+> 버킷)만 제거되고 채점 대상 리소스는 유지됩니다.
+
+---
+
+## STAGE 1 — Bastion 기동 (로컬 Windows PowerShell)
 
 ```powershell
-# Windows PowerShell 에서
-aws configure                                  # 자격증명 1회 설정 (안 했으면)
-
-cd C:\Users\competitor\2026-terraform\05\2과제   # repo 클론 위치
+cd C:\Users\competitor\2026-terraform\05\2과제\bastion
 terraform init
-terraform apply -var pin=<비번호> -var alarm_email=<이메일주소>
-# ⏱ ~10~15분
+terraform apply -var player_id=<비번호> -var pin=<비번호> -var alarm_email=<이메일주소>
+
+# 접속 명령 확인
+terraform output ssm_connect_command
 ```
 
-> 기본 VPC는 terraform이 자동 생성/채택(`aws_default_vpc`)하므로 별도 작업 불필요.
-
-### CDN Function URL 접근 모드 (`cdn_public_url`)
-
-채점 1-1은 `AuthType=NONE`(공개)을 기대하므로 **기본값 `true`(NONE)** 입니다.
-그런데 일부 계정(조직 RCP)은 **익명 공개 Lambda Function URL 호출을 차단**해 CDN이 403이 납니다.
-이때만 아래로 우회 (CloudFront가 SigV4 서명 → `AWS_IAM`):
+## STAGE 2 — Bastion 접속 후 전체 배포 (SSM)
 
 ```powershell
-# 대회 기본(공개 허용 계정): 그냥 두면 NONE
-terraform apply -var pin=<비번호> -var alarm_email=<이메일>
-
-# 공개가 막힌 계정(403 발생 시): IAM+OAC로 우회
-terraform apply -var pin=<비번호> -var alarm_email=<이메일> -var cdn_public_url=false
+aws ssm start-session --target <bastion_instance_id> --region ap-northeast-2
 ```
-
-판별법: apply 후 CloudFront `/images?image=dog&rotate=0`가 403/빈응답이면 `cdn_public_url=false`로 재apply.
-- `true`  → 1-1 AuthType이 `NONE` (공개 허용 계정에서 채점 정답)
-- `false` → CDN은 정상 동작하지만 1-1 AuthType은 `AWS_IAM`으로 표시(그 줄만 불일치)
-
-### state가 유실됐거나 `AlreadyExists` 충돌이 날 때
-
-이미 만들어진 리소스가 남아 재apply가 충돌하면, 이름이 채점용 고정이라 **고아 리소스를 먼저 정리**:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File cleanup.ps1 <비번호>   # 4개 리전 gj2026-* 일괄 삭제
-Remove-Item terraform.tfstate*                                  # 깨진 state 초기화
-terraform init
-terraform apply -var pin=<비번호> -var alarm_email=<이메일주소>
-```
-> CloudFront/Lambda@Edge는 삭제에 1~3시간 걸립니다. CDN(module1) 재생성이 `gj2026-cdn-request/response` 충돌나면:
-> `powershell -ExecutionPolicy Bypass -File delete-edge-lambdas.ps1` 를 가끔 실행해 "둘 다 정리됨" 뜬 뒤 apply.
-
-- `pin`: CDN S3 버킷 이름 `gj2026-cdn-bucket-<비번호>`에 사용 (필수)
-- `alarm_email`: Module 3 SNS 이메일 알림 주소 — **채점 3-8(SNS 이메일 알림 수신, 1.0점)** 용
-  - CloudWatch Alarm이 `ALARM`으로 전환될 때 이메일 알림이 수신되는지 채점함
-  - 미입력 시 SNS 구독 생략 → 3-8 점수 못 받음
-  - 입력 시 **apply 후 해당 메일함의 "Confirm subscription" 클릭 필수** (AWS SNS 이메일 구독은 수동 확인 필요)
-- `keycloak_admin_password`: 기본값 `admin1234!` (선택)
-
-apply 한 번으로 자동 처리되는 것:
-- Module 1: Pillow 패키지 빌드(`build.ps1` 자동 실행) → Lambda 배포 → **dog.png S3 자동 업로드**
-- Module 2: Kafka 자동 설치/토픽 생성 + app.py 배치 + Zeppelin Studio 생성(AWS CLI)
-- Module 3: FastAPI 배치 + CloudWatch Agent + EventBridge 복구 파이프라인
-- Module 4: Keycloak 기동 → OIDC Provider + IAM Role 자동 생성
-
-### 특정 모듈만 재배포
-
+Bastion 안에서:
 ```bash
-terraform apply -target=module.cdn      -var pin=<비번호>
-terraform apply -target=module.data     -var pin=<비번호>
-terraform apply -target=module.event    -var pin=<비번호> -var alarm_email=<이메일>
-terraform apply -target=module.keycloak -var pin=<비번호>
+until [ -f /opt/task2/READY ]; do echo waiting...; sleep 5; done   # 부트스트랩 완료 대기(2~4분)
+bash /opt/task2/deploy.sh                 # 주입된 pin/alarm_email 사용
+# 또는:  bash /opt/task2/deploy.sh <비번호> <이메일주소>
 ```
+`deploy.sh` = `terraform init && terraform apply -var pin=... [-var alarm_email=...]`. ⏱ 약 10~15분.
 
-### 출력 확인
+---
+
+## (선택) VPC 불필요 모듈 로컬 apply — Module 1 CDN
+
+Module 1(CDN)은 **VPC 가 필요 없는 순수 서버리스**이며 Pillow 빌드가 OS 자동감지로 동작합니다
+(Windows → `build.ps1`, Linux → `build.sh`, 둘 다 `--platform manylinux2014_x86_64` 로 동일 패키지 생성).
+Bastion 없이 로컬 Windows 에서 바로 생성 가능합니다:
+
+```powershell
+cd C:\Users\competitor\2026-terraform\05\2과제
+terraform init
+terraform apply -target=module.cdn -var pin=<비번호>
+```
+Module 3(event)도 Linux 전용 provisioner 가 없어 `-target=module.event` 로 로컬 apply 가 가능합니다.
+Module 2/4 는 bash provisioner 때문에 **반드시 Bastion(Linux)** 에서 apply 하세요.
+
+### CDN Function URL 접근 모드 (`-var cdn_public_url=`)
+
+채점 1-1 은 `AuthType=NONE`(공개) 기대 → **기본값 `true`**. 일부 계정(조직 RCP)은 익명 공개 Function URL
+호출을 차단하므로 CDN 이 403 이면 `-var cdn_public_url=false`(AWS_IAM + CloudFront OAC 우회)로 재apply.
+
+---
+
+## 비번호(<비번호>) 치환 포인트
+
+| 위치 | 변수 | 용도 |
+|---|---|---|
+| 루트 / 각 모듈 apply | `-var pin=<비번호>` | Module 1 S3 버킷 `gj2026-cdn-bucket-<비번호>` |
+| Bastion apply | `-var player_id=<비번호>` | Bastion 리소스 접두어 + 부트스트랩 버킷명(식별용, destroy 대상) |
+
+나머지 리소스 이름은 채점 고정값(`gj2026-*`)이라 치환하지 않습니다.
+
+---
+
+## 수동 단계 (apply 후)
+
+- **Module 2 Flink 노트북 SQL (채점 2-3~2-5)**: Zeppelin Studio 앱은 terraform 이 생성·시작하지만,
+  소스/싱크 테이블 + 3개 쿼리는 콘솔 노트북에 붙여넣어야 합니다 → **[module2/FLINK-NOTEBOOK.md](module2/FLINK-NOTEBOOK.md)**.
+- **Module 3 SNS 이메일 구독 (채점 3-8)**: `-var alarm_email=` 입력 시 apply 후 해당 메일함의
+  **"Confirm subscription"** 클릭 필수(AWS SNS 이메일 구독 수동 확인).
+- **Module 4 Keycloak 자격증명 스크립트 (채점 4-3)**: `~/.aws/gj2026-keycloak-creds.sh` 는 이제
+  `gj2026-keycloak-ec2` user_data 가 **자동 생성**합니다(ec2-user 홈). 채점 시 CloudShell 로 복사해
+  사용: `aws configure set credential_process "~/.aws/gj2026-keycloak-creds.sh dev dev-user" --profile gj2026-keycloak-dev`.
+  - 흐름: Keycloak ROPC(public client) → ID Token → `sts assume-role-with-web-identity`
+    (RoleSessionName=`keycloak-session`) → credential_process JSON.
+  - EC2 재시작으로 Public IP 가 바뀌면 `terraform apply -target=module.keycloak` 재실행(OIDC Provider/IAM Role/스크립트 재생성).
+
+---
+
+## 출력
 
 ```bash
 terraform output
-# cdn_cloudfront_domain, data_kafka_ec2_ip, data_nlb_dns,
+# cdn_cloudfront_domain, cdn_s3_bucket, data_kafka_ec2_ip, data_nlb_dns,
 # event_ec2_ip, keycloak_ip, keycloak_url
 ```
-
-> Keycloak 관리자 콘솔: `https://<keycloak_ip>/admin` (admin / admin1234!)
-
----
-
-## 주의사항
-
-- **반드시 CloudShell/Linux에서 실행**: Module 1 Pillow 빌드, Module 2/4의 AWS CLI provisioner가 bash 기반
-- **Module 2 Zeppelin**: Studio 앱은 terraform이 생성·자동시작. 노트북 SQL(소스/싱크 테이블 + 3쿼리)만 콘솔에서 붙여넣기 → **[module2/FLINK-NOTEBOOK.md](module2/FLINK-NOTEBOOK.md)** 절차 그대로 (채점 2-3~2-5)
-- **Module 4**: EC2 재시작으로 Public IP가 바뀌면 `terraform apply -target=module.keycloak` 재실행
-- **Lambda Runtime**: `python3.14` (PDF 명세대로 적용됨 — module1/infra·module3/infra 의 `runtime` 5곳, build.sh `--python-version 3.14`)
-- **AWS CLI 인증 스크립트**(`~/.aws/gj2026-keycloak-creds.sh`)는 terraform 외부 - Keycloak EC2에서 직접 작성 (채점 4-3)
+Keycloak 관리자 콘솔: `https://<keycloak_ip>/admin` (admin / admin1234!).
 
 ---
 
-## 트러블슈팅
+## 리소스 이름 & 채점 매핑 요약
 
-### `no matching EC2 VPC found`
-- 기본 VPC가 없는 리전. 최신 코드는 `aws_default_vpc`로 자동 생성하므로 `git pull` 후 재apply.
+**Module 1 CDN (us-east-1)** — Lambda `gj2026-cdn-rotate`(Function URL, python3.14), Lambda@Edge
+`gj2026-cdn-request`/`gj2026-cdn-response`, CloudFront + Behavior `/images`, 캐시키 `image`/`rotate`,
+S3 `gj2026-cdn-bucket-<비번호>`(퍼블릭 차단, OAC).
 
-### Module 4 `local-exec ... ERROR: HTTPS 인증서를 가져오지 못했습니다`
-- Keycloak EC2의 nginx(443)가 안 떠서 OIDC thumbprint를 못 가져온 경우.
-- 최신 코드는 **nginx+인증서를 Keycloak보다 먼저 기동**하도록 수정됨 → `git pull` 후 재apply.
-- 재apply 시 `user_data`가 바뀌면 keycloak EC2가 **교체(replace)**되고 새 IP로 nginx가 먼저 뜸 (정상).
-- 그래도 실패하면 새 인스턴스에 SSM 접속해 상태 확인:
-  ```bash
-  sudo systemctl status nginx
-  sudo tail -50 /var/log/cloud-init-output.log
-  curl -k https://localhost/realms/master   # Keycloak 응답 확인
-  ```
+**Module 2 Real-time analytics (ap-southeast-1)** — EC2 `gj2026-data-ec2`(Kafka KRaft, 9092 내부/9094 외부),
+NLB `gj2026-data-nlb`(Internet-facing, TCP 9094), 토픽 order-logs(2)/error-stats(1)/high-latency(1)/anomaly(1),
+Glue DB `real_time_analytics`, Managed Flink Zeppelin `gj2026-data-zeppelin`.
 
-### 중간 실패 후 재실행
-- 특정 모듈만: `terraform apply -target=module.<cdn|data|event|keycloak> -var pin=<비번호>`
-- Keycloak IP가 바뀌면 OIDC Provider/IAM Role도 새 IP로 재생성됨 (`null_resource` 자동 재실행).
+**Module 3 Cloud event handling (ap-northeast-2)** — EC2 `gj2026-event-ec2`, 서비스 `gj2026-app`(8080),
+SSM `/gj2026/event/app-py`, 메트릭 `app_process_count`(GJ2026/Events), Alarm `gj2026-event-app-alarm`,
+로그그룹 `/gj2026/event/app-logs`·`/gj2026/event/recovery`, Lambda `gj2026-event-updater`/`gj2026-event-recovery`,
+EventBridge `gj2026-event-trigger-alarm`, SNS `gj2026-event-alarm-topic`.
+
+**Module 4 Keycloak (eu-central-1)** — EC2 `gj2026-keycloak-ec2`(HTTPS via nginx), Realm `team`,
+Client `gj2026-keycloak-dev`/`gj2026-keycloak-sec`(public), Client Scope `gj2026-keycloak-claims`(role/team/group mapper),
+Group `dev-team`/`sec-team`, OIDC Provider `https://<IP>/realms/team`,
+Role `gj2026-keycloak-dev-role`/`gj2026-keycloak-sec-role`, Policy `gj2026-keycloak-dev-policy`/`gj2026-keycloak-sec-policy`.
 
 ---
 
 ## 변경 가능 항목 수정 위치
 
 ### Module 1
-
-| 변경 항목 | 파일 | 수정 위치 |
+| 항목 | 파일 | 위치 |
 |---|---|---|
 | S3 버킷 이름 | `module1/infra/main.tf` | `locals.bucket_name` |
-| Lambda 함수 이름 (`gj2026-cdn-rotate`) | `module1/infra/main.tf` | `aws_lambda_function.rotate.function_name` |
-| Lambda@Edge 이름 (`gj2026-cdn-request/response`) | `module1/infra/main.tf` | `aws_lambda_function.request/response.function_name` |
-| CloudFront Behavior 경로 (`/images`) | `module1/infra/main.tf` | `ordered_cache_behavior.path_pattern` |
-| 캐시 쿼리 파라미터 (`image`, `rotate`) | `module1/infra/main.tf` | `aws_cloudfront_cache_policy.cdn` → `query_strings.items` |
-| 이미지 prefix (`images/`) | `module1/infra/lambda/rotate.py` | `key = f"images/{image}"` |
-| 회전 방향 (시계→반시계) | `module1/infra/lambda/rotate.py` | `img.rotate(-rotate` → `img.rotate(rotate` |
+| rotate/@Edge 함수 이름 | `module1/infra/main.tf` | `aws_lambda_function.*.function_name` |
+| Behavior 경로 `/images` | `module1/infra/main.tf` | `ordered_cache_behavior.path_pattern` |
+| 캐시 쿼리 파라미터 | `module1/infra/main.tf` | `aws_cloudfront_cache_policy.cdn` → `query_strings.items` |
+| 회전 방향 | `module1/infra/lambda/rotate.py` | `img.rotate(-rotate` |
 | Lambda Runtime | `module1/infra/main.tf` | `runtime` (3곳) |
 
 ### Module 2
-
-| 변경 항목 | 파일 | 수정 위치 |
+| 항목 | 파일 | 위치 |
 |---|---|---|
-| EC2 이름 (`gj2026-data-ec2`) | `module2/main.tf` | `aws_instance.kafka` → `tags.Name` |
-| NLB 이름 (`gj2026-data-nlb`) | `module2/main.tf` | `aws_lb.data.name` |
-| Kafka 내부 포트 (`9092`) | `module2/main.tf` | SG ingress + userdata `INTERNAL://0.0.0.0:9092` |
-| Kafka 외부 포트 (`9094`) | `module2/main.tf` | SG ingress + TG port + Listener port + userdata `EXTERNAL://0.0.0.0:9094` |
-| 토픽 이름/파티션 수 | `module2/main.tf` | userdata의 `kafka-topics.sh --create` 명령 |
-| Glue DB 이름 (`real_time_analytics`) | `module2/main.tf` | `aws_glue_catalog_database.analytics.name` |
+| EC2/NLB 이름 | `module2/main.tf` | `aws_instance.kafka` / `aws_lb.data.name` |
+| Kafka 포트(9092/9094) | `module2/main.tf` | SG ingress + TG/Listener + userdata listeners |
+| 토픽 이름/파티션 | `module2/main.tf` | userdata `kafka-topics.sh --create` |
+| Glue DB | `module2/main.tf` | `aws_glue_catalog_database.analytics.name` |
 
 ### Module 3
-
-| 변경 항목 | 파일 | 수정 위치 |
+| 항목 | 파일 | 위치 |
 |---|---|---|
-| EC2 이름 (`gj2026-event-ec2`) | `module3/infra/main.tf` | `aws_instance.event` → `tags.Name` |
-| 서비스 이름 (`gj2026-app`) | `module3/infra/main.tf` | userdata의 서비스 파일명 + `systemctl` 명령 전체 |
-| FastAPI 포트 (`8080`) | `module3/infra/main.tf` | userdata의 `port=8080` + SG ingress |
-| 앱 응답 메시지 (`WorldSkills 2026`) | `module3/infra/main.tf` | userdata의 `app.py` 내 `"message"` 값 |
-| SSM Parameter 경로 (`/gj2026/event/app-py`) | `module3/infra/main.tf` | `aws_ssm_parameter.app_py.name` + IAM policy |
-| 메트릭 이름 (`app_process_count`) | `module3/infra/main.tf` | userdata의 `put-app-metric.sh` + `aws_cloudwatch_metric_alarm.app.metric_name` |
-| 알람 이름 (`gj2026-event-app-alarm`) | `module3/infra/main.tf` | `aws_cloudwatch_metric_alarm.app.alarm_name` + EventBridge `event_pattern` |
-| 앱 로그 그룹 (`/gj2026/event/app-logs`) | `module3/infra/main.tf` | `aws_cloudwatch_log_group.app_logs.name` + userdata CW Agent 설정 |
-| 복구 로그 그룹 (`/gj2026/event/recovery`) | `module3/infra/main.tf` + `lambda/recovery.py` | `aws_cloudwatch_log_group.recovery.name` + `LOG_GROUP` 변수 |
-| EventBridge Rule 이름 (`gj2026-event-trigger-alarm`) | `module3/infra/main.tf` | `aws_cloudwatch_event_rule.alarm_trigger.name` |
-| Updater Lambda 이름 (`gj2026-event-updater`) | `module3/infra/main.tf` | `aws_lambda_function.updater.function_name` + userdata `ExecStartPost` |
-| Recovery Lambda 이름 (`gj2026-event-recovery`) | `module3/infra/main.tf` | `aws_lambda_function.recovery.function_name` |
+| EC2/서비스 이름·포트 | `module3/infra/main.tf` | `aws_instance.event` / userdata systemd + SG |
+| 메트릭/알람/EventBridge 이름 | `module3/infra/main.tf` | `aws_cloudwatch_*` + userdata put-app-metric |
+| SSM 경로·로그그룹 | `module3/infra/main.tf` | `aws_ssm_parameter.app_py` / `aws_cloudwatch_log_group.*` |
 | Lambda Runtime | `module3/infra/main.tf` | `runtime` (2곳) |
 
 ### Module 4
-
-| 변경 항목 | 파일 | 수정 위치 |
+| 항목 | 파일 | 위치 |
 |---|---|---|
-| EC2 이름 (`gj2026-keycloak-ec2`) | `module4/main.tf` | `aws_instance.keycloak` → `tags.Name` |
-| Realm 이름 (`team`) | `module4/main.tf` | userdata setup script의 모든 `/realms/team` + `null_resource.oidc_provider` |
-| Client 이름 (`gj2026-keycloak-dev/sec`) | `module4/main.tf` | userdata의 `for CLIENT in` 배열 + `null_resource.iam_roles` |
-| Client Scope 이름 (`gj2026-keycloak-claims`) | `module4/main.tf` | userdata의 `SCOPE_PAYLOAD.name` |
-| Group 이름 (`dev-team`, `sec-team`) | `module4/main.tf` | userdata의 `for g in dev-team sec-team` |
-| 사용자/비밀번호 | `module4/main.tf` | userdata의 `create_user` 호출 |
-| Dev/Sec Role 이름 | `module4/main.tf` | `null_resource.iam_roles` → `create_role` 호출 |
-| Dev/Sec Policy 이름 | `module4/main.tf` | `aws_iam_policy.dev/sec.name` |
-| 팀 태그 키 (`team`) | `module4/main.tf` | `aws_iam_policy.dev/sec` → `Condition.StringEquals["ec2:ResourceTag/team"]` |
-| admin 비밀번호 (`admin1234!`) | `module4/main.tf` | `variable.keycloak_admin_password.default` |
-
+| EC2/Realm/Client/Group 이름 | `module4/main.tf` | userdata setup script |
+| Dev/Sec Policy 태그 조건 | `module4/main.tf` | `aws_iam_policy.dev/sec` → `Condition ec2:ResourceTag/team` |
+| admin 비밀번호 | `module4/main.tf` | `variable.keycloak_admin_password.default` |
+| 자격증명 스크립트 매핑 | `module4/main.tf` | userdata `gj2026-keycloak-creds.sh` (team→role/client/pw) |
 
 ---
 
-## 🧹 Bastion 네트워크 & 삭제
+## 검증(validate) 상태
 
-- **Bastion 네트워크**: 전용 VPC `10.250.0.0/16` + 퍼블릭 서브넷 `10.250.0.0/24` + IGW.
-  (이 대회 계정엔 **default VPC 가 없어** bastion 이 자체 VPC 를 생성한다. 접속은 SSM 아웃바운드 443만 사용.)
-- **AMI**: 표준 AL2023(`al2023-ami-2023.*`)만 선택 — minimal AMI 는 SSM 에이전트가 없어 제외.
-- **Bastion 삭제** (채점 대상과 분리된 별도 state → bastion 만 안전하게 제거):
-```powershell
-cd C:\Users\competitor\2026-terraform\05\2과제\bastion
-terraform destroy -auto-approve
-```
-> 채점 대상(main/모듈)은 bastion 안에서 별도로 destroy. EKS 가 private-only 인 과제는 destroy 전 public 재오픈 필요.
+`terraform init -backend=false && terraform validate` — 전 root 통과:
+`(root)`, `bastion`, `module1/infra`, `module2`, `module3/infra`, `module4` → 모두 **Success**.
+
+> ⚠️ `terraform apply`/`destroy` 는 실행하지 않았습니다(대회 당일 적용용 템플릿).
+
+---
+
+## 🧹 삭제 순서
+
+1. **채점 완료 후** Bastion 안에서 채점 대상 destroy:
+   ```bash
+   cd /opt/task2 && terraform destroy -auto-approve -var pin=<비번호>
+   ```
+   - CloudFront/Lambda@Edge 는 삭제에 1~3시간 소요. `gj2026-cdn-request/response` 충돌 시
+     `delete-edge-lambdas.sh` 를 재실행 후 진행.
+   - 고아 리소스가 남아 재apply 충돌 시(이름 고정) `cleanup.ps1 <비번호>` 로 4개 리전 `gj2026-*` 일괄 정리 후
+     `Remove-Item terraform.tfstate*` → 재init/apply.
+2. **채점 직전 또는 정리 시** 로컬에서 Bastion 제거(별도 state):
+   ```powershell
+   cd C:\Users\competitor\2026-terraform\05\2과제\bastion
+   terraform destroy -auto-approve -var player_id=<비번호> -var pin=<비번호>
+   ```
+
+---
+
+## 트러블슈팅
+
+- **Module 4 OIDC thumbprint 실패**: Keycloak EC2 nginx(443) 미기동. 최신 코드는 nginx/인증서를 Keycloak
+  보다 먼저 기동. SSM 접속해 `systemctl status nginx`, `tail -50 /var/log/cloud-init-output.log`,
+  `curl -k https://localhost/realms/master` 확인.
+- **Module 1 CDN 403**: 공개 Function URL 차단 계정 → `-var cdn_public_url=false` 재apply.
+- **중간 실패**: 특정 모듈만 `terraform apply -target=module.<cdn|data|event|keycloak> -var pin=<비번호>`.

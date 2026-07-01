@@ -44,6 +44,12 @@ mkdir -p /opt/task1
 aws s3 cp "s3://${bucket}/${key}" /tmp/task1.zip --region "${region}"
 unzip -o /tmp/task1.zip -d /opt/task1
 
+# ---- CRLF 정규화 ----
+# Windows 에서 zip 된 .tf/스크립트가 CRLF 일 수 있어, Linux 에서 local-exec(/bin/bash)·docker build
+# 실행 시 줄 끝 \r 로 인한 $'\r' / "path ./files\r" / "set: invalid option" 에러가 난다.
+# unzip 직후 무조건 CR 을 제거해 어떤 번들이 와도 안전하게 한다.
+find /opt/task1 -type f \( -name '*.tf' -o -name '*.sh' -o -name 'Dockerfile' -o -name '*.tpl' -o -name '*.json' -o -name '*.js' -o -name '*.yaml' -o -name '*.yml' \) -exec sed -i 's/\r$//' {} + || true
+
 # 지급 바이너리 실행 권한 + 누구나 작업 가능하도록 권한 개방(임시 bastion)
 chmod +x /opt/task1/files/book || true
 chmod -R 777 /opt/task1

@@ -1,7 +1,8 @@
 terraform {
   required_providers {
-    aws = { source = "hashicorp/aws", version = ">= 5.80" }
-    tls = { source = "hashicorp/tls", version = ">= 4.0" }
+    aws   = { source = "hashicorp/aws", version = ">= 5.80" }
+    tls   = { source = "hashicorp/tls", version = ">= 4.0" }
+    local = { source = "hashicorp/local", version = ">= 2.0" }
   }
 }
 
@@ -137,7 +138,27 @@ resource "aws_instance" "vpn_ec2" {
   instance_type          = "t3.micro"
   subnet_id              = aws_subnet.vpn_b.id
   vpc_security_group_ids = [aws_security_group.ec2.id]
+  key_name               = aws_key_pair.vpn_ec2.key_name
   tags                   = { Name = "vpn-ec2" }
+}
+
+# ---- SSH key pair for the VPN connect test (rubric 14-2: ssh -i <key> ec2-user@<ip>) ----
+resource "tls_private_key" "ssh" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
+
+resource "aws_key_pair" "vpn_ec2" {
+  key_name   = "vpn-ec2-key"
+  public_key = tls_private_key.ssh.public_key_openssh
+}
+
+# Write the private key next to the module so the competitor can `ssh -i vpn-ec2-key.pem ...`
+# after connecting through the Client VPN. (Also exposed as a sensitive output.)
+resource "local_file" "ssh_key" {
+  content         = tls_private_key.ssh.private_key_pem
+  filename        = "${path.module}/vpn-ec2-key.pem"
+  file_permission = "0600"
 }
 
 # TLS Certificates
@@ -252,4 +273,37 @@ resource "aws_ec2_client_vpn_authorization_rule" "all" {
   client_vpn_endpoint_id = aws_ec2_client_vpn_endpoint.this.id
   target_network_cidr    = "10.0.0.0/16"
   authorize_all_groups   = true
+}
+
+# ---- Outputs (VPN connect test helpers) ----
+output "vpn_ec2_private_ip" {
+  description = "vpn-ec2 private IP - SSH target after connecting via Client VPN"
+  value       = aws_instance.vpn_ec2.private_ip
+}
+
+output "client_vpn_endpoint_id" {
+  description = "Client VPN endpoint id (download .ovpn config from here)"
+  value       = aws_ec2_client_vpn_endpoint.this.id
+}
+
+output "ssh_private_key_path" {
+  description = "Local path to the generated SSH private key for vpn-ec2"
+  value       = local_file.ssh_key.filename
+}
+
+output "ssh_private_key_pem" {
+  description = "SSH private key PEM for vpn-ec2 (save to a .pem file, chmod 600)"
+  value       = tls_private_key.ssh.private_key_pem
+  sensitive   = true
+}
+
+output "client_certificate_pem" {
+  description = "Client certificate PEM for the .ovpn client config"
+  value       = tls_locally_signed_cert.client.cert_pem
+}
+
+output "client_private_key_pem" {
+  description = "Client private key PEM for the .ovpn client config"
+  value       = tls_private_key.client.private_key_pem
+  sensitive   = true
 }

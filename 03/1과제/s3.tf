@@ -26,7 +26,7 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "static" {
   rule {
     apply_server_side_encryption_by_default {
       sse_algorithm     = "aws:kms"
-      kms_master_key_id = aws_kms_key.bucket.arn
+      kms_master_key_id = local.kms_bucket_arn
     }
     bucket_key_enabled = true
   }
@@ -36,9 +36,9 @@ resource "aws_s3_object" "index" {
   bucket       = aws_s3_bucket.static.id
   key          = "static/index.html"
   source       = "${path.module}/files/index.html"
-  etag         = filemd5("${path.module}/files/index.html")
+  source_hash         = filemd5("${path.module}/files/index.html")
   content_type = "text/html"
-  kms_key_id   = aws_kms_key.bucket.arn
+  kms_key_id   = local.kms_bucket_arn
   depends_on   = [aws_s3_bucket_server_side_encryption_configuration.static]
 }
 
@@ -46,9 +46,9 @@ resource "aws_s3_object" "main" {
   bucket       = aws_s3_bucket.static.id
   key          = "static/main.jpeg"
   source       = "${path.module}/files/main.jpeg"
-  etag         = filemd5("${path.module}/files/main.jpeg")
+  source_hash         = filemd5("${path.module}/files/main.jpeg")
   content_type = "image/jpeg"
-  kms_key_id   = aws_kms_key.bucket.arn
+  kms_key_id   = local.kms_bucket_arn
   depends_on   = [aws_s3_bucket_server_side_encryption_configuration.static]
 }
 
@@ -64,7 +64,7 @@ resource "aws_s3_bucket_policy" "static" {
       Action    = "s3:GetObject"
       Resource  = "${aws_s3_bucket.static.arn}/*"
       Condition = {
-        StringEquals = { "AWS:SourceArn" = aws_cloudfront_distribution.this.arn }
+        StringLike = { "AWS:SourceArn" = "arn:aws:cloudfront::${data.aws_caller_identity.current.account_id}:distribution/*" }
       }
     }]
   })

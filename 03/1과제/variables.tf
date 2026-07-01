@@ -28,6 +28,35 @@ variable "bucket_rand" {
   default     = "abcd"
 }
 
+# ── CDN 배포 게이트 ──
+# CloudFront 는 k8s Ingress 가 만든 ALB(data.aws_lb.app)를 origin 으로 참조하므로,
+# 최초 root apply 시엔 ALB 가 아직 없어 실패한다. 그래서 3단계로 나눈다:
+#   1) root apply -var=deploy_cdn=false  (CDN 제외한 전 인프라 + ALB SG)
+#   2) k8s apply                          (Ingress -> ALB 생성)
+#   3) root apply -var=deploy_cdn=true    (ALB 존재 -> CDN 생성)  ※ run.sh 자동 처리
+variable "deploy_cdn" {
+  description = "CloudFront(및 ALB data 조회) 생성 여부. ALB 는 k8s 가 만들므로 1차 apply 에선 false(기본). CDN 은 run.sh 3단계에서 -var=deploy_cdn=true 로 생성."
+  type        = bool
+  default     = false
+}
+
+# ── EKS 클러스터 역할 재사용 ──
+# reuse_kms=true(잠긴 eks 키 재사용) 계정에선 그 키 정책이 기존 wsc2026-eks-cluster-role
+# 에게만 grant 를 허용하므로 역할도 재사용해야 한다(true). 깨끗한 계정/대회는 false(신규 생성, 기본).
+variable "reuse_eks_cluster_role" {
+  type    = bool
+  default = false
+}
+
+# ── 채점 IAM principal (EKS ClusterAdmin access entry) ──
+# CloudShell 등 채점 신원의 role/user ARN. 비우면 access entry 생성 안 함(bastion 역할=생성자는 이미 admin).
+# !! STS assumed-role 세션 ARN 은 사용 불가 !!
+variable "grader_principal_arn" {
+  description = "채점 IAM principal ARN(role/user). 비우면 access entry 생성 안 함."
+  type        = string
+  default     = ""
+}
+
 # ── EKS ──
 variable "cluster_version" {
   description = "EKS 클러스터 버전. 과제 1.35."

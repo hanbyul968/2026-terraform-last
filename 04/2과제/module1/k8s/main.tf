@@ -223,6 +223,7 @@ resource "kubectl_manifest" "nodepool" {
             values: ["on-demand"]
       limits:
         cpu: "100"
+        memory: 200Gi
       disruption:
         consolidationPolicy: WhenEmptyOrUnderutilized
         consolidateAfter: 30s

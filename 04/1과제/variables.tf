@@ -44,3 +44,16 @@ variable "cluster_dns_domain" {
   type        = string
   default     = "wsc.local"
 }
+
+# ── 채점자 principal ARN (EKS access entry) ──
+# Bastion 이 클러스터 생성자이며 bootstrap_cluster_creator_admin_permissions=true 로
+# 이미 ClusterAdmin 이다. 여기에 data.aws_caller_identity.current.arn 을 쓰면 STS 세션
+# ARN(assumed-role/.../session)이라 aws_eks_access_entry 가
+# 'InvalidParameterException: principalArn format is not valid' 로 실패한다.
+# 따라서 기본은 빈값(=access entry 미생성)으로 두고, 별도 채점자 IAM Role/User ARN 을
+# 넘기고 싶을 때만 값을 설정한다.
+variable "grader_principal_arn" {
+  description = "EKS ClusterAdmin access entry 를 만들 채점자 IAM principal ARN. 빈값이면 생성하지 않음."
+  type        = string
+  default     = ""
+}

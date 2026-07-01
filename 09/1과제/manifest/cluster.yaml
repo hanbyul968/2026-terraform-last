@@ -14,7 +14,7 @@ vpc:
       ap-northeast-2c: { id: SUBNET_C }
   clusterEndpoints:
     privateAccess: true
-    publicAccess: false
+    publicAccess: true
 
 accessConfig:
   authenticationMode: API

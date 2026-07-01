@@ -52,7 +52,7 @@ resource "aws_iam_role_policy" "lambda_dynamo" {
 resource "aws_security_group" "lambda" {
   name        = "wsc-lambda-sg"
   description = "Lambda ENI SG"
-  vpc_id      = aws_vpc.this.id
+  vpc_id      = data.aws_vpc.this.id
   egress {
     from_port   = 0
     to_port     = 0
@@ -80,7 +80,7 @@ resource "aws_lambda_function" "get_table" {
   }
 
   vpc_config {
-    subnet_ids         = [aws_subnet.private_a.id, aws_subnet.private_c.id]
+    subnet_ids         = [data.aws_subnet.private_a.id, data.aws_subnet.private_c.id]
     security_group_ids = [aws_security_group.lambda.id]
   }
 

@@ -56,10 +56,6 @@ resource "aws_cloudfront_distribution" "this" {
     origin_path              = "/web/main"
     origin_access_control_id = aws_cloudfront_origin_access_control.s3.id
     custom_header {
-      name  = "X-Origin-Verify"
-      value = var.cf_origin_verify
-    }
-    custom_header {
       name  = "wskorea26-s3-access"
       value = var.s3_access_header_value
     }

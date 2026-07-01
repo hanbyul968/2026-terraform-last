@@ -1,5 +1,6 @@
 import json
 import os
+import decimal
 import boto3
 from boto3.dynamodb.conditions import Key
 
@@ -10,15 +11,25 @@ GSI_NAME = os.environ.get("GSI_NAME", "concert_name-created_at-index")
 dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table(TABLE_NAME)
 
+_REASON = {200: "OK", 400: "Bad Request", 404: "Not Found", 500: "Internal Server Error"}
+
+
+def _json_default(o):
+    # DynamoDB 숫자는 Decimal 로 오므로 JSON 직렬화 가능하게 변환
+    if isinstance(o, decimal.Decimal):
+        return int(o) if o % 1 == 0 else float(o)
+    raise TypeError(f"not serializable: {type(o)}")
+
 
 def _resp(status, body):
-    # ALB(Lambda target) 응답 포맷
+    # ALB(Lambda target) 응답 포맷.
+    #   statusDescription 은 "코드 사유"(예: "200 OK") 형식이어야 한다. "200" 만 주면 ALB 가 502 를 낸다.
     return {
         "statusCode": status,
-        "statusDescription": str(status),
+        "statusDescription": f"{status} {_REASON.get(status, 'OK')}",
         "isBase64Encoded": False,
         "headers": {"Content-Type": "application/json"},
-        "body": json.dumps(body, ensure_ascii=False),
+        "body": json.dumps(body, ensure_ascii=False, default=_json_default),
     }
 
 

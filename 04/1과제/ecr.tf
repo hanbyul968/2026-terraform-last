@@ -38,6 +38,12 @@ resource "aws_ecr_pull_through_cache_rule" "quay" {
   upstream_registry_url = "quay.io"
 }
 
+# registry.k8s.io (kube-state-metrics 등 k8s 공식 이미지)
+resource "aws_ecr_pull_through_cache_rule" "k8s" {
+  ecr_repository_prefix = "k8s"
+  upstream_registry_url = "registry.k8s.io"
+}
+
 # ── book 이미지 빌드 & 푸시 ────────────────────────────────────
 # 전제: docker 데몬 실행 중 + 인터넷(빌드 단계에서 static curl/upx 다운로드).
 resource "null_resource" "build_push_book" {

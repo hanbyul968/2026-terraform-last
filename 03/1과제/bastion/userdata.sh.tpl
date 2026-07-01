@@ -57,15 +57,19 @@ set -e
   if [ -z "$BIBUNHO" ]; then read -rp "비번호(bi_number) 입력: " BIBUNHO; fi
 cd /opt/task1
 terraform init -input=false
-terraform apply -auto-approve -var="bi_number=$BIBUNHO"
-# 2단계 (k8s/helm 레이어): book Deployment/Service/Ingress, AWS LB Controller,
+# 1단계: CDN 제외한 전 인프라 (ALB 는 k8s Ingress 가 생성하므로 CloudFront 는 나중에)
+terraform apply -auto-approve -var="bi_number=$BIBUNHO" -var="deploy_cdn=false"
+# 2단계 (k8s/helm 레이어): book Deployment/Service/Ingress(->ALB), AWS LB Controller,
 #   kube-prometheus-stack, Fluent Bit, ALB 대기, 그리고 마지막에 EKS public->private 전환(finalize)
 cd /opt/task1/k8s
 terraform init -input=false
 terraform apply -auto-approve
+# 3단계: 이제 ALB 가 존재하므로 root CloudFront 생성 (EKS 는 건드리지 않도록 CDN 만 타겟)
+cd /opt/task1
+terraform apply -auto-approve -var="bi_number=$BIBUNHO" -var="deploy_cdn=true" -target=aws_cloudfront_distribution.this
 echo ""
 echo "================= OUTPUTS ================="
-cd /opt/task1 && terraform output || true
+terraform output || true
 RUN
 chmod +x /opt/task1/run.sh
 

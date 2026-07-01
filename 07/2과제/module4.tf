@@ -442,34 +442,12 @@ resource "aws_instance" "m4_bastion" {
   vpc_security_group_ids      = [aws_security_group.m4_bastion.id]
   iam_instance_profile        = aws_iam_instance_profile.m4_bastion.name
 
-  user_data = <<-USERDATA
-#!/bin/bash
-set -ex
-exec > /var/log/skills-bastion-bootstrap.log 2>&1
-REGION=us-west-2
-CLUSTER=skills-sqs-cluster
-
-dnf install -y docker git
-systemctl enable --now docker
-
-# kubectl (클러스터 버전에 맞춰)
-EKS_VER=$(aws eks describe-cluster --region $REGION --name $CLUSTER --query cluster.version --output text)
-curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/v$${EKS_VER}.0/bin/linux/amd64/kubectl"
-chmod +x /usr/local/bin/kubectl
-
-# helm
-curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-
-# 클러스터가 ACTIVE 될 때까지 대기
-until [ "$(aws eks describe-cluster --region $REGION --name $CLUSTER --query cluster.status --output text)" = "ACTIVE" ]; do sleep 15; done
-
-# repo clone 후 K8s 레이어 배포 (CoreDNS 패치 포함)
-cd /root
-git clone https://github.com/hnmly/2026-terraform.git
-cd 2026-terraform/07/2과제
-bash k8s-apply.sh
-echo "BASTION_BOOTSTRAP_DONE"
-USERDATA
+  user_data = templatefile("${path.module}/app/module4/bastion-userdata.sh.tpl", {
+    k8s_apply_b64    = base64gzip(file("${path.module}/k8s-apply.sh"))
+    worker_b64       = base64gzip(file("${path.module}/app/module4/worker.py"))
+    dockerfile_b64   = base64gzip(file("${path.module}/app/module4/Dockerfile"))
+    requirements_b64 = base64gzip(file("${path.module}/app/module4/requirements.txt"))
+  })
 
   tags = { Name = "skills-sqs-bastion" }
   depends_on = [

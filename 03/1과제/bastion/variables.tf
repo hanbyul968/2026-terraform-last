@@ -15,3 +15,9 @@ variable "instance_type" {
   type        = string
   default     = "t3.medium"
 }
+
+variable "azs" {
+  description = "가용영역 2개. 채점이 sub-a, sub-b 순서를 기대하므로 [a, b] 순서 중요. (root/variables.tf 와 동일)"
+  type        = list(string)
+  default     = ["ap-northeast-2a", "ap-northeast-2b"]
+}

@@ -63,3 +63,14 @@ variable "node_instance_type" {
   type        = string
   default     = "t3.medium"
 }
+
+
+# ── 채점 IAM principal (EKS ClusterAdmin access entry) ──
+# CloudShell 등 채점 신원의 role/user ARN (예: arn:aws:iam::<acct>:user/<name>).
+# 설정 시 access entry 생성. 비우면 생성 안 함(클러스터 생성자=apply 주체는 이미 admin).
+# !! STS assumed-role 세션 ARN(arn:aws:sts::...:assumed-role/.../세션) 은 사용 불가 !!
+variable "grader_principal_arn" {
+  description = "채점 IAM principal ARN(role/user). 비우면 access entry 생성 안 함."
+  type        = string
+  default     = ""
+}

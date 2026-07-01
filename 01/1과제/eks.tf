@@ -318,3 +318,19 @@ resource "aws_eks_pod_identity_association" "book" {
 
   depends_on = [aws_eks_addon.pod_identity]
 }
+
+
+############################
+# EKS API access from within the VPC (bastion grading/kubectl/helm)
+#   private endpoint 가 켜지면 in-VPC 에서 클러스터 FQDN 이 프라이빗 ENI(10.0.x)로 해석되므로,
+#   클러스터 보안그룹이 VPC 내부 443 을 허용해야 bastion 에서 kubectl/helm/채점이 가능하다.
+############################
+resource "aws_security_group_rule" "eks_api_from_vpc" {
+  type              = "ingress"
+  description       = "Allow EKS API server 443 from within wsc-vpc (bastion grading/kubectl)"
+  from_port         = 443
+  to_port           = 443
+  protocol          = "tcp"
+  cidr_blocks       = ["10.0.0.0/16"]
+  security_group_id = aws_eks_cluster.this.vpc_config[0].cluster_security_group_id
+}

@@ -217,6 +217,8 @@ resource "aws_instance" "app_v1" {
   user_data              = <<-EOF
     #!/bin/bash
     set -eux
+    dnf install -y python3 python3-pip
+    pip3 install flask
     cat > /opt/app.py <<'PY'
     ${local.app_v1}
     PY
@@ -232,6 +234,8 @@ resource "aws_instance" "app_v2" {
   user_data              = <<-EOF
     #!/bin/bash
     set -eux
+    dnf install -y python3 python3-pip
+    pip3 install flask
     cat > /opt/app.py <<'PY'
     ${local.app_v2}
     PY
@@ -385,6 +389,10 @@ resource "aws_vpclattice_service_network" "main" {
 resource "aws_vpclattice_service_network_vpc_association" "hub" {
   service_network_identifier = aws_vpclattice_service_network.main.id
   vpc_identifier             = aws_vpc.hub.id
+}
+resource "aws_vpclattice_service_network_vpc_association" "spoke" {
+  service_network_identifier = aws_vpclattice_service_network.main.id
+  vpc_identifier             = aws_vpc.spoke.id
 }
 resource "aws_vpclattice_service" "app" {
   name      = "wsc-app-service"

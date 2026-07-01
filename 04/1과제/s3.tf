@@ -35,7 +35,7 @@ resource "aws_s3_object" "index" {
   bucket       = aws_s3_bucket.static.id
   key          = "static/index.html"
   source       = "${path.module}/files/index.html"
-  etag         = filemd5("${path.module}/files/index.html")
+  source_hash         = filemd5("${path.module}/files/index.html")
   content_type = "text/html"
   # 객체별 KMS 암호화 (head-object SSEKMSKeyId 채점)
   kms_key_id = aws_kms_key.main.arn
@@ -45,7 +45,7 @@ resource "aws_s3_object" "main" {
   bucket       = aws_s3_bucket.static.id
   key          = "static/main.jpeg"
   source       = "${path.module}/files/main.jpeg"
-  etag         = filemd5("${path.module}/files/main.jpeg")
+  source_hash         = filemd5("${path.module}/files/main.jpeg")
   content_type = "image/jpeg"
   kms_key_id   = aws_kms_key.main.arn
 }

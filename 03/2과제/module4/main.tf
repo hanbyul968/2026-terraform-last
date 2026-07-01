@@ -124,10 +124,10 @@ resource "aws_dynamodb_table_item" "inventory_seed" {
   hash_key   = aws_dynamodb_table.inventory.hash_key
 
   item = jsonencode({
-    product_id = { S = each.value.product_id }
-    name       = { S = each.value.name }
-    stock      = { N = tostring(each.value.stock) }
-    unit_price = { N = tostring(each.value.unit_price) }
+    product_id   = { S = each.value.product_id }
+    product_name = { S = each.value.product_name }
+    stock        = { N = tostring(each.value.stock) }
+    category     = { S = each.value.category }
   })
 }
 

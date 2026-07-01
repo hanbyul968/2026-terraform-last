@@ -16,9 +16,8 @@ winget install Amazon.AWSCLI
 # AWS 자격증명 설정 (대회 지급 계정)
 aws configure        # Access Key / Secret / region=us-west-2
 
-# 소스
-git clone https://github.com/hnmly/2026-terraform.git
-cd 2026-terraform\07\2과제
+# 소스: 지급된 2과제 폴더로 이동 (별도 clone 불필요 — 런타임 외부 repo 의존 없음)
+cd C:\Users\competitor\2026-terraform\07\2과제
 ```
 
 ---
@@ -67,10 +66,47 @@ kubectl get pod -n karpenter
 kubectl get deploy sqs-worker -n skills-sqs
 ```
 
-> **재실행이 필요하면** bastion에서:
+> **재실행이 필요하면** bastion에서 (앱·스크립트가 인스턴스에 내장되어 외부 repo 불필요):
 > ```bash
-> cd /root/2026-terraform/07/2과제 && git pull && bash k8s-apply.sh
+> cd /root/task2 && bash k8s-apply.sh
 > ```
+
+---
+
+## (선택) 옵션 B — Linux 배포용 bastion에서 루트 전체 apply
+
+멀티 리전 apply를 Windows에서 직접 돌리기 어려운 경우, `bastion/` 폴더를 로컬에서
+apply하면 **배포 전용 Linux bastion**(전용 VPC `10.250.0.0/16`, SSM 접속)이 생성되고,
+로컬 2과제 코드가 S3 번들로 업로드되어 `/opt/task2`에 준비됩니다. 이후 그 안에서
+루트 전체(module1~4 + in-VPC bastion)를 한 번에 apply 합니다.
+
+```powershell
+# 1) 로컬(Windows)에서 배포용 bastion 생성
+cd C:\Users\competitor\2026-terraform\07\2과제\bastion
+terraform init
+terraform apply -auto-approve
+terraform output ssm_connect_command      # 접속 명령 출력
+
+# 2) SSM 접속 (키페어 불필요)
+aws ssm start-session --target <bastion-instance-id> --region us-west-2
+```
+```bash
+# 3) bastion 안에서: 부트스트랩 완료 대기 후 원클릭 실행
+until [ -f /opt/task2/READY ]; do echo waiting...; sleep 5; done
+bash /opt/task2/run.sh      # = terraform init && apply (루트 전체)
+```
+> 채점 직전 로컬에서 `cd bastion; terraform destroy` 로 **배포용 bastion만** 제거합니다
+> (채점 대상 리소스는 유지). 두 bastion의 state는 서로 분리되어 있습니다.
+
+### 로컬 apply vs bastion 요약
+| 모듈 | 로컬(Windows) 단독 apply | 비고 |
+|------|--------------------------|------|
+| 1 DocumentDB | ✅ 생성됨 | EC2 user_data가 앱 설치·seed·인덱스까지 자동(AWS 내부 실행) |
+| 2 VPC Lattice | ✅ 생성됨 | EC2 user_data가 앱 자동 기동(AWS 내부 실행) |
+| 3 Cloud Event Handling | ✅ 생성됨 | 순수 리소스(부트스트랩 없음) — Windows에서 그대로 완성 |
+| 4 EKS/SQS | ✅ 생성됨 | EKS+in-VPC bastion까지 생성, bastion이 K8s 레이어 자동 배포 |
+> 4개 모듈 모두 **로컬 `terraform apply` 한 번으로 완성**됩니다. 옵션 B는 Windows에서
+> 멀티리전 apply가 불편할 때의 대안일 뿐, 결과물은 동일합니다.
 
 ---
 
@@ -112,7 +148,7 @@ aws ssm start-session --target $BASTION --region us-west-2
 ```bash
 # bastion 안에서
 sudo tail -n 50 /var/log/skills-bastion-bootstrap.log   # "BASTION_BOOTSTRAP_DONE"?
-cd /root/2026-terraform/07/2과제 && bash k8s-apply.sh    # 재실행(멱등)
+cd /root/task2 && bash k8s-apply.sh    # 재실행(멱등, 외부 repo 불필요)
 ```
 
 ### ② CoreDNS가 Fargate에 안 떠서 DNS 죽음 (`STS/SQS lookup ... 53: connection refused`)
@@ -149,14 +185,23 @@ kubectl scale deployment karpenter -n karpenter --replicas=1
 07/2과제/
 ├── provider.tf      # aws alias 4개(seoul/tokyo/singapore/oregon) + tls/null/archive
 ├── variables.tf     # docdb_password
-├── module1.tf       # DocumentDB (ap-northeast-2)
+├── module1.tf       # DocumentDB (ap-northeast-2)  — EC2 user_data는 app/module1/userdata.sh.tpl
 ├── module2.tf       # VPC Lattice (ap-northeast-1)
 ├── module3.tf       # EventBridge+Lambda (ap-southeast-1)
-├── module4.tf       # EKS+SQS+IRSA (us-west-2) + Bastion EC2
-├── app/             # 앱 소스 (제공 배포파일 그대로)
-├── k8s-apply.sh     # 모듈4 K8s 배포 — bastion이 자동 실행(어디서든 실행 가능, terraform state 불필요)
+├── module4.tf       # EKS+SQS+IRSA (us-west-2) + in-VPC Bastion EC2(app/module4/bastion-userdata.sh.tpl)
+├── app/             # 앱 소스 (제공 배포파일 그대로) + user_data 템플릿(.tpl)
+│   ├── module1/     # docdb_client.py, retail_dataset.json, requirements.txt, userdata.sh.tpl
+│   ├── module2/     # client/service 앱 + userdata 스크립트(인라인 heredoc)
+│   ├── module3/     # remediate_security_group.py (Lambda)
+│   └── module4/     # worker.py, Dockerfile, requirements.txt, bastion-userdata.sh.tpl
+├── k8s-apply.sh     # 모듈4 K8s 배포 — in-VPC bastion이 자동 실행(state 불필요, 멱등)
+├── bastion/         # (선택) 로컬 대신 Linux bastion에서 루트 전체를 apply 하는 STAGE1 폴더
 └── README.md
 ```
+
+> **자체 완결(self-contained)**: 모든 EC2/bastion 부트스트랩은 앱 소스를 terraform이
+> `base64gzip`으로 user_data에 인라인 주입한다. 런타임에 GitHub 등 외부 저장소를
+> 내려받지 않으므로, 어디서(로컬 Windows / bastion) apply 하든 동일하게 동작한다.
 
 ---
 
@@ -222,7 +267,7 @@ kubectl scale deployment karpenter -n karpenter --replicas=1
 | SQS Visibility Timeout | `module4.tf` | `aws_sqs_queue.m4` → `visibility_timeout_seconds` | `60` |
 | Fargate Profile 이름 | `module4.tf` | `aws_eks_fargate_profile.m4_keda / m4_karpenter` → `fargate_profile_name` | `skills-sqs-fp-keda / -karpenter` |
 | Bastion 인스턴스 타입 | `module4.tf` | `aws_instance.m4_bastion` → `instance_type` | `t3.small` |
-| Bastion이 clone하는 repo | `module4.tf` | `aws_instance.m4_bastion` user_data의 `git clone` URL | `hnmly/2026-terraform` |
+| Bastion K8s 부트스트랩 스크립트 | `app/module4/bastion-userdata.sh.tpl` (`k8s-apply.sh`+worker 앱을 base64gzip 인라인 주입, 외부 repo clone 없음) | 템플릿 편집 | — |
 | Karpenter 버전 | `k8s-apply.sh` | `helm ... karpenter ... --version` | `1.4.0` |
 | KEDA queueLength | `k8s-apply.sh` | ScaledObject → `queueLength` | `"2"` |
 | KEDA pollingInterval | `k8s-apply.sh` | ScaledObject → `pollingInterval` | `15` |

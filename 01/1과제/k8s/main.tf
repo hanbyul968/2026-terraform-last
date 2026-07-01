@@ -107,6 +107,8 @@ resource "kubernetes_service_v1" "book" {
     }
     type = "ClusterIP"
   }
+
+  depends_on = [null_resource.wait_lbc_webhook]
 }
 
 # ── AWS Load Balancer Controller : IAM(정책+역할) + Pod Identity 연결 ──
@@ -179,6 +181,35 @@ resource "helm_release" "lb_controller" {
   }
 }
 
+# ── LB Controller 웹훅이 실제로 Ready(엔드포인트 보유)될 때까지 대기 ──
+#   helm 설치 직후에도 webhook(mservice.elbv2.k8s.aws) 엔드포인트가 잠시 비어 있어,
+#   이 사이에 Service(book/kps)를 만들면 "no endpoints available for service
+#   aws-load-balancer-webhook-service" 로 실패한다. 아래에서 엔드포인트가 채워질 때까지 기다린다.
+resource "null_resource" "wait_lbc_webhook" {
+  triggers = { lbc = helm_release.lb_controller.id }
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    environment = {
+      REGION  = var.region
+      CLUSTER = var.cluster_name
+    }
+    command = <<-EOT
+      set -eu
+      export KUBECONFIG=$(mktemp)
+      aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER" >/dev/null
+      kubectl -n kube-system rollout status deploy/aws-load-balancer-controller --timeout=300s || true
+      for i in $(seq 1 60); do
+        EP=$(kubectl -n kube-system get endpoints aws-load-balancer-webhook-service -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null || true)
+        if [ -n "$EP" ]; then echo "LB controller webhook ready: $EP"; exit 0; fi
+        sleep 5
+      done
+      echo "WARN: lb controller webhook endpoints not ready" >&2
+      exit 1
+    EOT
+  }
+  depends_on = [helm_release.lb_controller]
+}
+
 # ── TargetGroupBinding (book svc -> wsc-book-tg) : kubectl apply ──────
 resource "null_resource" "target_group_binding" {
   triggers = {
@@ -194,6 +225,7 @@ resource "null_resource" "target_group_binding" {
     }
     command = <<-EOT
       set -eu
+      export KUBECONFIG=$(mktemp)
       aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER" >/dev/null
       f=$(mktemp)
       {
@@ -210,7 +242,7 @@ resource "null_resource" "target_group_binding" {
         echo "  targetGroupARN: $TG_ARN"
       } > "$f"
       for i in $(seq 1 30); do
-        if kubectl apply -f "$f"; then exit 0; fi
+        if kubectl apply -f "$f" --validate=false; then exit 0; fi
         sleep 10
       done
       echo "TargetGroupBinding apply failed (CRD not ready?)" >&2
@@ -230,6 +262,8 @@ resource "helm_release" "kps" {
   chart            = "kube-prometheus-stack"
   namespace        = "prometheus"
   create_namespace = true
+
+  depends_on = [null_resource.wait_lbc_webhook]
 
   values = [yamlencode({
     grafana      = { enabled = false }

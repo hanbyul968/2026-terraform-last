@@ -1,6 +1,6 @@
 resource "aws_security_group" "all" {
   name   = "skills-book-sg"
-  vpc_id = aws_vpc.main.id
+  vpc_id = data.aws_vpc.main.id
 
   ingress {
     from_port   = 0

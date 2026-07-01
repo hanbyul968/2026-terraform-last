@@ -1,5 +1,5 @@
 output "vpc_id" {
-  value = module.VPC.vpc_id
+  value = local.vpc_id
 }
 
 output "ecr_repository_url" {
@@ -19,7 +19,7 @@ output "s3_bucket_name" {
 }
 
 output "private_subnet_ids" {
-  value = module.VPC.private_subnet_ids
+  value = local.private_subnet_ids
 }
 
 output "platform_key_arn" {

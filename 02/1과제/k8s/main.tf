@@ -29,6 +29,17 @@ data "aws_kms_key" "s3" {
   key_id = var.kms_s3_alias
 }
 
+# IRSA: root 에서 만든 역할 ARN 을 SA 어노테이션에 붙인다(Pod Identity 대신).
+data "aws_iam_role" "book_app" {
+  name = "wskorea26-book-app-role"
+}
+data "aws_iam_role" "fluentbit" {
+  name = "wskorea26-fluentbit-role"
+}
+data "aws_iam_role" "lb_controller" {
+  name = "wskorea26-lb-controller-role"
+}
+
 locals {
   # local.image_url(root) 과 동일: <acct>.dkr.ecr.<region>.amazonaws.com/<repo>:<tag>
   image = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.region}.amazonaws.com/${var.ecr_repo}:${var.image_tag}"
@@ -43,8 +54,9 @@ resource "kubernetes_namespace_v1" "app" {
 
 resource "kubernetes_service_account_v1" "book" {
   metadata {
-    name      = "wskorea26-book-sa"
-    namespace = kubernetes_namespace_v1.app.metadata[0].name
+    name        = "wskorea26-book-sa"
+    namespace   = kubernetes_namespace_v1.app.metadata[0].name
+    annotations = { "eks.amazonaws.com/role-arn" = data.aws_iam_role.book_app.arn }
   }
 }
 
@@ -118,6 +130,8 @@ resource "kubernetes_service_v1" "book" {
     }
     type = "ClusterIP"
   }
+
+  depends_on = [null_resource.wait_lbc_webhook]
 }
 
 # StorageClass (모니터링 PV 용, EBS CSI + CMK)
@@ -166,11 +180,44 @@ resource "helm_release" "lb_controller" {
     name  = "serviceAccount.name"
     value = "aws-load-balancer-controller"
   }
+  set {
+    name  = "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
+    value = data.aws_iam_role.lb_controller.arn
+  }
   # addon 노드그룹에 스케줄
   set {
     name  = "nodeSelector.node-type"
     value = "addon"
   }
+}
+
+# LB Controller 웹훅이 Ready(엔드포인트 보유)될 때까지 대기.
+#   helm 설치 직후엔 webhook(mservice.elbv2.k8s.aws) 엔드포인트가 잠시 비어 있어,
+#   그 사이 Service(book/prometheus/grafana) 생성 시 "no endpoints available for service
+#   aws-load-balancer-webhook-service" 로 실패한다.
+resource "null_resource" "wait_lbc_webhook" {
+  triggers = { lbc = helm_release.lb_controller.id }
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    environment = {
+      REGION  = var.region
+      CLUSTER = var.cluster_name
+    }
+    command = <<-EOT
+      set -eu
+      export KUBECONFIG=$(mktemp)
+      aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER" >/dev/null
+      kubectl -n kube-system rollout status deploy/aws-load-balancer-controller --timeout=300s || true
+      for i in $(seq 1 60); do
+        EP=$(kubectl -n kube-system get endpoints aws-load-balancer-webhook-service -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null || true)
+        if [ -n "$EP" ]; then echo "LB controller webhook ready: $EP"; exit 0; fi
+        sleep 5
+      done
+      echo "WARN: lb controller webhook endpoints not ready" >&2
+      exit 1
+    EOT
+  }
+  depends_on = [helm_release.lb_controller]
 }
 
 # book Service -> book TG 바인딩 (TargetGroupBinding CRD)
@@ -188,6 +235,7 @@ resource "null_resource" "book_tgb" {
     }
     command = <<-EOT
       set -eu
+      export KUBECONFIG=$(mktemp)
       aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER" >/dev/null
       f=$(mktemp)
       {
@@ -204,7 +252,7 @@ resource "null_resource" "book_tgb" {
         echo "  targetGroupARN: $TG_ARN"
       } > "$f"
       for i in $(seq 1 30); do
-        if kubectl apply -f "$f"; then exit 0; fi
+        if kubectl apply -f "$f" --validate=false; then exit 0; fi
         sleep 10
       done
       echo "TargetGroupBinding apply failed (CRD not ready?)" >&2
@@ -275,7 +323,7 @@ resource "helm_release" "prometheus" {
 
   depends_on = [
     kubernetes_storage_class_v1.ebs,
-    helm_release.lb_controller,
+    null_resource.wait_lbc_webhook,
   ]
 }
 
@@ -295,7 +343,7 @@ resource "helm_release" "grafana" {
   depends_on = [
     helm_release.prometheus,
     kubernetes_config_map_v1.dashboard,
-    helm_release.lb_controller,
+    null_resource.wait_lbc_webhook,
   ]
 }
 
@@ -309,8 +357,9 @@ resource "kubernetes_namespace_v1" "logging" {
 
 resource "kubernetes_service_account_v1" "fluentbit" {
   metadata {
-    name      = "fluent-bit"
-    namespace = kubernetes_namespace_v1.logging.metadata[0].name
+    name        = "fluent-bit"
+    namespace   = kubernetes_namespace_v1.logging.metadata[0].name
+    annotations = { "eks.amazonaws.com/role-arn" = data.aws_iam_role.fluentbit.arn }
   }
 }
 
@@ -326,5 +375,5 @@ resource "helm_release" "fluentbit" {
     sa_name   = kubernetes_service_account_v1.fluentbit.metadata[0].name
   })]
 
-  depends_on = [helm_release.lb_controller]
+  depends_on = [null_resource.wait_lbc_webhook]
 }

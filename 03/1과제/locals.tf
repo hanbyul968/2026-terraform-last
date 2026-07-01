@@ -4,7 +4,15 @@ locals {
   region     = var.region
 
   # CMK 관리 주체 (variables.tf 설명 참고)
-  kms_admin_arn = var.kms_admin_arn != "" ? var.kms_admin_arn : data.aws_caller_identity.current.arn
+  #   bastion 에서 apply 하면 caller 가 일회성 STS 세션 ARN(assumed-role/ROLE/SESSION)이라
+  #   그대로 키 정책 Principal 로 쓰면 세션 종료 후 키가 영구 잠긴다.
+  #   => 세션 ARN 이면 지속되는 '역할 ARN'(arn:...:role/ROLE) 으로 정규화한다. (root/kms:* 미사용 유지)
+  kms_admin_arn = (
+    var.kms_admin_arn != "" ? var.kms_admin_arn :
+    can(regex("^arn:[^:]+:sts::[0-9]+:assumed-role/", data.aws_caller_identity.current.arn)) ?
+    format("arn:%s:iam::%s:role/%s", data.aws_partition.current.partition, data.aws_caller_identity.current.account_id, split("/", data.aws_caller_identity.current.arn)[1]) :
+    data.aws_caller_identity.current.arn
+  )
 
   # ── 리소스 이름 (과제 고정값) ───────────────────────────────
   cluster_name = "wsc2026-eks-cluster"

@@ -25,19 +25,3 @@ output "m3_state_machine_arn" {
   description = "Step Functions 상태 머신 ARN"
   value       = aws_sfn_state_machine.workflow.arn
 }
-
-# ---- Module 4. RDS ----
-output "m4_cluster_arn" {
-  description = "Aurora 클러스터 ARN"
-  value       = aws_rds_cluster.aurora.arn
-}
-
-output "m4_secret_arn" {
-  description = "Secrets Manager 시크릿 ARN"
-  value       = aws_secretsmanager_secret.rds.arn
-}
-
-output "m4_lambda_name" {
-  description = "RDS 조회 Lambda 이름"
-  value       = aws_lambda_function.rds_query.function_name
-}

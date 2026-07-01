@@ -1,15 +1,45 @@
-> # 🚀 배포 방법 (2단계 — 이 안내가 최신/정답)
-> 아래 본문의 로컬 `terraform apply` 류 설명은 구버전입니다. **로컬에서 bastion 만 띄우고, bastion 안에서 main 을 apply** 합니다.
+> # 🚀 배포 방법 (이 안내가 최신/정답 — 아래 본문 구버전 무시)
+>
+> 로컬에서 **bastion 스테이지만** apply(전용 VPC+bastion 생성 + 이 소스를 번들로 업로드),
+> 그 다음 **bastion 안에서 `run.sh`** 로 root(EKS/ALB/…) → k8s/helm → CloudFront 순서로 apply.
+>
 > ```powershell
+> # Phase 1 (로컬): 새 VPC + bastion + 소스 번들
 > cd C:\Users\competitor\2026-terraform\03\1과제\bastion
 > terraform init; terraform apply -auto-approve
-> terraform output -raw ssm_connect_command
+> terraform output -raw ssm_connect_command   # 또는 SSH
 > ```
 > ```bash
+> # Phase 2 (bastion): 3단계 자동 (root deploy_cdn=false → k8s → root deploy_cdn=true)
 > until [ -f /opt/task1/READY ]; do sleep 5; done
-> cd /opt/task1 && bash run.sh 2>&1 | tee /tmp/apply.log    # 끝에 finalize 가 EKS private-only 전환
+> BIBUNHO=<비번호> GRADER=arn:aws:iam::<acct>:user/<채점자> bash /opt/task1/run.sh
 > ```
-> ⚠️ 구 `bastion.tf` 는 `bastion.tf.OLD-in-main` 으로 비활성. default VPC 없음 → `bastion/main.tf` 를 전용 VPC 로 교체 필요(01 참고).
+>
+> ## ⚑ KMS 두 가지 모드 (계정에 따라)
+>
+> | 변수 | 기본값 | 의미 |
+> |---|---|---|
+> | `reuse_kms` | **false** | CMK 5개를 **신규 생성**(관리자=배포 role, 안 잠김). 대회/깨끗한 계정용. |
+> | `reuse_eks_cluster_role` | **false** | `wsc2026-eks-cluster-role` **신규 생성**. |
+>
+> **대회(깨끗한 다른 계정)** → 기본값 그대로. 즉 이 폴더의 **`reuse.auto.tfvars` 를 삭제**하면
+> CMK와 eks 역할을 정상 신규 생성한다. **이게 정답 경로다.**
+>
+> **이 연습 계정(640107381732)만** → `reuse.auto.tfvars`(reuse_kms=true, reuse_eks_cluster_role=true)로
+> 이전 배포가 남긴 '잠긴' CMK 5개를 재사용한다. 그 키들은 정책이 root 를 배제하고 관리 권한을
+> 사라진 세션 ARN 에만 줘서 **root 조차 삭제/DescribeKey 불가**(AWS Support 만 해제 가능).
+> 그래서 새로 만들 수도, `data.aws_kms_alias`(내부 DescribeKey)로 읽을 수도 없어 `kms_key_arns`
+> 로 ARN 을 직접 지정해 재사용하고(서비스 ViaService 사용 권한은 열려 있음), eks 키 정책이
+> 기존 클러스터 역할만 허용하므로 그 역할도 재사용한다.
+>
+> **왜 잠겼나(재발 방지)**: `kms_admin_arn` 을 bastion 의 일회성 STS 세션 ARN 으로 두면 세션 종료
+> 후 키가 영구 잠긴다. `locals.tf` 에서 세션 ARN → **지속되는 role ARN** 으로 정규화해 두었으니
+> 신규 생성(reuse_kms=false)한 키는 다시는 안 잠긴다.
+>
+> ## ⚠️ 편집 시 CRLF 금지
+> `.tf`/`.sh` 를 Windows 에서 편집하면 `\r\n` 이 들어가 `ecr.tf` 의 bash local-exec 가
+> `set: invalid option`, `path "./files\r" not found` 로 깨진다. **반드시 LF** 로 저장할 것.
+
 
 
 # WSC2026 제1과제 Terraform (인천기능경기대회 v2)

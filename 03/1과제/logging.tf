@@ -8,7 +8,7 @@
 resource "aws_cloudwatch_log_group" "app" {
   name              = "/wsc2026/app/log"
   retention_in_days = 7
-  kms_key_id        = aws_kms_key.eks.arn
+  kms_key_id        = local.kms_eks_arn
   tags              = { Name = "/wsc2026/app/log" }
 }
 
@@ -39,7 +39,7 @@ resource "aws_iam_role_policy" "fluentbit" {
       {
         Effect   = "Allow"
         Action   = ["kms:GenerateDataKey", "kms:Decrypt"]
-        Resource = aws_kms_key.eks.arn
+        Resource = local.kms_eks_arn
       }
     ]
   })

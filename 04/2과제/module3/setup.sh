@@ -43,6 +43,22 @@ YAML
 helm repo add grafana https://grafana.github.io/helm-charts
 helm repo update
 
+# ── AWS Load Balancer Controller (EKS 1.35 에서 Service type=LoadBalancer/NLB 프로비저닝) ──
+#    IRSA 대신 노드 인스턴스 롤에 LBC 정책을 부착해 컨트롤러가 노드 크리덴셜을 사용한다.
+ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+VPC_ID=$(aws eks describe-cluster --name "$CLUSTER" --region "$REGION" --query 'cluster.resourcesVpcConfig.vpcId' --output text)
+NODE_ROLE_ARN=$(aws eks describe-nodegroup --cluster-name "$CLUSTER" --nodegroup-name wsc-logging-ng --region "$REGION" --query 'nodegroup.nodeRole' --output text)
+NODE_ROLE=$(basename "$NODE_ROLE_ARN")
+curl -sL -o /tmp/lbc-iam.json https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.9.2/docs/install/iam_policy.json
+aws iam create-policy --policy-name WSCLoggingLBC --policy-document file:///tmp/lbc-iam.json 2>/dev/null || true
+aws iam attach-role-policy --role-name "$NODE_ROLE" --policy-arn "arn:aws:iam::$ACCOUNT:policy/WSCLoggingLBC" || true
+helm repo add eks https://aws.github.io/eks-charts
+helm repo update
+helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system \
+  --set clusterName="$CLUSTER" --set region="$REGION" --set vpcId="$VPC_ID" \
+  --set serviceAccount.create=true --set serviceAccount.name=aws-load-balancer-controller
+kubectl -n kube-system rollout status deploy/aws-load-balancer-controller --timeout=180s || true
+
 # ── Loki (SingleBinary, filesystem, PVC 10Gi, port 3100) ──────────────────────
 cat > /tmp/loki-values.yaml <<'YAML'
 loki:
@@ -118,6 +134,7 @@ datasources:
     datasources:
       - name: Loki
         type: loki
+        uid: loki
         access: proxy
         url: http://loki.${NS}.svc.cluster.local:3100
         isDefault: true

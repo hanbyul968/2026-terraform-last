@@ -1,6 +1,11 @@
 # ═══════════════════════════════════════════════════════════════
 # VPC / Subnet / Route Table  (Reference01, 과제 3)
 #
+# 이 bastion 스테이지가 진짜 과제 VPC(wskorea26-vpc)와 서브넷/IGW/NAT/라우팅을
+# 생성한다. bastion EC2 는 이 VPC 의 퍼블릭 서브넷(wskorea26-pub-subnet-c)에
+# 위치하므로, EKS private-only 노드/클러스터와 같은 VPC 안에서 kubectl/헬름/
+# 포트포워딩이 계속 동작한다. root(2단계)는 data.tf 로 이 리소스들을 조회한다.
+#
 # 채점(1-1) CIDR:
 #   VPC                      172.16.0.0/16
 #   wskorea26-pub-subnet-c   172.16.1.0/24

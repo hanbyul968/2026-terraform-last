@@ -96,7 +96,7 @@ resource "aws_ecs_service" "book" {
   launch_type     = "FARGATE"
 
   network_configuration {
-    subnets          = aws_subnet.public[*].id
+    subnets          = data.aws_subnets.public.ids
     security_groups  = [aws_security_group.ecs.id]
     assign_public_ip = true
   }

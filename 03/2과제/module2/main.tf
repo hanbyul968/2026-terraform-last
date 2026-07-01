@@ -1,6 +1,7 @@
 terraform {
   required_providers {
-    aws = { source = "hashicorp/aws", version = "~> 6.0" }
+    aws  = { source = "hashicorp/aws", version = "~> 6.0" }
+    null = { source = "hashicorp/null", version = "~> 3.0" }
   }
 }
 
@@ -147,19 +148,21 @@ resource "aws_instance" "keycloak" {
   subnet_id              = aws_subnet.priv_a.id
   vpc_security_group_ids = [aws_security_group.keycloak.id]
   iam_instance_profile   = aws_iam_instance_profile.keycloak.name
-  user_data              = <<-EOF
-    #!/bin/bash
-    set -eux
-    dnf install -y java-17-amazon-corretto
-    cd /opt
-    KC=keycloak-25.0.6
-    curl -sL https://github.com/keycloak/keycloak/releases/download/25.0.6/$KC.tar.gz -o kc.tar.gz
-    tar xzf kc.tar.gz && mv $KC keycloak
-    export KEYCLOAK_ADMIN=admin
-    export KEYCLOAK_ADMIN_PASSWORD='Skill53#!!@#'
-    nohup /opt/keycloak/bin/kc.sh start-dev --http-port=8080 --proxy-headers=xforwarded --hostname-strict=false >/var/log/keycloak.log 2>&1 &
-  EOF
-  tags                   = { Name = "wsc2026-keycloak" }
+  metadata_options {
+    http_tokens   = "required"
+    http_endpoint = "enabled"
+  }
+  user_data = templatefile("${path.module}/userdata.sh.tpl", {
+    admin_password = "Skill53#!!@#"
+    realm          = "wsc2026-aws"
+    account_id     = data.aws_caller_identity.current.account_id
+    saml_provider  = "wsc2026-keycloak-idp"
+    dev_role       = "wsc2026-dev-role"
+    infra_role     = "wsc2026-infra-role"
+    dev_user_pw    = "Skills_dev53%$%"
+    infra_user_pw  = "Skills_infra53#@#"
+  })
+  tags = { Name = "wsc2026-keycloak" }
 }
 
 # ── ALB ──────────────────────────────────────────────────────────────
@@ -197,25 +200,12 @@ resource "aws_lb_listener" "http" {
 }
 
 # ── SAML IdP + dev/infra Roles ───────────────────────────────────────
-resource "aws_iam_saml_provider" "keycloak" {
-  name                   = "wsc2026-keycloak-idp"
-  saml_metadata_document = file("${path.module}/saml-metadata.xml")
-}
-
+# Keycloak Realm 의 SAML 메타데이터는 EC2(userdata.sh.tpl)로 Keycloak/Realm 기동
+# 후에야 존재하므로, IAM SAML Provider(wsc2026-keycloak-idp) 와 Role(dev/infra)은
+# saml-iam.sh 를 local-exec(apply 시, bastion 리눅스)로 실행하여 실제 descriptor 로
+# 등록한다. 관리형 정책(dev/infra)만 terraform 이 관리하고 그 ARN 을 스크립트에 전달.
 data "aws_caller_identity" "current" {}
 
-resource "aws_iam_role" "dev" {
-  name = "wsc2026-dev-role"
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect    = "Allow"
-      Principal = { Federated = aws_iam_saml_provider.keycloak.arn }
-      Action    = "sts:AssumeRoleWithSAML"
-      Condition = { StringEquals = { "SAML:aud" = "https://signin.aws.amazon.com/saml" } }
-    }]
-  })
-}
 resource "aws_iam_policy" "dev" {
   name = "wsc2026-dev-policy"
   policy = jsonencode({
@@ -228,23 +218,7 @@ resource "aws_iam_policy" "dev" {
     }]
   })
 }
-resource "aws_iam_role_policy_attachment" "dev" {
-  role       = aws_iam_role.dev.name
-  policy_arn = aws_iam_policy.dev.arn
-}
 
-resource "aws_iam_role" "infra" {
-  name = "wsc2026-infra-role"
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect    = "Allow"
-      Principal = { Federated = aws_iam_saml_provider.keycloak.arn }
-      Action    = "sts:AssumeRoleWithSAML"
-      Condition = { StringEquals = { "SAML:aud" = "https://signin.aws.amazon.com/saml" } }
-    }]
-  })
-}
 resource "aws_iam_policy" "infra" {
   name = "wsc2026-infra-policy"
   policy = jsonencode({
@@ -256,10 +230,43 @@ resource "aws_iam_policy" "infra" {
     ]
   })
 }
-resource "aws_iam_role_policy_attachment" "infra" {
-  role       = aws_iam_role.infra.name
-  policy_arn = aws_iam_policy.infra.arn
+
+# Keycloak 기동(Realm/SAML Client 생성) 후 실제 SAML descriptor 로 IAM SAML Provider +
+# dev/infra Role 생성 및 정책 연결. (apply 는 bastion 리눅스에서 수행)
+resource "null_resource" "saml_iam" {
+  triggers = {
+    alb          = aws_lb.main.dns_name
+    dev_policy   = aws_iam_policy.dev.arn
+    infra_policy = aws_iam_policy.infra.arn
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    command = join(" ", [
+      "bash",
+      "${path.module}/saml-iam.sh",
+      "'${aws_lb.main.dns_name}'",
+      "'${data.aws_caller_identity.current.account_id}'",
+      "'${aws_iam_policy.dev.arn}'",
+      "'${aws_iam_policy.infra.arn}'",
+      "'ap-northeast-2'",
+      "'wsc2026-keycloak-idp'",
+      "'wsc2026-dev-role'",
+      "'wsc2026-infra-role'",
+    ])
+  }
+
+  depends_on = [
+    aws_lb_listener.http,
+    aws_lb_target_group_attachment.main,
+    aws_instance.keycloak,
+    aws_iam_policy.dev,
+    aws_iam_policy.infra,
+  ]
 }
 
 output "keycloak_alb" { value = aws_lb.main.dns_name }
-output "saml_provider_arn" { value = aws_iam_saml_provider.keycloak.arn }
+output "saml_provider_name" { value = "wsc2026-keycloak-idp" }
+output "login_url" {
+  value = "http://${aws_lb.main.dns_name}/realms/wsc2026-aws/protocol/saml/clients/amazon-aws"
+}

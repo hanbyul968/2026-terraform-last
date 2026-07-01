@@ -11,7 +11,7 @@ resource "aws_lb" "book" {
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb.id]
-  subnets            = aws_subnet.public[*].id
+  subnets            = data.aws_subnets.public.ids
 
   tags = {
     Name = "${local.prefix}-book-alb"
@@ -22,7 +22,7 @@ resource "aws_lb_target_group" "book" {
   name        = "${local.prefix}-book-tg"
   port        = var.container_port
   protocol    = "HTTP"
-  vpc_id      = aws_vpc.main.id
+  vpc_id      = data.aws_vpc.main.id
   target_type = "ip"
 
   health_check {

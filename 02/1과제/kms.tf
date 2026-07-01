@@ -45,6 +45,16 @@ resource "aws_kms_key" "s3" {
           StringEquals = { "kms:CallerAccount" = local.account_id }
           StringLike   = { "kms:ViaService" = ["ec2.${local.region}.amazonaws.com", "s3.${local.region}.amazonaws.com", "ecr.${local.region}.amazonaws.com"] }
         }
+      },
+      {
+        Sid       = "AllowCloudFrontOACDecrypt"
+        Effect    = "Allow"
+        Principal = { Service = "cloudfront.amazonaws.com" }
+        Action    = ["kms:Decrypt", "kms:GenerateDataKey*"]
+        Resource  = "*"
+        Condition = {
+          StringLike = { "AWS:SourceArn" = "arn:${local.partition}:cloudfront::${local.account_id}:distribution/*" }
+        }
       }
     ]
   })

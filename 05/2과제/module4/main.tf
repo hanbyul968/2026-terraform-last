@@ -133,7 +133,7 @@ sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/ssh
 find /etc/ssh/sshd_config.d/ -type f -exec sed -i 's/^PasswordAuthentication.*/PasswordAuthentication yes/' {} \;
 systemctl restart sshd
 
-dnf install -y nginx openssl
+dnf install -y nginx openssl jq
 
 openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
   -keyout /etc/nginx/ssl.key \
@@ -269,7 +269,7 @@ for CLIENT in gj2026-keycloak-dev gj2026-keycloak-sec; do
   CLIENT_PAYLOAD="{
     \"clientId\": \"$CLIENT\",
     \"enabled\": true,
-    \"publicClient\": false,
+    \"publicClient\": true,
     \"protocol\": \"openid-connect\",
     \"standardFlowEnabled\": false,
     \"directAccessGrantsEnabled\": true,
@@ -303,6 +303,63 @@ chmod +x /usr/local/bin/keycloak-setup.sh
 
 # 백그라운드에서 설정 스크립트 실행
 nohup /usr/local/bin/keycloak-setup.sh > /var/log/keycloak-setup.log 2>&1 &
+
+############################################
+# 3) AWS CLI 인증 스크립트 (~/.aws/gj2026-keycloak-creds.sh) 자동 생성 (채점 4-3)
+#    Keycloak ROPC(비밀번호 그랜트) → ID Token → STS AssumeRoleWithWebIdentity
+#    → credential_process 형식 JSON 출력.
+#    사용: gj2026-keycloak-creds.sh <dev|sec> <username>
+#    - Role Session Name: keycloak-session
+#    - team→role/client/password 매핑 (dev-user/dev-user2 = dev123!, sec-user = sec123!)
+############################################
+mkdir -p /home/ec2-user/.aws
+cat > /home/ec2-user/.aws/gj2026-keycloak-creds.sh << 'CREDSEOF'
+#!/bin/bash
+set -euo pipefail
+TEAM="$${1:?team(dev|sec) required}"
+USERNAME="$${2:?username required}"
+REGION="eu-central-1"
+ACCT="__ACCOUNT_ID__"
+
+case "$TEAM" in
+  dev) CLIENT="gj2026-keycloak-dev"; ROLE="gj2026-keycloak-dev-role"; PW="dev123!" ;;
+  sec) CLIENT="gj2026-keycloak-sec"; ROLE="gj2026-keycloak-sec-role"; PW="sec123!" ;;
+  *) echo "unknown team: $TEAM" >&2; exit 1 ;;
+esac
+
+# 현재 인스턴스 Public IP (IMDSv2)
+IMDS_TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
+  -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
+IP=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
+  http://169.254.169.254/latest/meta-data/public-ipv4)
+
+# Keycloak 비밀번호 그랜트로 ID Token 발급 (public client)
+ID_TOKEN=$(curl -sk -X POST "https://$IP/realms/team/protocol/openid-connect/token" \
+  -d "client_id=$CLIENT" -d "username=$USERNAME" -d "password=$PW" \
+  -d "grant_type=password" -d "scope=openid" | jq -r '.id_token')
+
+# STS 임시 자격증명 (web identity)
+CREDS=$(aws sts assume-role-with-web-identity \
+  --role-arn "arn:aws:iam::$ACCT:role/$ROLE" \
+  --role-session-name keycloak-session \
+  --web-identity-token "$ID_TOKEN" \
+  --query 'Credentials' --output json)
+
+# credential_process 규격 출력
+echo "$CREDS" | jq '{Version:1, AccessKeyId:.AccessKeyId, SecretAccessKey:.SecretAccessKey, SessionToken:.SessionToken, Expiration:.Expiration}'
+CREDSEOF
+
+# 생성 시점 계정 ID 주입 (credential_process 재귀 방지: sts 호출 없이 ARN 구성)
+sed -i "s/__ACCOUNT_ID__/${data.aws_caller_identity.current.account_id}/" \
+  /home/ec2-user/.aws/gj2026-keycloak-creds.sh
+chmod +x /home/ec2-user/.aws/gj2026-keycloak-creds.sh
+chown -R ec2-user:ec2-user /home/ec2-user/.aws
+
+# gj2026-keycloak-dev / gj2026-keycloak-sec 프로파일 등록 (credential_process)
+sudo -u ec2-user aws configure set credential_process \
+  "/home/ec2-user/.aws/gj2026-keycloak-creds.sh dev dev-user" --profile gj2026-keycloak-dev || true
+sudo -u ec2-user aws configure set credential_process \
+  "/home/ec2-user/.aws/gj2026-keycloak-creds.sh sec sec-user" --profile gj2026-keycloak-sec || true
 USEREOF
 
   tags = { Name = "gj2026-keycloak-ec2" }

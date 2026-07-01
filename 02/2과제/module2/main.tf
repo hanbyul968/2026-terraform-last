@@ -141,9 +141,9 @@ resource "aws_security_group" "ec2" {
   name   = "wsc2026-analytics-ec2-sg"
   vpc_id = aws_vpc.main.id
   ingress {
-    description     = "from ALB 8080"
-    from_port       = 8080
-    to_port         = 8080
+    description     = "from ALB 5000"
+    from_port       = 5000
+    to_port         = 5000
     protocol        = "tcp"
     security_groups = [aws_security_group.alb.id]
   }
@@ -161,14 +161,12 @@ resource "aws_instance" "ec2" {
   subnet_id              = aws_subnet.priv_a.id
   vpc_security_group_ids = [aws_security_group.ec2.id]
   iam_instance_profile   = aws_iam_instance_profile.ec2.name
-  user_data              = <<-EOF
-    #!/bin/bash
-    set -eux
-    dnf install -y python3-pip
-    # 배포파일 Application.md 의 앱을 /opt/app 에 배치하여 8080 으로 기동 (Kinesis: wsc2026-order-stream)
-    mkdir -p /opt/app
-  EOF
-  tags                   = { Name = "wsc2026-analytics-ec2" }
+  user_data = templatefile("${path.module}/userdata.sh.tpl", {
+    app_py = file("${path.module}/app/app.py")
+    region = "ap-northeast-2"
+    stream = aws_kinesis_stream.orders.name
+  })
+  tags = { Name = "wsc2026-analytics-ec2" }
 }
 
 # ── ALB ──────────────────────────────────────────────────────────────
@@ -199,19 +197,19 @@ resource "aws_lb" "main" {
 }
 resource "aws_lb_target_group" "main" {
   name        = "wsc2026-analytics-tg"
-  port        = 8080
+  port        = 5000
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id
   target_type = "instance"
   health_check {
-    path    = "/"
-    matcher = "200-399"
+    path    = "/health"
+    matcher = "200"
   }
 }
 resource "aws_lb_target_group_attachment" "main" {
   target_group_arn = aws_lb_target_group.main.arn
   target_id        = aws_instance.ec2.id
-  port             = 8080
+  port             = 5000
 }
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn

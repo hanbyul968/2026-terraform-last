@@ -43,6 +43,17 @@ data "aws_kms_key" "main" {
   key_id = var.kms_alias
 }
 
+# book 파드가 DynamoDB 에 닿을 인터페이스 엔드포인트(root 가 생성). private DNS 미지원이라
+# 앱 SDK 에 AWS_ENDPOINT_URL_DYNAMODB 로 이 DNS 를 넘긴다.
+data "aws_vpc_endpoint" "dynamodb" {
+  vpc_id       = data.aws_vpc.this.id
+  service_name = "com.amazonaws.${var.region}.dynamodb"
+  filter {
+    name   = "vpc-endpoint-type"
+    values = ["Interface"]
+  }
+}
+
 locals {
   region    = var.region
   registry  = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.region}.amazonaws.com"
@@ -81,6 +92,9 @@ resource "kubernetes_config_map_v1" "wsc" {
   data = {
     AWS_REGION = local.region
     TABLE_NAME = var.table_name
+    # DynamoDB 인터페이스 엔드포인트(private DNS 미지원)를 앱 SDK 가 쓰도록 명시.
+    # workload 서브넷은 라우팅 0 이라 표준 dynamodb.<region>.amazonaws.com 은 못 감.
+    AWS_ENDPOINT_URL_DYNAMODB = "https://${tolist(data.aws_vpc_endpoint.dynamodb.dns_entry)[0].dns_name}"
   }
 }
 
@@ -99,6 +113,10 @@ resource "kubernetes_deployment_v1" "wsc" {
     template {
       metadata {
         labels = { app = "wsc-deploy" }
+        annotations = {
+          # ConfigMap(AWS_ENDPOINT_URL_DYNAMODB 등) 변경 시 롤링 재시작되도록 해시 주입
+          "wsc/config-hash" = sha1(jsonencode(kubernetes_config_map_v1.wsc.data))
+        }
       }
       spec {
         service_account_name = kubernetes_service_account_v1.book.metadata[0].name
@@ -172,6 +190,8 @@ resource "helm_release" "lb_controller" {
   repository = "https://aws.github.io/eks-charts"
   chart      = "aws-load-balancer-controller"
   namespace  = "kube-system"
+  timeout    = 900
+  wait       = true
 
   set {
     name  = "clusterName"
@@ -260,6 +280,8 @@ resource "helm_release" "fluentbit" {
   repository = "https://aws.github.io/eks-charts"
   chart      = "aws-for-fluent-bit"
   namespace  = kubernetes_namespace_v1.logging.metadata[0].name
+  timeout    = 900
+  wait       = true
 
   values = [templatefile("${path.module}/fluentbit-values.yaml.tftpl", {
     log_group  = var.log_group_name
@@ -327,6 +349,8 @@ resource "helm_release" "prometheus" {
   repository = "https://prometheus-community.github.io/helm-charts"
   chart      = "prometheus"
   namespace  = kubernetes_namespace_v1.monitoring.metadata[0].name
+  timeout    = 900
+  wait       = true
 
   values = [templatefile("${path.module}/prometheus-values.yaml.tftpl", {
     registry = local.registry
@@ -345,6 +369,8 @@ resource "helm_release" "grafana" {
   repository = "https://grafana.github.io/helm-charts"
   chart      = "grafana"
   namespace  = kubernetes_namespace_v1.monitoring.metadata[0].name
+  timeout    = 900
+  wait       = true
 
   values = [templatefile("${path.module}/grafana-values.yaml.tftpl", {
     registry       = local.registry

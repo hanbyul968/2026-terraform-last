@@ -1,6 +1,6 @@
 # grafana/grafana values
-image:
-  repository: ${registry}/ecr-public/grafana/grafana
+# grafana 는 public.ecr.aws/quay 에 없고 docker.io/grafana/grafana 에만 존재하므로
+# 이미지 override 없이 차트 기본(docker.io)으로 pull 한다(부팅 시 bootstrap_egress NAT 사용).
 
 nodeSelector:
   type: monitoring

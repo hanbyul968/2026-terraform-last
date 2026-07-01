@@ -1,12 +1,18 @@
 terraform {
   required_providers {
-    aws = { source = "hashicorp/aws", version = "~> 6.0" }
+    aws = { source = "hashicorp/aws", version = "~> 5.0" }
   }
 }
 
 # 4-3 Container logging — ap-northeast-1
 provider "aws" {
   region = "ap-northeast-1"
+}
+
+variable "competitor_number" {
+  description = "비번호 — Grafana admin(wsc2026-admin-<번호> / admin<번호>!) 에 사용. deploy.sh 가 -var 로 전달."
+  type        = string
+  default     = "00"
 }
 
 data "aws_caller_identity" "current" {}
@@ -35,7 +41,7 @@ resource "aws_subnet" "pub_a" {
 }
 resource "aws_subnet" "pub_c" {
   vpc_id                  = aws_vpc.main.id
-  cidr_block              = "10.3.1.0/24"
+  cidr_block              = "10.3.2.0/24"
   availability_zone       = "ap-northeast-1c"
   map_public_ip_on_launch = true
   tags = {
@@ -46,7 +52,7 @@ resource "aws_subnet" "pub_c" {
 }
 resource "aws_subnet" "priv_a" {
   vpc_id            = aws_vpc.main.id
-  cidr_block        = "10.3.2.0/24"
+  cidr_block        = "10.3.1.0/24"
   availability_zone = "ap-northeast-1a"
   tags = {
     Name                                        = "wsc-logging-sn-priv-a"
@@ -161,7 +167,7 @@ resource "aws_eks_node_group" "main" {
   scaling_config {
     desired_size = 2
     min_size     = 2
-    max_size     = 3
+    max_size     = 4
   }
   tags = { Name = "wsc-logging-node" }
   depends_on = [
@@ -170,6 +176,19 @@ resource "aws_eks_node_group" "main" {
     aws_iam_role_policy_attachment.n_ecr,
     aws_nat_gateway.main,
   ]
+}
+
+# ── EBS CSI Driver (Loki PVC 10Gi gp3 bind 용) ───────────────────────
+resource "aws_iam_role_policy_attachment" "n_ebs" {
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
+  role       = aws_iam_role.node.name
+}
+resource "aws_eks_addon" "ebs_csi" {
+  cluster_name                = aws_eks_cluster.main.name
+  addon_name                  = "aws-ebs-csi-driver"
+  resolve_conflicts_on_create = "OVERWRITE"
+  resolve_conflicts_on_update = "OVERWRITE"
+  depends_on                  = [aws_eks_node_group.main, aws_iam_role_policy_attachment.n_ebs]
 }
 
 # ── App EC2 (wsc-logging-app-bastion): docker flask wsc-log-app:5000 + Fluent Bit ──
@@ -216,8 +235,9 @@ resource "aws_iam_role" "app" {
     Statement = [{ Action = "sts:AssumeRole", Effect = "Allow", Principal = { Service = "ec2.amazonaws.com" } }]
   })
 }
-resource "aws_iam_role_policy_attachment" "app_ssm" {
-  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+# 컨테이너 빌드/실행 + helm(Loki/Grafana/LB controller) + EKS 접근 + SSM 을 위해 Admin 사용
+resource "aws_iam_role_policy_attachment" "app_admin" {
+  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
   role       = aws_iam_role.app.name
 }
 resource "aws_iam_instance_profile" "app" {
@@ -225,9 +245,66 @@ resource "aws_iam_instance_profile" "app" {
   role = aws_iam_role.app.name
 }
 
-# 배포파일 app.py / requirements.txt / Dockerfile 를 app/ 에 두고 그대로 사용 (수정 금지).
-# Loki NLB 엔드포인트는 EKS 배포 후 가변이므로, Fluent Bit 설정/도커 기동은
-# bastion deploy.sh(또는 SSM)에서 LOKI_URL 을 받아 수행한다. (manifest/app-setup.sh 참고)
+# app EC2 가 kubectl/helm 으로 클러스터를 제어할 수 있도록 cluster-admin access entry 부여
+resource "aws_eks_access_entry" "app" {
+  cluster_name  = aws_eks_cluster.main.name
+  principal_arn = aws_iam_role.app.arn
+  type          = "STANDARD"
+}
+resource "aws_eks_access_policy_association" "app_admin" {
+  cluster_name  = aws_eks_cluster.main.name
+  principal_arn = aws_iam_role.app.arn
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+  access_scope { type = "cluster" }
+  depends_on = [aws_eks_access_entry.app]
+}
+
+# ── 배포 아티팩트 S3 (app/ 배포파일 + setup.sh + ec2-bootstrap.sh) ────
+resource "aws_s3_bucket" "artifacts" {
+  bucket        = "wsc-logging-artifacts-${data.aws_caller_identity.current.account_id}"
+  force_destroy = true
+  tags          = { Name = "wsc-logging-artifacts" }
+}
+resource "aws_s3_bucket_public_access_block" "artifacts" {
+  bucket                  = aws_s3_bucket.artifacts.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+resource "aws_s3_object" "app_py" {
+  bucket = aws_s3_bucket.artifacts.id
+  key    = "app/app.py"
+  source = "${path.module}/app/app.py"
+  etag   = filemd5("${path.module}/app/app.py")
+}
+resource "aws_s3_object" "app_req" {
+  bucket = aws_s3_bucket.artifacts.id
+  key    = "app/requirements.txt"
+  source = "${path.module}/app/requirements.txt"
+  etag   = filemd5("${path.module}/app/requirements.txt")
+}
+resource "aws_s3_object" "app_docker" {
+  bucket = aws_s3_bucket.artifacts.id
+  key    = "app/Dockerfile"
+  source = "${path.module}/app/Dockerfile"
+  etag   = filemd5("${path.module}/app/Dockerfile")
+}
+resource "aws_s3_object" "setup_sh" {
+  bucket = aws_s3_bucket.artifacts.id
+  key    = "setup.sh"
+  source = "${path.module}/setup.sh"
+  etag   = filemd5("${path.module}/setup.sh")
+}
+resource "aws_s3_object" "ec2_bootstrap_sh" {
+  bucket = aws_s3_bucket.artifacts.id
+  key    = "ec2-bootstrap.sh"
+  source = "${path.module}/ec2-bootstrap.sh"
+  etag   = filemd5("${path.module}/ec2-bootstrap.sh")
+}
+
+# 배포파일 app.py/requirements.txt/Dockerfile 를 S3 로 배포하고, EC2 부팅 시
+# ec2-bootstrap.sh 를 내려받아 실행한다(도커 빌드/실행 + Loki/Grafana + Fluent Bit).
 resource "aws_instance" "app" {
   ami                         = data.aws_ami.al2023.id
   instance_type               = "t3.small"
@@ -238,12 +315,25 @@ resource "aws_instance" "app" {
   user_data                   = <<-EOF
     #!/bin/bash
     set -eux
-    dnf install -y docker
-    systemctl enable --now docker
-    mkdir -p /opt/app
+    export BUCKET=${aws_s3_bucket.artifacts.id}
+    export SSM_PARAM=/wsc/module3/loki-endpoint
+    export REGION=ap-northeast-1
+    export CLUSTER=wsc-logging-cluster
+    export NM=${var.competitor_number}
+    dnf install -y unzip tar || true
+    aws s3 cp "s3://$BUCKET/ec2-bootstrap.sh" /opt/ec2-bootstrap.sh --region "$REGION"
+    chmod +x /opt/ec2-bootstrap.sh
+    BUCKET="$BUCKET" SSM_PARAM="$SSM_PARAM" REGION="$REGION" CLUSTER="$CLUSTER" NM="$NM" bash /opt/ec2-bootstrap.sh
   EOF
-  tags                        = { Name = "wsc-logging-app-bastion" }
+  tags                        = { Name = "wsc-log-app-bastion" }
+  depends_on = [
+    aws_s3_object.app_py, aws_s3_object.app_req, aws_s3_object.app_docker,
+    aws_s3_object.setup_sh, aws_s3_object.ec2_bootstrap_sh,
+    aws_eks_node_group.main, aws_eks_access_policy_association.app_admin,
+  ]
 }
+
+output "artifacts_bucket" { value = aws_s3_bucket.artifacts.id }
 
 output "cluster_name" { value = aws_eks_cluster.main.name }
 output "cluster_endpoint" { value = aws_eks_cluster.main.endpoint }

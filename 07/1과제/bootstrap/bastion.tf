@@ -4,9 +4,11 @@
 # Bastion에는 ../main 구성과 app 바이너리가 업로드되고, 관리자 권한 인스턴스
 # 프로파일이 부여된다. 실제 채점 대상 인프라(skills-book-*)는 Bastion 안에서
 # `terraform apply` 로 생성한다.
+#
+# ※ 네트워크(skills-book-vpc/서브넷/IGW/NAT/RT/VPC엔드포인트)는 network.tf 에서
+#   생성한다. Bastion 은 그 진짜 VPC 의 public 서브넷(aws_subnet.public[0])에
+#   위치하므로, main 이 만드는 인프라와 "같은 VPC" 안에 있게 된다.
 ###############################################################################
-
-data "aws_availability_zones" "az" { state = "available" }
 
 data "aws_ami" "amazon_linux" {
   most_recent = true
@@ -17,44 +19,10 @@ data "aws_ami" "amazon_linux" {
   }
 }
 
-# --- Bastion 전용 최소 네트워크 (채점 대상 skills-book-vpc 와 분리) ---------
-resource "aws_vpc" "bastion" {
-  cidr_block           = "10.255.0.0/16"
-  enable_dns_hostnames = true
-  enable_dns_support   = true
-  tags                 = { Name = "skills-bastion-vpc" }
-}
-
-resource "aws_subnet" "bastion" {
-  vpc_id                  = aws_vpc.bastion.id
-  cidr_block              = "10.255.0.0/24"
-  availability_zone       = data.aws_availability_zones.az.names[0]
-  map_public_ip_on_launch = true
-  tags                    = { Name = "skills-bastion-public" }
-}
-
-resource "aws_internet_gateway" "bastion" {
-  vpc_id = aws_vpc.bastion.id
-  tags   = { Name = "skills-bastion-igw" }
-}
-
-resource "aws_route_table" "bastion" {
-  vpc_id = aws_vpc.bastion.id
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.bastion.id
-  }
-  tags = { Name = "skills-bastion-rt" }
-}
-
-resource "aws_route_table_association" "bastion" {
-  subnet_id      = aws_subnet.bastion.id
-  route_table_id = aws_route_table.bastion.id
-}
-
+# --- Bastion 보안 그룹 (채점 대상 진짜 VPC 안) ------------------------------
 resource "aws_security_group" "bastion" {
   name   = "skills-bastion-sg"
-  vpc_id = aws_vpc.bastion.id
+  vpc_id = aws_vpc.main.id
 
   ingress {
     description = "SSH"
@@ -114,11 +82,11 @@ resource "aws_iam_instance_profile" "bastion" {
   role = aws_iam_role.bastion.name
 }
 
-# --- Bastion EC2 ------------------------------------------------------------
+# --- Bastion EC2 (진짜 VPC 의 public 서브넷에 배치) -------------------------
 resource "aws_instance" "bastion" {
   ami                    = data.aws_ami.amazon_linux.id
   instance_type          = var.instance_type
-  subnet_id              = aws_subnet.bastion.id
+  subnet_id              = aws_subnet.public[0].id
   vpc_security_group_ids = [aws_security_group.bastion.id]
   iam_instance_profile   = aws_iam_instance_profile.bastion.name
   key_name               = aws_key_pair.bastion.key_name
@@ -128,7 +96,7 @@ resource "aws_instance" "bastion" {
     volume_type = "gp3"
   }
 
-  depends_on = [aws_internet_gateway.bastion]
+  depends_on = [aws_internet_gateway.main]
 
   connection {
     type        = "ssh"

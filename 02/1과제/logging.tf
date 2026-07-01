@@ -19,8 +19,14 @@ resource "aws_iam_role" "fluentbit" {
     Version = "2012-10-17"
     Statement = [{
       Effect    = "Allow"
-      Principal = { Service = "pods.eks.amazonaws.com" }
-      Action    = ["sts:AssumeRole", "sts:TagSession"]
+      Principal = { Federated = aws_iam_openid_connect_provider.eks.arn }
+      Action    = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = {
+          "${replace(aws_iam_openid_connect_provider.eks.url, "https://", "")}:sub" = "system:serviceaccount:logging:fluent-bit"
+          "${replace(aws_iam_openid_connect_provider.eks.url, "https://", "")}:aud" = "sts.amazonaws.com"
+        }
+      }
     }]
   })
 }
@@ -45,12 +51,5 @@ resource "aws_iam_role_policy" "fluentbit" {
   })
 }
 
-# SA(fluent-bit)는 ./k8s 스테이지에서 생성된다.
-# Pod Identity 연결은 SA 이름(문자열)만 필요하므로 root 에서 먼저 만들어 둔다.
-resource "aws_eks_pod_identity_association" "fluentbit" {
-  cluster_name    = aws_eks_cluster.this.name
-  namespace       = "logging"
-  service_account = "fluent-bit"
-  role_arn        = aws_iam_role.fluentbit.arn
-  depends_on      = [aws_eks_addon.pod_identity]
-}
+# SA(fluent-bit)는 ./k8s 스테이지에서 생성되며, 그 SA 에 이 역할 ARN 을
+# eks.amazonaws.com/role-arn 어노테이션으로 붙여 IRSA 로 자격증명을 받는다(agent 불필요).

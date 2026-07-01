@@ -12,7 +12,7 @@
 resource "aws_security_group" "app_lb" {
   name        = "wsc-app-lb-sg"
   description = "wsc-app-lb - CloudFront(VPC origin) only"
-  vpc_id      = aws_vpc.this.id
+  vpc_id      = data.aws_vpc.this.id
   egress {
     from_port   = 0
     to_port     = 0
@@ -34,7 +34,7 @@ data "aws_security_group" "cf_vpc_origin" {
   }
   filter {
     name   = "vpc-id"
-    values = [aws_vpc.this.id]
+    values = [data.aws_vpc.this.id]
   }
   depends_on = [aws_cloudfront_vpc_origin.app_lb]
 }
@@ -49,12 +49,24 @@ resource "aws_security_group_rule" "app_lb_from_cf" {
   description              = "CloudFront VPC origin only"
 }
 
+# ALB -> book Pod(8080) 허용. 터라폼 생성 ALB + TargetGroupBinding 조합에선 lb-controller 가
+# 백엔드 SG 규칙을 자동으로 안 열어주므로, 클러스터 SG(파드 ENI)에 ALB SG 출처 8080 을 명시 허용한다.
+# (없으면 TG 헬스체크가 Target.Timeout -> unhealthy -> 앱 504)
+resource "aws_vpc_security_group_ingress_rule" "cluster_from_app_lb" {
+  security_group_id            = aws_eks_cluster.this.vpc_config[0].cluster_security_group_id
+  from_port                    = 8080
+  to_port                      = 8080
+  ip_protocol                  = "tcp"
+  referenced_security_group_id = aws_security_group.app_lb.id
+  description                  = "wsc-app-lb to book pods 8080"
+}
+
 resource "aws_lb" "app" {
   name               = "wsc-app-lb"
   internal           = true
   load_balancer_type = "application"
   security_groups    = [aws_security_group.app_lb.id]
-  subnets            = [aws_subnet.private_a.id, aws_subnet.private_c.id]
+  subnets            = [data.aws_subnet.private_a.id, data.aws_subnet.private_c.id]
   tags               = { Name = "wsc-app-lb" }
 }
 
@@ -63,7 +75,7 @@ resource "aws_lb_target_group" "book" {
   name        = "wsc-book-tg"
   port        = 8080
   protocol    = "HTTP"
-  vpc_id      = aws_vpc.this.id
+  vpc_id      = data.aws_vpc.this.id
   target_type = "ip"
   health_check {
     path     = "/health"

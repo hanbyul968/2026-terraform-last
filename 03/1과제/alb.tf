@@ -20,7 +20,7 @@ data "aws_ec2_managed_prefix_list" "cloudfront" {
 resource "aws_security_group" "alb" {
   name        = local.alb_sg_name
   description = "wsc2026 ALB - CloudFront only"
-  vpc_id      = aws_vpc.this.id
+  vpc_id      = data.aws_vpc.this.id
 
   ingress {
     description     = "CloudFront origin-facing only (HTTP)"
@@ -43,5 +43,6 @@ resource "aws_security_group" "alb" {
 # active 까지 대기하는 null_resource.wait_alb 도 ./k8s 로 이동했다.
 # (apply 순서상 root CloudFront 는 ./k8s apply 이후 ALB 가 존재해야 조회된다)
 data "aws_lb" "app" {
-  name = local.alb_name
+  count = var.deploy_cdn ? 1 : 0
+  name  = local.alb_name
 }

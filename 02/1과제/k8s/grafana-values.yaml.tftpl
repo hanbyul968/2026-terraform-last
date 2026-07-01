@@ -9,8 +9,8 @@ persistence:
   enabled: true
   existingClaim: ${pvc_name}
 
-adminUser: "${admin_user}"
-adminPassword: "${admin_password}"
+adminUser: '${admin_user}'
+adminPassword: '${admin_password}'
 
 # Service 를 LB controller 기반 인터넷 LB 로 노출 (HTTP 80 -> 3000)
 service:

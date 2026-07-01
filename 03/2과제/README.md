@@ -38,6 +38,21 @@ CDN · Keycloak · Container Logging · Workflow 4개 모듈을 **모듈별 독�
 모든 배포 스크립트는 **bash** 입니다(PowerShell 미사용). Pillow 빌드(module1),
 Keycloak SAML 연동(module2), helm/kubectl(module3) 모두 Linux Bastion 에서 동작합니다.
 
+### 로컬(Windows) 직접 apply 가능 모듈
+
+- **module4 (Workflow, VPC 없음)**: S3+DynamoDB+Lambda(python3.13)+Step Functions
+  로만 구성되어 Linux 의존(프로비저너/도커/헬름)이 전혀 없다. bastion 없이
+  로컬 Windows PowerShell 에서 바로 생성된다.
+  ```powershell
+  cd C:\Users\competitor\2026-terraform\03\2과제\module4
+  terraform init
+  terraform apply
+  ```
+- **module1 (CDN, VPC 없음)**: 서버리스지만 Lambda@Edge 용 **Pillow(manylinux) 레이어
+  빌드**가 필요해 Linux Bastion 에서 apply 한다(로컬 Windows 는 `/bin/bash`
+  provisioner 미지원). deploy.sh 에 포함.
+- **module2/module3 (VPC 있음)**: Bastion 에서 apply.
+
 ## 디렉터리 구조
 
 ```
@@ -70,14 +85,18 @@ Keycloak SAML 연동(module2), helm/kubectl(module3) 모두 Linux Bastion 에서
 
 ## NEEDS-REVIEW (terraform validate 로 검증 불가 — 런타임/수동 확인 필요)
 
-- **module1 배포파일**: `assets/worldskills_banner.png` 는 임시 PNG 입니다.
-  실제 대회 배포파일(`worldskills_banner.png`)로 교체하세요. (채점 1-6 의 파일 크기
-  기대값 111811/113209/121900 은 원본 이미지 기준이므로 원본 교체 필요)
+- **module1 배포파일**: `assets/worldskills_banner.png` 는 지급 배포파일 원본
+  (111811 bytes)으로 교체 완료. terraform 이 `origin/worldskills_banner.png` 로
+  업로드한다(채점 1-1). 리사이즈 결과 크기(mobile 113209 / desktop 121900)는
+  Pillow 버전에 따라 미세하게 달라질 수 있는 런타임 산출값이다(채점 1-6, NEEDS-REVIEW).
 - **module1 device 헤더**: 디바이스 감지는 `CloudFront-Is-Mobile-Viewer` 등 viewer
   단계 헤더에 의존합니다(런타임).
-- **module2 Keycloak/SAML**: Realm/그룹/사용자/SAML Client 는 EC2 user_data 로,
-  IAM SAML Provider/Role 은 `saml-iam.sh`(local-exec)로 Keycloak 기동 후 구성됩니다.
-  SAML SSO 콘솔 로그인(2-6)은 수동 검증 항목입니다.
+- **module2 Keycloak/SAML**: Realm/그룹/사용자/SAML Client 는 EC2 `user_data`
+  (`userdata.sh.tpl`, Keycloak 26 + kcadm)로 자동 구성되고, IAM SAML Provider
+  (`wsc2026-keycloak-idp`)/Role(dev·infra)은 `saml-iam.sh`(local-exec, apply 시
+  bastion 리눅스에서 실행)가 ALB 경유 실제 Realm descriptor 를 받아 등록한다.
+  dev/infra 관리형 정책만 terraform 이 관리한다. SAML SSO 콘솔 로그인(2-6)은
+  수동 검증 항목이다. (`saml-metadata.xml` 은 더 이상 사용하지 않음)
 - **module3 EKS o11y**: Fluent Bit / OTel / Loki / Prometheus / Grafana 는 Helm
   으로 배포되며 `terraform validate` 대상이 아닙니다. Loki Push 는 OTLP(`/otlp/v1/logs`)
   로 전송합니다. CloudShell 채점 시 EKS access 가 필요하면

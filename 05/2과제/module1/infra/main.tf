@@ -19,6 +19,10 @@ data "aws_caller_identity" "current" {}
 
 locals {
   bucket_name = "gj2026-cdn-bucket-${var.pin}"
+  # 로컬 apply OS 감지: Windows(abspath 가 "C:\..." 로 시작) → PowerShell, 그 외 → bash.
+  # VPC 불필요 모듈(CDN)은 로컬 Windows PowerShell 에서도 그대로 apply 가능해야 한다.
+  # (build.ps1/build.sh 모두 --platform manylinux2014_x86_64 로 동일한 Lambda 패키지 생성)
+  is_windows = length(regexall("(?i)^[a-z]:", abspath(path.root))) > 0
 }
 
 # ─────────────────────────────────────────────
@@ -116,8 +120,8 @@ resource "null_resource" "pillow_build" {
     rotate_py = filemd5("${path.module}/lambda/rotate.py")
   }
   provisioner "local-exec" {
-    interpreter = ["/bin/bash", "-c"]
-    command     = "bash '${path.module}/build.sh'"
+    interpreter = local.is_windows ? ["PowerShell", "-ExecutionPolicy", "Bypass", "-File"] : ["/bin/bash", "-c"]
+    command     = local.is_windows ? "${path.module}/build.ps1" : "bash '${path.module}/build.sh'"
   }
 }
 

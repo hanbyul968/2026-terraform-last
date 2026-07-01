@@ -172,7 +172,30 @@ until [ -f /opt/task2/READY ]; do sleep 5; done
 bash /opt/task2/deploy.sh     # module1→module4 순차 apply + EKS/KEDA/Karpenter/Loki/Grafana
 ```
 
-> 각 폴더의 **`README.md`** 에 모듈별 리전·비번호 치환 위치·수동 단계(SNS 구독, MSK 토픽, Keycloak Realm, Flink 노트북 등)·대회 30% 변경 대응 가이드가 정리돼 있습니다.
+### 🟢 로컬 apply 가능 모듈 (VPC 불필요)
+
+> 순수 서버리스(Lambda·API GW·DynamoDB·S3·EventBridge·Step Functions·CloudFront) 모듈은 **로컬 Windows 에서 `terraform apply` 로 바로 생성**됩니다 (bash/docker/kubectl 의존 없음). VPC/EKS/EC2/RDS/VPN/MSK 가 필요한 모듈만 bastion 안에서 apply 합니다. bastion 의 `deploy.sh` 는 전체 실행 시 로컬-가능 모듈까지 순서대로 포함합니다.
+
+| 폴더 | 🟢 로컬 apply (VPC 없음) | 🔵 bastion apply (VPC 필요) |
+|---|---|---|
+| **01** | module-1 REST API(ap-ne-2), module-3 Workflow(us-east-1) | module-2 RDS(ap-ne-1), module-4 VPN(ap-se-1) |
+| **02** | module1 Score(ap-ne-2), module3 Event/Config | module2 Flink-EC2, module4 MSK |
+| **03** | module4 REST/Serverless | module1 CDN(Pillow), module2 Keycloak(VPC), module3 EKS |
+| **04** | module4 REST API(us-east-1) | module1 EKS(+k8s), module2 Lattice, module3 Logging |
+| **05** | module1 CDN(us-east-1), module3 Event | module2 Flink, module4 Keycloak |
+| **06** | module1 NoSQL, module2 CDN Function | module3 EKS Scaling, module4 Container Logging |
+| **07** | 4개 모듈 전부 로컬 apply(단일 root) | module4 in-VPC bastion 이 k8s 자동 구성 |
+| **08** | root(module1 NoSQL·module2 CDN·module3 Workflow) | module4_rds Aurora(VPC) |
+| **09** | (없음) | module1~4 전부 EKS/EC2/MSK — bastion 필수 |
+
+로컬 apply 예시(01 REST API):
+```powershell
+cd C:\Users\competitor\2026-terraform\01\2과제\module-1
+terraform init
+terraform apply -auto-approve       # DynamoDB + Lambda + API Gateway 즉시 생성 (bastion 불필요)
+```
+
+> 각 폴더의 **`README.md`** 에 모듈별 리전·비번호 치환 위치·수동 단계(SNS 구독, MSK 토픽, Keycloak Realm, Flink 노트북 등)·로컬 vs bastion apply 구분·대회 30% 변경 대응 가이드가 정리돼 있습니다.
 
 ---
 

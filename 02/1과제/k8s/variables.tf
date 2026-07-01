@@ -63,13 +63,13 @@ variable "kms_s3_alias" {
   default = "alias/wskorea26-s3-key"
 }
 
-# variables.tf(root): grafana admin (채점 10-1: admin / wsk2026!)
+# Grafana 관리자 (vf 채점 10-1: skills-<비번호>-admin / $korea26!!)
 variable "grafana_admin_user" {
   type    = string
-  default = "admin"
+  default = "skills-101-jang-admin"
 }
 
 variable "grafana_admin_password" {
   type    = string
-  default = "wsk2026!"
+  default = "\\$korea26!!"
 }

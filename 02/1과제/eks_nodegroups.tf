@@ -81,7 +81,7 @@ resource "aws_eks_node_group" "addon" {
   cluster_name    = aws_eks_cluster.this.name
   node_group_name = local.node_groups.addon.ng_name
   node_role_arn   = aws_iam_role.node["addon"].arn
-  subnet_ids      = [aws_subnet.priv_c.id, aws_subnet.priv_d.id]
+  subnet_ids      = [data.aws_subnet.priv_c.id, data.aws_subnet.priv_d.id]
   instance_types  = [var.node_instance_type]
   ami_type        = "AL2023_x86_64_STANDARD"
 
@@ -91,6 +91,7 @@ resource "aws_eks_node_group" "addon" {
     max_size     = 3
   }
   labels = { "node-type" = "addon" }
+  tags   = { Name = local.node_groups.addon.node_name }
 
   launch_template {
     id      = aws_launch_template.node["addon"].id
@@ -99,8 +100,6 @@ resource "aws_eks_node_group" "addon" {
 
   depends_on = [
     aws_iam_role_policy_attachment.node,
-    aws_route_table_association.priv_c,
-    aws_route_table_association.priv_d,
   ]
 }
 
@@ -108,7 +107,7 @@ resource "aws_eks_node_group" "app" {
   cluster_name    = aws_eks_cluster.this.name
   node_group_name = local.node_groups.app.ng_name
   node_role_arn   = aws_iam_role.node["app"].arn
-  subnet_ids      = [aws_subnet.priv_c.id, aws_subnet.priv_d.id]
+  subnet_ids      = [data.aws_subnet.priv_c.id, data.aws_subnet.priv_d.id]
   instance_types  = [var.node_instance_type]
   ami_type        = "AL2023_x86_64_STANDARD"
 
@@ -118,6 +117,7 @@ resource "aws_eks_node_group" "app" {
     max_size     = 3
   }
   labels = { "node-type" = "app" }
+  tags   = { Name = local.node_groups.app.node_name }
 
   launch_template {
     id      = aws_launch_template.node["app"].id
@@ -126,7 +126,5 @@ resource "aws_eks_node_group" "app" {
 
   depends_on = [
     aws_iam_role_policy_attachment.node,
-    aws_route_table_association.priv_c,
-    aws_route_table_association.priv_d,
   ]
 }

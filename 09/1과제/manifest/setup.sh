@@ -196,6 +196,17 @@ HOSTING_BUCKET=worldpay-bucket-$ACCOUNT
 aws s3 cp index.html s3://$HOSTING_BUCKET/index.html
 aws s3 cp main.jpeg s3://$HOSTING_BUCKET/main.jpeg
 
+# ===== 15.5 EKS API 엔드포인트 private-only 전환 (채점: publicAccess=false) =====
+# eksctl 는 publicAccess=true 로 생성해야 컨트롤플레인/애드온/aws-auth 구성이 완료된다.
+# 모든 구성이 끝난 지금 private-only 로 전환한다. (bastion 은 VPC 내부라 이후에도 접근 가능)
+aws eks update-cluster-config --name worldpay-cluster --region $REGION \
+  --resources-vpc-config endpointPublicAccess=false,endpointPrivateAccess=true,publicAccessCidrs=[] || true
+for i in $(seq 1 60); do
+  ST=$(aws eks describe-cluster --name worldpay-cluster --region $REGION --query 'cluster.resourcesVpcConfig.endpointPublicAccess' --output text 2>/dev/null)
+  [ "$ST" = "False" ] && { echo "EKS endpoint now private-only"; break; }
+  sleep 10
+done
+
 # ===== 16. 채점 준비 — isolated subnet NAT 라우트 삭제 =====
 for s in worldpay-isolated-subnet-a worldpay-isolated-subnet-c; do
   SID=$(aws ec2 describe-subnets --filters Name=tag:Name,Values=$s --query 'Subnets[0].SubnetId' --output text)

@@ -1,10 +1,44 @@
 # =============================================================================
 # Module 4. RDS Connection (Aurora MySQL Serverless v2 + Data API + Lambda)
-#  Region: ap-northeast-3
+#  Region: ap-northeast-3 (오사카)
+#  - 독립 루트(self-contained root). Aurora 프로비저닝은 RDS API + Data API(퍼블릭
+#    HTTPS)만 사용하므로 in-VPC 접속이 필요 없지만, 본 과제는 전용 VPC를 생성하는
+#    모듈이라 배포는 Bastion(Linux)에서 수행하도록 분리했다. (로컬 apply 도 가능)
 #  - Aurora MySQL Serverless v2 (0.5~4 ACU), DB appdb, master admin
 #  - Data API(HTTP Endpoint) Enabled, Secret rds/aurora/admin
 #  - Lambda rds-query-function (py3.12, env CLUSTER_ARN/SECRET_ARN/DB_NAME, VPC 없음)
+#  - Tag: Module=RDSConnection
 # =============================================================================
+
+terraform {
+  required_version = ">= 1.5.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.60"
+    }
+    archive = {
+      source  = "hashicorp/archive"
+      version = "~> 2.4"
+    }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.6"
+    }
+  }
+}
+
+provider "aws" {
+  region = "ap-northeast-3"
+
+  default_tags {
+    tags = {
+      Project = "wsc2026-task2"
+      Module  = "RDSConnection"
+    }
+  }
+}
 
 locals {
   rds_db_name      = "appdb"
@@ -13,9 +47,8 @@ locals {
   rds_cluster_name = "rds-aurora-cluster"
 }
 
-# Aurora MySQL 3.x (MySQL 8.0 호환) 최신 엔진 버전 조회
+# Aurora MySQL 3.x (MySQL 8.0 호환) 최신 엔진 버전 조회 (3.07 이상)
 data "aws_rds_engine_version" "aurora_mysql" {
-  provider           = aws.osaka
   engine             = "aurora-mysql"
   preferred_versions = ["8.0.mysql_aurora.3.08.0", "8.0.mysql_aurora.3.07.1", "8.0.mysql_aurora.3.07.0"]
   include_all        = true
@@ -24,43 +57,33 @@ data "aws_rds_engine_version" "aurora_mysql" {
 # ---- 네트워크 (ap-northeast-3에 기본 VPC가 없어 Aurora용 전용 VPC/서브넷 구성) ----
 # Data API는 퍼블릭 HTTPS 엔드포인트를 사용하므로 IGW/NAT 없이 프라이빗 서브넷이면 충분.
 data "aws_availability_zones" "osaka" {
-  provider = aws.osaka
-  state    = "available"
+  state = "available"
 }
 
 resource "aws_vpc" "rds" {
-  provider             = aws.osaka
   cidr_block           = "10.20.0.0/16"
   enable_dns_support   = true
   enable_dns_hostnames = true
 
   tags = {
-    Name   = "rds-aurora-vpc"
-    Module = "RDSConnection"
+    Name = "rds-aurora-vpc"
   }
 }
 
 resource "aws_subnet" "rds" {
-  provider          = aws.osaka
   count             = 2
   vpc_id            = aws_vpc.rds.id
   cidr_block        = cidrsubnet(aws_vpc.rds.cidr_block, 8, count.index)
   availability_zone = data.aws_availability_zones.osaka.names[count.index]
 
   tags = {
-    Name   = "rds-aurora-subnet-${count.index + 1}"
-    Module = "RDSConnection"
+    Name = "rds-aurora-subnet-${count.index + 1}"
   }
 }
 
 resource "aws_db_subnet_group" "rds" {
-  provider   = aws.osaka
   name       = "rds-aurora-subnet-group"
   subnet_ids = aws_subnet.rds[*].id
-
-  tags = {
-    Module = "RDSConnection"
-  }
 }
 
 # ---- 마스터 암호 ----
@@ -72,18 +95,12 @@ resource "random_password" "rds_master" {
 
 # ---- Secrets Manager: rds/aurora/admin ----
 resource "aws_secretsmanager_secret" "rds" {
-  provider                = aws.osaka
   name                    = local.rds_secret_name
   description             = "Aurora admin credentials for WSC 2026"
   recovery_window_in_days = 0
-
-  tags = {
-    Module = "RDSConnection"
-  }
 }
 
 resource "aws_secretsmanager_secret_version" "rds" {
-  provider  = aws.osaka
   secret_id = aws_secretsmanager_secret.rds.id
   secret_string = jsonencode({
     username = local.rds_master_user
@@ -95,8 +112,6 @@ resource "aws_secretsmanager_secret_version" "rds" {
 
 # ---- Aurora MySQL Serverless v2 클러스터 ----
 resource "aws_rds_cluster" "aurora" {
-  provider = aws.osaka
-
   cluster_identifier   = local.rds_cluster_name
   engine               = "aurora-mysql"
   engine_version       = data.aws_rds_engine_version.aurora_mysql.version
@@ -113,29 +128,28 @@ resource "aws_rds_cluster" "aurora" {
 
   skip_final_snapshot = true
   apply_immediately   = true
-
-  tags = {
-    Module = "RDSConnection"
-  }
 }
 
 resource "aws_rds_cluster_instance" "aurora" {
-  provider = aws.osaka
-
   identifier         = "${local.rds_cluster_name}-instance-1"
   cluster_identifier = aws_rds_cluster.aurora.id
   engine             = aws_rds_cluster.aurora.engine
   engine_version     = aws_rds_cluster.aurora.engine_version
   instance_class     = "db.serverless"
-
-  tags = {
-    Module = "RDSConnection"
-  }
 }
 
 # ---- Lambda 실행 역할 ----
+data "aws_iam_policy_document" "lambda_assume" {
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "Service"
+      identifiers = ["lambda.amazonaws.com"]
+    }
+  }
+}
+
 resource "aws_iam_role" "rds_lambda" {
-  provider           = aws.osaka
   name               = "rds-query-function-role"
   assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
 }
@@ -159,13 +173,12 @@ data "aws_iam_policy_document" "rds_lambda" {
 }
 
 resource "aws_iam_role_policy" "rds_lambda" {
-  provider = aws.osaka
-  name     = "rds-query-function-policy"
-  role     = aws_iam_role.rds_lambda.id
-  policy   = data.aws_iam_policy_document.rds_lambda.json
+  name   = "rds-query-function-policy"
+  role   = aws_iam_role.rds_lambda.id
+  policy = data.aws_iam_policy_document.rds_lambda.json
 }
 
-# ---- Lambda 패키지 ----
+# ---- Lambda 패키지 (지급된 lambda_function.py) ----
 data "archive_file" "rds_lambda" {
   type        = "zip"
   source_file = "${path.module}/files/rds/lambda_function.py"
@@ -173,7 +186,6 @@ data "archive_file" "rds_lambda" {
 }
 
 resource "aws_lambda_function" "rds_query" {
-  provider         = aws.osaka
   function_name    = "rds-query-function"
   role             = aws_iam_role.rds_lambda.arn
   runtime          = "python3.12"
@@ -190,12 +202,24 @@ resource "aws_lambda_function" "rds_query" {
     }
   }
 
-  tags = {
-    Module = "RDSConnection"
-  }
-
   depends_on = [
     aws_iam_role_policy.rds_lambda,
     aws_rds_cluster_instance.aurora
   ]
+}
+
+# ---- 출력 ----
+output "m4_cluster_arn" {
+  description = "Aurora 클러스터 ARN"
+  value       = aws_rds_cluster.aurora.arn
+}
+
+output "m4_secret_arn" {
+  description = "Secrets Manager 시크릿 ARN"
+  value       = aws_secretsmanager_secret.rds.arn
+}
+
+output "m4_lambda_name" {
+  description = "RDS 조회 Lambda 이름"
+  value       = aws_lambda_function.rds_query.function_name
 }

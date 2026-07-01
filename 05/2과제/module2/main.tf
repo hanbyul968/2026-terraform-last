@@ -309,13 +309,13 @@ resource "aws_iam_role_policy" "flink" {
 # ─────────────────────────────────────────────
 resource "null_resource" "zeppelin" {
   triggers = {
-    region = data.aws_region.current.name
+    region = data.aws_region.current.region
     name   = "${local.name}-zeppelin"
   }
 
   provisioner "local-exec" {
     interpreter = ["/bin/bash", "-c"]
-    command     = "bash '${path.module}/zeppelin.sh' '${data.aws_region.current.name}' '${aws_iam_role.flink.arn}' '${data.aws_caller_identity.current.account_id}' '${local.name}-zeppelin'"
+    command     = "bash '${path.module}/zeppelin.sh' '${data.aws_region.current.region}' '${aws_iam_role.flink.arn}' '${data.aws_caller_identity.current.account_id}' '${local.name}-zeppelin'"
   }
 
   provisioner "local-exec" {

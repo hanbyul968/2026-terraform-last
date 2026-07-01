@@ -71,7 +71,7 @@ resource "aws_eks_node_group" "addon" {
   cluster_name    = aws_eks_cluster.this.name
   node_group_name = local.node_groups.addon.ng_name
   node_role_arn   = aws_iam_role.node.arn
-  subnet_ids      = [aws_subnet.app_a.id, aws_subnet.app_b.id]
+  subnet_ids      = [data.aws_subnet.app_a.id, data.aws_subnet.app_b.id]
   instance_types  = ["t3.medium"]
   ami_type        = "AL2023_x86_64_STANDARD"
 
@@ -94,7 +94,7 @@ resource "aws_eks_node_group" "workload" {
   cluster_name    = aws_eks_cluster.this.name
   node_group_name = local.node_groups.workload.ng_name
   node_role_arn   = aws_iam_role.node.arn
-  subnet_ids      = [aws_subnet.app_a.id, aws_subnet.app_b.id]
+  subnet_ids      = [data.aws_subnet.app_a.id, data.aws_subnet.app_b.id]
   instance_types  = ["t3.medium"]
   ami_type        = "AL2023_x86_64_STANDARD"
 

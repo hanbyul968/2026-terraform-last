@@ -1,6 +1,6 @@
 output "cloudfront_domain" {
   description = "CloudFront 도메인 (채점 진입점)"
-  value       = aws_cloudfront_distribution.this.domain_name
+  value       = try(aws_cloudfront_distribution.this[0].domain_name, "")
 }
 
 output "s3_bucket" {
@@ -20,7 +20,7 @@ output "lambda_function_url" {
 }
 
 output "alb_dns" {
-  value = data.aws_lb.app.dns_name
+  value = try(data.aws_lb.app[0].dns_name, "")
 }
 
 # (제거됨) bastion_public_ip — VPC 내부 배포용 bastion 은 외부 bastion/ 스테이지로

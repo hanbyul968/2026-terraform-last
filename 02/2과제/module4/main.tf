@@ -172,11 +172,18 @@ resource "aws_iam_role_policy" "producer_msk" {
   role = aws_iam_role.producer.id
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Effect   = "Allow"
-      Action   = ["kafka-cluster:Connect", "kafka-cluster:WriteData", "kafka-cluster:DescribeTopic", "kafka-cluster:CreateTopic", "kafka-cluster:WriteDataIdempotently", "kafka-cluster:DescribeCluster"]
-      Resource = ["${replace(aws_msk_cluster.main.arn, "cluster", "topic")}/*", aws_msk_cluster.main.arn, "${replace(aws_msk_cluster.main.arn, "cluster", "group")}/*"]
-    }]
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["kafka-cluster:Connect", "kafka-cluster:WriteData", "kafka-cluster:DescribeTopic", "kafka-cluster:CreateTopic", "kafka-cluster:WriteDataIdempotently", "kafka-cluster:DescribeCluster", "kafka-cluster:AlterCluster", "kafka-cluster:DescribeGroup", "kafka-cluster:AlterGroup"]
+        Resource = ["${replace(aws_msk_cluster.main.arn, "cluster", "topic")}/*", aws_msk_cluster.main.arn, "${replace(aws_msk_cluster.main.arn, "cluster", "group")}/*"]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["kafka:DescribeCluster", "kafka:GetBootstrapBrokers"]
+        Resource = aws_msk_cluster.main.arn
+      }
+    ]
   })
 }
 resource "aws_iam_instance_profile" "producer" {
@@ -200,15 +207,12 @@ resource "aws_instance" "producer" {
   subnet_id              = aws_subnet.priv_a.id
   vpc_security_group_ids = [aws_security_group.producer.id]
   iam_instance_profile   = aws_iam_instance_profile.producer.name
-  user_data              = <<-EOF
-    #!/bin/bash
-    set -eux
-    dnf install -y java-17-amazon-corretto python3-pip
-    # 배포파일 Application.hwp 의 producer 앱 배치 + 토픽 생성:
-    #   wsc2026-sensor-raw(파티션3,복제2), wsc2026-sensor-alert(파티션1,복제2)
-    mkdir -p /opt/app
-  EOF
-  tags                   = { Name = "wsc2026-sensor-producer" }
+  user_data = templatefile("${path.module}/userdata.sh.tpl", {
+    producer_py = file("${path.module}/app/producer.py")
+    region      = "ap-northeast-1"
+    msk_arn     = aws_msk_cluster.main.arn
+  })
+  tags = { Name = "wsc2026-sensor-producer" }
 }
 
 # ── Storage: DynamoDB, S3, SNS ───────────────────────────────────────

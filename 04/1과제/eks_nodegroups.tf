@@ -124,7 +124,7 @@ resource "aws_eks_node_group" "app" {
   cluster_name    = aws_eks_cluster.this.name
   node_group_name = local.node_groups.app.name
   node_role_arn   = aws_iam_role.node["app"].arn
-  subnet_ids      = [aws_subnet.workload_a.id, aws_subnet.workload_c.id]
+  subnet_ids      = [data.aws_subnet.workload_a.id, data.aws_subnet.workload_c.id]
   instance_types  = ["t3.medium"]
   ami_type        = "AL2023_x86_64_STANDARD"
 
@@ -143,8 +143,8 @@ resource "aws_eks_node_group" "app" {
   depends_on = [
     aws_iam_role_policy_attachment.node,
     aws_vpc_endpoint.interface,
-    aws_route_table_association.workload_a,
-    aws_route_table_association.workload_c,
+    aws_route.workload_bootstrap_a,
+    aws_route.workload_bootstrap_c,
   ]
 }
 
@@ -152,7 +152,7 @@ resource "aws_eks_node_group" "addon" {
   cluster_name    = aws_eks_cluster.this.name
   node_group_name = local.node_groups.addon.name
   node_role_arn   = aws_iam_role.node["addon"].arn
-  subnet_ids      = [aws_subnet.workload_a.id, aws_subnet.workload_c.id]
+  subnet_ids      = [data.aws_subnet.workload_a.id, data.aws_subnet.workload_c.id]
   instance_types  = ["t3.medium"]
   ami_type        = "AL2023_x86_64_STANDARD"
 
@@ -171,8 +171,8 @@ resource "aws_eks_node_group" "addon" {
   depends_on = [
     aws_iam_role_policy_attachment.node,
     aws_vpc_endpoint.interface,
-    aws_route_table_association.workload_a,
-    aws_route_table_association.workload_c,
+    aws_route.workload_bootstrap_a,
+    aws_route.workload_bootstrap_c,
   ]
 }
 
@@ -180,7 +180,7 @@ resource "aws_eks_node_group" "monitoring" {
   cluster_name    = aws_eks_cluster.this.name
   node_group_name = local.node_groups.monitoring.name
   node_role_arn   = aws_iam_role.node["monitoring"].arn
-  subnet_ids      = [aws_subnet.workload_a.id, aws_subnet.workload_c.id]
+  subnet_ids      = [data.aws_subnet.workload_a.id, data.aws_subnet.workload_c.id]
   instance_types  = ["t3.medium"]
   ami_type        = "AL2023_x86_64_STANDARD"
 
@@ -199,7 +199,7 @@ resource "aws_eks_node_group" "monitoring" {
   depends_on = [
     aws_iam_role_policy_attachment.node,
     aws_vpc_endpoint.interface,
-    aws_route_table_association.workload_a,
-    aws_route_table_association.workload_c,
+    aws_route.workload_bootstrap_a,
+    aws_route.workload_bootstrap_c,
   ]
 }

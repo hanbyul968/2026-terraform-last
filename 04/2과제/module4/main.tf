@@ -10,18 +10,13 @@ provider "aws" {
   region = "us-east-1"
 }
 
-# ── DynamoDB (Query-only, PK name + SK age) ──────────────────────────
+# ── DynamoDB (Query-only, PK = name; age/country 는 일반 속성) ─────────
 resource "aws_dynamodb_table" "rest" {
   name         = "wsc-rest-table"
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "name"
-  range_key    = "age"
   attribute {
     name = "name"
-    type = "S"
-  }
-  attribute {
-    name = "age"
     type = "S"
   }
 }

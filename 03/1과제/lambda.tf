@@ -28,7 +28,7 @@ resource "aws_lambda_function" "book_get" {
   memory_size      = 128
 
   # 환경변수 + 코드 CMK 암호화
-  kms_key_arn = aws_kms_key.function.arn
+  kms_key_arn = local.kms_function_arn
 
   environment {
     variables = {

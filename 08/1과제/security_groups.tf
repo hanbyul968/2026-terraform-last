@@ -7,7 +7,7 @@
 resource "aws_security_group" "alb" {
   name        = "${local.prefix}-alb-sg"
   description = "ALB SG - allow HTTP 80 from anywhere (incl. CloudFront)"
-  vpc_id      = aws_vpc.main.id
+  vpc_id      = data.aws_vpc.main.id
 
   tags = {
     Name = "${local.prefix}-alb-sg"
@@ -33,7 +33,7 @@ resource "aws_vpc_security_group_egress_rule" "alb_all" {
 resource "aws_security_group" "ecs" {
   name        = "${local.prefix}-ecs-sg"
   description = "ECS SG - allow 8080 only from ALB SG"
-  vpc_id      = aws_vpc.main.id
+  vpc_id      = data.aws_vpc.main.id
 
   tags = {
     Name = "${local.prefix}-ecs-sg"

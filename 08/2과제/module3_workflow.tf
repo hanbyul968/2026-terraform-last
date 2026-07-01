@@ -186,19 +186,15 @@ resource "aws_sfn_state_machine" "workflow" {
   }
 }
 
-# Step Functions 자동 실행 (채점 [3-5] workflow-output 데이터 적재)
-resource "null_resource" "sfn_execute" {
-  depends_on = [aws_sfn_state_machine.workflow]
-  triggers = {
-    always = timestamp()
-  }
-  provisioner "local-exec" {
-    interpreter = ["/bin/bash", "-c"]
-    command     = <<-EOT
-      aws stepfunctions start-execution \
-        --state-machine-arn ${aws_sfn_state_machine.workflow.arn} \
-        --input '{"bucket":"workflow-input-${var.team_id}","key":"data.csv"}' \
-        --region ap-southeast-1
-    EOT
-  }
-}
+# ---- Step Functions 실행 안내 (채점 [3-5] workflow-output 데이터 적재) ----
+# 상태 머신 실행은 "런타임 동작"이므로 terraform 인프라 코드에 두지 않는다.
+# (문제/채점 지침도 CloudShell 에서 start-execution 하도록 요구한다.)
+# apply 후 아래 명령을 CloudShell/Bastion(Linux)에서 실행하여 데이터를 적재한다:
+#
+#   SFN_ARN=$(aws stepfunctions list-state-machines --region ap-southeast-1 \
+#     --query "stateMachines[?name=='workflow-state-machine'].stateMachineArn | [0]" --output text)
+#   aws stepfunctions start-execution --region ap-southeast-1 \
+#     --state-machine-arn "$SFN_ARN" \
+#     --input '{"bucket":"workflow-input-<비번호>","key":"data.csv"}'
+#
+# Bastion 의 deploy.sh 가 이 실행을 자동으로 수행한다(README 참고).

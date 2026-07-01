@@ -145,7 +145,7 @@ resource "aws_iam_role_policy_attachment" "eks_cluster_policy" {
 
 resource "aws_eks_cluster" "main" {
   name     = "wsc-scaling-cluster"
-  version  = "1.31"
+  version  = "1.35"
   role_arn = aws_iam_role.eks_cluster.arn
 
   vpc_config {
@@ -433,7 +433,12 @@ resource "aws_eks_access_policy_association" "bastion_admin" {
 # ── Outputs ──────────────────────────────────────────────────────────
 output "cluster_name" { value = aws_eks_cluster.main.name }
 output "cluster_endpoint" { value = aws_eks_cluster.main.endpoint }
+output "cluster_ca" { value = aws_eks_cluster.main.certificate_authority[0].data }
+output "cluster_security_group_id" { value = aws_eks_cluster.main.vpc_config[0].cluster_security_group_id }
 output "sqs_queue_url" { value = aws_sqs_queue.main.url }
+# k8s 스테이지(module1/k8s)가 remote_state 로 읽는 이름 + 기존 이름 모두 노출
+output "keda_role_arn" { value = aws_iam_role.keda_irsa.arn }
+output "karpenter_role_arn" { value = aws_iam_role.karpenter_irsa.arn }
 output "keda_irsa_role_arn" { value = aws_iam_role.keda_irsa.arn }
 output "karpenter_irsa_role_arn" { value = aws_iam_role.karpenter_irsa.arn }
 output "karpenter_node_role_name" { value = aws_iam_role.karpenter_node.name }

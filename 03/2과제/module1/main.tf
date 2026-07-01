@@ -32,6 +32,15 @@ resource "aws_s3_bucket_public_access_block" "asset" {
   restrict_public_buckets = true
 }
 
+# 지급 원본 이미지 업로드 (origin/worldskills_banner.png) — 채점 1-1 / 1-6 (원본 크기 111811)
+resource "aws_s3_object" "banner" {
+  bucket       = aws_s3_bucket.asset.id
+  key          = "origin/worldskills_banner.png"
+  source       = "${path.module}/assets/worldskills_banner.png"
+  etag         = filemd5("${path.module}/assets/worldskills_banner.png")
+  content_type = "image/png"
+}
+
 # ── Lambda@Edge resize (python3.12) + Pillow layer ───────────────────
 resource "null_resource" "pillow" {
   triggers = { always = "1" }
@@ -143,6 +152,7 @@ resource "aws_cloudfront_distribution" "main" {
   enabled             = true
   comment             = "wsc2026-cdn"
   default_root_object = "index.html"
+  price_class         = "PriceClass_All"
 
   origin {
     domain_name              = aws_s3_bucket.asset.bucket_regional_domain_name
@@ -177,6 +187,8 @@ resource "aws_cloudfront_distribution" "main" {
     geo_restriction { restriction_type = "none" }
   }
   viewer_certificate { cloudfront_default_certificate = true }
+
+  tags = { Name = "wsc2026-cdn" }
 }
 
 resource "aws_s3_bucket_policy" "oac" {

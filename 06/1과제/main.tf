@@ -27,23 +27,9 @@ provider "aws" {
 
 data "aws_caller_identity" "current" {}
 
-# ========== VPC ==========
-module "VPC" {
-  source               = "./modules/VPC"
-  vpc_name             = "unicorn-vpc"
-  vpc_cidr             = "10.97.0.0/16"
-  public_subnets_cidr  = ["10.97.0.0/24", "10.97.1.0/24", "10.97.2.0/24"]
-  private_subnets_cidr = ["10.97.10.0/24", "10.97.11.0/24", "10.97.12.0/24"]
-  availability_zones   = ["ap-northeast-2a", "ap-northeast-2b", "ap-northeast-2c"]
-  public_subnet_names  = ["unicorn-subnet-pub-a", "unicorn-subnet-pub-b", "unicorn-subnet-pub-c"]
-  private_subnet_names = ["unicorn-subnet-priv-a", "unicorn-subnet-priv-b", "unicorn-subnet-priv-c"]
-  igw_name             = "unicorn-igw"
-  nat_eip_names        = ["unicorn-eip-nat-a", "unicorn-eip-nat-b", "unicorn-eip-nat-c"]
-  nat_gw_names         = ["unicorn-nat-a", "unicorn-nat-b", "unicorn-nat-c"]
-  public_rt_name       = "unicorn-rt-pub"
-  private_rt_names     = ["unicorn-rt-priv-a", "unicorn-rt-priv-b", "unicorn-rt-priv-c"]
-  flow_log_name        = "unicorn-flow-log"
-}
+# ========== VPC (data 조회) ==========
+# 진짜 VPC(unicorn-vpc)는 1단계(bastion 스테이지)에서 module "VPC" 로 생성된다.
+# root(2단계)는 이름(tag:Name)/그룹명으로 data 조회해 참조한다. (see data.tf)
 
 # ========== KMS ==========
 module "KMS" {
@@ -150,8 +136,8 @@ module "Lambda" {
   table_name         = module.DynamoDB.table_name
   table_arn          = module.DynamoDB.table_arn
   log_group_name     = "/unicorn/lambda/get-booking"
-  private_subnet_ids = module.VPC.private_subnet_ids
-  vpc_id             = module.VPC.vpc_id
+  private_subnet_ids = local.private_subnet_ids
+  vpc_id             = local.vpc_id
 }
 
 # ========== ALB ==========
@@ -159,8 +145,8 @@ module "ALB" {
   source             = "./modules/ALB"
   alb_name           = "unicorn-alb"
   tg_name            = "unicorn-tg"
-  vpc_id             = module.VPC.vpc_id
-  private_subnet_ids = module.VPC.private_subnet_ids
+  vpc_id             = local.vpc_id
+  private_subnet_ids = local.private_subnet_ids
   lambda_arn         = module.Lambda.function_arn
   lambda_invoke_arn  = module.Lambda.invoke_arn
 }
@@ -175,9 +161,9 @@ module "CloudFront" {
   alb_dns_name         = module.ALB.alb_dns_name
   waf_name             = "unicorn-waf"
   kms_key_arn          = module.KMS.platform_replica_key_arn
-  vpc_id               = module.VPC.vpc_id
+  vpc_id               = local.vpc_id
   alb_sg_id            = module.ALB.alb_sg_id
-  private_subnet_ids   = module.VPC.private_subnet_ids
+  private_subnet_ids   = local.private_subnet_ids
 
   providers = {
     aws.us_east_1 = aws.us_east_1
@@ -190,7 +176,7 @@ module "IAM" {
   role_name          = "unicorn-audit-role"
   external_id        = "unicorn-audit-2026${var.number}"
   dynamodb_table_arn = module.DynamoDB.table_arn
-  vpc_id             = module.VPC.vpc_id
+  vpc_id             = local.vpc_id
   eks_cluster_arn    = "arn:aws:eks:ap-northeast-2:${data.aws_caller_identity.current.account_id}:cluster/unicorn-eks-cluster"
 }
 
@@ -200,14 +186,14 @@ resource "aws_lb" "grafana" {
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.grafana_alb.id]
-  subnets            = module.VPC.public_subnet_ids
+  subnets            = local.public_subnet_ids
 
   tags = { Name = "unicorn-grafana-alb" }
 }
 
 resource "aws_security_group" "grafana_alb" {
   name   = "unicorn-grafana-alb-sg"
-  vpc_id = module.VPC.vpc_id
+  vpc_id = local.vpc_id
 
   ingress {
     from_port   = 80
@@ -228,7 +214,7 @@ resource "aws_lb_target_group" "grafana" {
   name        = "unicorn-grafana-tg"
   port        = 30300
   protocol    = "HTTP"
-  vpc_id      = module.VPC.vpc_id
+  vpc_id      = local.vpc_id
   target_type = "instance"
 
   health_check {
@@ -291,7 +277,7 @@ resource "aws_s3_object" "dockerfile" {
 
 resource "aws_security_group" "cloudshell" {
   name   = "unicorn-mark-sg"
-  vpc_id = module.VPC.vpc_id
+  vpc_id = local.vpc_id
 
   ingress {
     from_port   = 0
@@ -317,7 +303,7 @@ resource "aws_security_group" "cloudshell" {
 # 각 SG가 cloudshell SG를 source로 하는 전체 트래픽 ingress 를 허용한다.
 resource "aws_security_group_rule" "vpce_from_cloudshell" {
   type                     = "ingress"
-  security_group_id        = module.VPC.vpc_endpoint_sg_id
+  security_group_id        = local.vpc_endpoint_sg_id
   from_port                = 0
   to_port                  = 0
   protocol                 = "-1"

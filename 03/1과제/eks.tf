@@ -8,8 +8,18 @@
 #   - 노드는 app(private) 서브넷, IAM 최소권한
 # ═══════════════════════════════════════════════════════════════
 
+# 잠긴 wsc2026-eks-kms 키 정책은 '기존 wsc2026-eks-cluster-role' 에게만 grant 를 허용한다.
+# 그 키를 재사용(data source)할 때는 역할도 재사용해야 클러스터 생성(grant)이 성공한다.
+#   reuse_eks_cluster_role=true  -> 기존 역할 재사용(이 계정, 잠긴 키 재사용 시)
+#   reuse_eks_cluster_role=false -> 역할 신규 생성(깨끗한 계정, 키를 새로 만드는 경우)
+data "aws_iam_role" "eks_cluster_existing" {
+  count = var.reuse_eks_cluster_role ? 1 : 0
+  name  = "wsc2026-eks-cluster-role"
+}
+
 resource "aws_iam_role" "eks_cluster" {
-  name = "wsc2026-eks-cluster-role"
+  count = var.reuse_eks_cluster_role ? 0 : 1
+  name  = "wsc2026-eks-cluster-role"
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
@@ -21,15 +31,20 @@ resource "aws_iam_role" "eks_cluster" {
 }
 
 resource "aws_iam_role_policy_attachment" "eks_cluster" {
-  role       = aws_iam_role.eks_cluster.name
+  count      = var.reuse_eks_cluster_role ? 0 : 1
+  role       = aws_iam_role.eks_cluster[0].name
   policy_arn = "arn:${local.partition}:iam::aws:policy/AmazonEKSClusterPolicy"
+}
+
+locals {
+  eks_cluster_role_arn = var.reuse_eks_cluster_role ? data.aws_iam_role.eks_cluster_existing[0].arn : aws_iam_role.eks_cluster[0].arn
 }
 
 # Control Plane 로그 그룹 (CMK 암호화)
 resource "aws_cloudwatch_log_group" "eks" {
   name              = "/aws/eks/${local.cluster_name}/cluster"
   retention_in_days = 7
-  kms_key_id        = aws_kms_key.eks.arn
+  kms_key_id        = local.kms_eks_arn
   tags              = { Name = "/aws/eks/${local.cluster_name}/cluster" }
 }
 
@@ -37,7 +52,7 @@ resource "aws_cloudwatch_log_group" "eks" {
 resource "aws_security_group" "eks_cluster" {
   name        = "wsc2026-eks-cluster-extra-sg"
   description = "EKS cluster extra SG (VPC internal only)"
-  vpc_id      = aws_vpc.this.id
+  vpc_id      = data.aws_vpc.this.id
   ingress {
     description = "VPC internal"
     from_port   = 0
@@ -57,10 +72,10 @@ resource "aws_security_group" "eks_cluster" {
 resource "aws_eks_cluster" "this" {
   name     = local.cluster_name
   version  = var.cluster_version
-  role_arn = aws_iam_role.eks_cluster.arn
+  role_arn = local.eks_cluster_role_arn
 
   vpc_config {
-    subnet_ids              = [aws_subnet.app_a.id, aws_subnet.app_b.id]
+    subnet_ids              = [data.aws_subnet.app_a.id, data.aws_subnet.app_b.id]
     security_group_ids      = [aws_security_group.eks_cluster.id]
     endpoint_private_access = true
     endpoint_public_access  = var.eks_public_access
@@ -71,11 +86,18 @@ resource "aws_eks_cluster" "this" {
     bootstrap_cluster_creator_admin_permissions = true
   }
 
-  encryption_config {
-    provider {
-      key_arn = aws_kms_key.eks.arn
+  # EKS Secret CMK 암호화.
+  # ⚠ reuse_kms=true(잠긴 eks 키 재사용) 에선 CreateCluster 가 배포 주체에게 kms:DescribeKey 를
+  #   요구하는데 잠긴 키는 그것도 거부(root 조차)라 클러스터 생성이 실패한다. 그래서 그 계정에선
+  #   암호화를 끈다(그 항목만 미충족). 깨끗한 계정(reuse_kms=false)에선 새 키로 정상 암호화 -> 채점 통과.
+  dynamic "encryption_config" {
+    for_each = var.reuse_kms ? [] : [1]
+    content {
+      provider {
+        key_arn = local.kms_eks_arn
+      }
+      resources = ["secrets"]
     }
-    resources = ["secrets"]
   }
 
   enabled_cluster_log_types = ["api", "audit", "authenticator", "controllerManager", "scheduler"]
@@ -97,16 +119,20 @@ resource "aws_iam_openid_connect_provider" "eks" {
   thumbprint_list = [data.tls_certificate.eks.certificates[0].sha1_fingerprint]
 }
 
-# 배포 주체 -> ClusterAdmin (kubectl)
+# 배포 주체(bastion 역할)는 이미 클러스터 생성자 admin 이므로 access entry 불필요.
+# 채점(CloudShell) 신원은 var.grader_principal_arn(role/user ARN)으로 넘기면 생성.
+# 비우면(기본) 생성 안 함. !! STS assumed-role 세션 ARN 은 사용 불가 !!
 resource "aws_eks_access_entry" "admin" {
+  count         = var.grader_principal_arn == "" ? 0 : 1
   cluster_name  = aws_eks_cluster.this.name
-  principal_arn = data.aws_caller_identity.current.arn
+  principal_arn = var.grader_principal_arn
   type          = "STANDARD"
 }
 
 resource "aws_eks_access_policy_association" "admin" {
+  count         = var.grader_principal_arn == "" ? 0 : 1
   cluster_name  = aws_eks_cluster.this.name
-  principal_arn = data.aws_caller_identity.current.arn
+  principal_arn = var.grader_principal_arn
   policy_arn    = "arn:${local.partition}:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
   access_scope {
     type = "cluster"
@@ -196,7 +222,10 @@ resource "aws_eks_addon" "ebs_csi" {
   addon_name                  = "aws-ebs-csi-driver"
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
-  depends_on                  = [aws_eks_node_group.addon]
+  # ⚠ Pod Identity 자격증명은 파드 '생성 시점'에 주입된다. association 이 addon 보다 늦으면
+  #   controller 파드가 노드 역할로 떠서 EC2 권한 없어 CrashLoop → addon 이 ACTIVE 안 됨.
+  #   그래서 association 이후에 addon 을 만든다.
+  depends_on = [aws_eks_node_group.addon, aws_eks_pod_identity_association.ebs_csi]
 }
 
 resource "aws_eks_pod_identity_association" "ebs_csi" {

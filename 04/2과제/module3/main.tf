@@ -41,7 +41,7 @@ resource "aws_subnet" "pub_a" {
 }
 resource "aws_subnet" "pub_c" {
   vpc_id                  = aws_vpc.main.id
-  cidr_block              = "10.3.2.0/24"
+  cidr_block              = "10.3.1.0/24"
   availability_zone       = "ap-northeast-1c"
   map_public_ip_on_launch = true
   tags = {
@@ -52,7 +52,7 @@ resource "aws_subnet" "pub_c" {
 }
 resource "aws_subnet" "priv_a" {
   vpc_id            = aws_vpc.main.id
-  cidr_block        = "10.3.1.0/24"
+  cidr_block        = "10.3.2.0/24"
   availability_zone = "ap-northeast-1a"
   tags = {
     Name                                        = "wsc-logging-sn-priv-a"
@@ -325,7 +325,7 @@ resource "aws_instance" "app" {
     chmod +x /opt/ec2-bootstrap.sh
     BUCKET="$BUCKET" SSM_PARAM="$SSM_PARAM" REGION="$REGION" CLUSTER="$CLUSTER" NM="$NM" bash /opt/ec2-bootstrap.sh
   EOF
-  tags                        = { Name = "wsc-log-app-bastion" }
+  tags                        = { Name = "wsc-logging-app-bastion" }
   depends_on = [
     aws_s3_object.app_py, aws_s3_object.app_req, aws_s3_object.app_docker,
     aws_s3_object.setup_sh, aws_s3_object.ec2_bootstrap_sh,

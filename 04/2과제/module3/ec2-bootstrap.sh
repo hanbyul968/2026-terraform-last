@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Module 3 EC2 bootstrap (wsc-log-app-bastion) — user_data 가 호출.
+# Module 3 EC2 bootstrap (wsc-logging-app-bastion) — user_data 가 호출.
 #   env: BUCKET, SSM_PARAM, REGION, CLUSTER, NM(비번호)
 #   1) Docker 설치 → 배포파일(app/) 다운로드 → 이미지 빌드 → 컨테이너 실행
 #      (--restart always, 기본 json-file 로깅 드라이버, 컨테이너명 wsc-log-app, 5000)

@@ -45,12 +45,12 @@ bash /opt/task2/deploy.sh <비번호>     # 예: bash /opt/task2/deploy.sh 07
 ## 모듈별 상세 (리전 / 주요 리소스)
 
 ### module1 — EKS Scaling (ap-northeast-2)
-- VPC `wsc-scaling-vpc` 10.11.0.0/16, 서브넷 `wsc-scaling-pub-sn-a/c`(10.11.0.0/24, 10.11.1.0/24), `wsc-scaling-priv-sn-a/c`(10.11.10.0/24, 10.11.11.0/24) — **채점표(1-1-A) 기준 이름 `pub-sn`/`priv-sn`** (문제지는 `sn-pub`/`sn-priv` 로 표기 → ⚠️ 아래 불일치 참고)
-- EKS `wsc-scaling-cluster` **버전 1.35**(채점표 1-2-A)
+- VPC `wsc-scaling-vpc` 10.11.0.0/16, 서브넷 `wsc-scaling-sn-pub-a/c`(10.11.0.0/24, 10.11.1.0/24), `wsc-scaling-sn-priv-a/c`(10.11.10.0/24, 10.11.11.0/24) — 문제지 표기 `sn-pub`/`sn-priv`
+- EKS `wsc-scaling-cluster` **버전 1.35**(문제지 미명시 → 안정 버전 유지)
 - Bastion `wsc-scaling-bastion`(t3.medium, Public-A, **EIP 로 재시작 후 IP 고정**, AdministratorAccess)
 - SQS `wsc-scaling-sqs`
 - Managed NodeGroup `wsc-scaling-node`(t3.medium, min 2 / max 10, labels dedicated=scaling)
-- `module1/k8s`(helm+kubectl provider): KEDA(ns keda), Karpenter(kube-system), Namespace `wsc-scaling`, Deployment `wsc-scaling-deploy`(busybox:latest, cpu 250m/500m, mem 256Mi/512Mi), ScaledObject `wsc-scaling-scaledobject`(SQS, pollingInterval=30, queueLength=5, minReplica=2), Karpenter EC2NodeClass/NodePool
+- `module1/k8s`(helm+kubectl provider): KEDA(ns keda), Karpenter(kube-system), Namespace `wsc-scaling`, Deployment `wsc-scaling-deploy`(busybox:latest, cpu 250m/500m, mem 256Mi/512Mi), ScaledObject `wsc-scaling-scaledobject`(SQS, pollingInterval=30, queueLength=5, minReplica=2), Karpenter EC2NodeClass/NodePool(limits cpu 100 / **memory 200Gi**)
 
 ### module2 — VPC Lattice (ap-southeast-1)
 - Hub VPC `wsc-hub-vpc` 10.0.0.0/16 (pub-a/c), Spoke VPC `wsc-spoke-vpc` 192.168.0.0/16 (pub-a/c, priv-a/c)
@@ -60,9 +60,9 @@ bash /opt/task2/deploy.sh <비번호>     # 예: bash /opt/task2/deploy.sh 07
 - VPC Lattice: Service Network `wsc-app-service-network`, Service `wsc-app-service`. Header `version:v1`→v1-tg(priority 10, weight 100), `version:v2`→v2-tg(priority 20, weight 100). 헤더 없으면 weighted 90/10 (헤더 우선)
 
 ### module3 — Container Logging (ap-northeast-1)
-- VPC **`wsc-log-vpc`** 10.3.0.0/16 (채점표 3-1-A 필터 기준; 문제지 표기는 `wsc-logging-vpc`) — 서브넷 `wsc-logging-sn-pub-a`(10.3.0.0/24), `wsc-logging-sn-priv-a`(10.3.1.0/24), `wsc-logging-sn-pub-c`(10.3.2.0/24), `wsc-logging-sn-priv-c`(10.3.3.0/24) — **채점표 CIDR pairing** (EC2=Public, EKS 노드=Private)
-- EKS `wsc-logging-cluster`(v1.35), NodeGroup `wsc-logging-ng`(t3.medium/AL2023, min 2 / **max 4**), EBS CSI addon(Loki PVC 용)
-- App EC2 **`wsc-log-app-bastion`**(t3.small/AL2023; 채점표 3-3-A 필터 기준, 문제지 표기는 `wsc-logging-app-bastion`): **부팅 시 `ec2-bootstrap.sh` 자동 실행** →
+- VPC **`wsc-logging-vpc`** 10.3.0.0/16 — 서브넷 `wsc-logging-sn-pub-a`(10.3.0.0/24), `wsc-logging-sn-pub-c`(10.3.1.0/24), `wsc-logging-sn-priv-a`(10.3.2.0/24), `wsc-logging-sn-priv-c`(10.3.3.0/24) — 문제지 CIDR (EC2=Public, EKS 노드=Private)
+- EKS `wsc-logging-cluster`(v1.35), NodeGroup `wsc-logging-ng`(t3.medium/AL2023, min 2 / max 4[문제지 미명시→WA 기본]), EBS CSI addon(Loki PVC 용)
+- App EC2 **`wsc-logging-app-bastion`**(t3.small/AL2023): **부팅 시 `ec2-bootstrap.sh` 자동 실행** →
   - 지급 배포파일(`app/app.py`,`Dockerfile`,`requirements.txt`)로 docker 이미지 빌드 → 컨테이너 `wsc-log-app`(TCP 5000, `--restart always`, json-file 로깅)
   - `setup.sh`: AWS LB Controller 설치 → Loki(SingleBinary, filesystem PVC 10Gi, NLB:3100, ns wsc-logging) + Grafana(NLB, Loki datasource, 대시보드 "WSC2026 Container Logs" 4패널, refresh 5s) 배포 → Loki NLB DNS 를 SSM `/wsc/module3/loki-endpoint` 에 기록
   - Fluent Bit(host, systemd): docker json 로그 감시 → `record_modifier` 로 `namespace=wsc-app-log` 추가 → Loki NLB 전송 (Time_Format `%Y-%m-%dT%H:%M:%S.%L`, Asia/Seoul)
@@ -70,9 +70,9 @@ bash /opt/task2/deploy.sh <비번호>     # 예: bash /opt/task2/deploy.sh 07
 
 ### module4 — REST API (us-east-1) — **로컬 apply 가능**
 - API Gateway(REST) `wsc-rest-api`, stage `prod`, API Key `wsc-rest-api-key`(+Usage Plan)
-- `POST /v1/user`(API Key 필수, body validation) / `GET /v1/user`(API Key 필수, querystring name·age 필수) / `GET /v1/healthcheck`(MOCK → `{"status":"ok"}`, Lambda 미개발)
-- Lambda `wsc-rest-function`(Python 3.14, `lambda/handler.py` 그대로): Conditional Write(중복→"User already exists"), Query 전용 조회(없음→"User not found"), Stack Trace 비노출, boto3 전역 재사용
-- DynamoDB `wsc-rest-table`(**PK `name`(S) 단일 파티션 키**, `age`·`country` 는 일반 속성, PAY_PER_REQUEST) — 채점표 4-3-A 가 name 키만으로 delete-item 하므로 SK 없음
+- `POST /v1/user`(API Key 필수, body 모델 `UserBody`(name/age/country) validation) / `GET /v1/user`(API Key 필수, querystring name·age 필수) / `GET /v1/healthcheck`(MOCK → `{"status":"ok"}`, Lambda 미개발)
+- Lambda `wsc-rest-function`(Python 3.14, `lambda/handler.py` 그대로): Conditional Write(중복→"User already exists"), GetItem 조회(없음→"User not found"), Stack Trace 비노출, boto3 전역 재사용
+- DynamoDB `wsc-rest-table`(**PK `name`(S) + SK `age`(N)**, `country` 는 일반 속성, PAY_PER_REQUEST) — 문제지 기준 복합 키(Conditional Write 로 멱등)
 
 ---
 
@@ -103,19 +103,19 @@ cd C:\Users\competitor\2026-terraform\04\2과제\bastion
 terraform destroy -auto-approve   # Bastion + 부트스트랩 버킷만 제거
 ```
 
-## ⚠️ 문제지 ↔ 채점표(mark 스크립트) 불일치 — **채점표 기준으로 구현함**
-채점은 `mark1~4.sh` 의 exact-match 로 진행되므로, 문제지와 다를 경우 **채점표 기대 출력**을 따랐다. 실제 대회 mark 스크립트가 문제지 표기를 쓰면 아래를 되돌릴 것.
+## ✅ 문제지(과제지) 기준 구현 — 전 항목 문제지 준수
+본 리포지토리는 **문제지(과제지)를 유일한 기준(authoritative)** 으로 구현한다. 이전에 채점 스크립트(mark) 기대 출력에 맞춰 되돌렸던 항목들은 **모두 문제지 표기로 재조정**되었다:
 
-| 항목 | 문제지 | 채점표(적용값) |
-|------|--------|---------------|
-| module1 서브넷 이름 | `wsc-scaling-sn-pub-a` … | **`wsc-scaling-pub-sn-a`** …(1-1-A) |
-| module1 EKS 버전 | 미명시 | **1.35**(1-2-A) |
-| module3 VPC Name 태그 | `wsc-logging-vpc` | **`wsc-log-vpc`**(3-1-A 필터) |
-| module3 서브넷 CIDR | priv-a=10.3.2, pub-c=10.3.1 | **priv-a=10.3.1, pub-c=10.3.2**(3-1-A) |
-| module3 NodeGroup max | 미명시 | **maxSize 4**(3-1-A) |
-| module3 App EC2 Name | `wsc-logging-app-bastion` | **`wsc-log-app-bastion`**(3-3-A 필터) |
-| module4 DynamoDB 키 | name(PK) + age 속성 | **name 단일 PK**(4-3-A delete-item) |
-| module3 대시보드 label | `wsc-app-log` | 3-5-B=`wsc-app-log`(자동), 3-6-B=`wsc2026-app-log`(수동, 오타 의심) → **`wsc-app-log` 유지** |
+- module1 서브넷 이름: `wsc-scaling-sn-pub-a/c`, `wsc-scaling-sn-priv-a/c` (문제지 `sn-pub`/`sn-priv` 표기)
+- module1 EKS 버전: 문제지 미명시 → 안정 버전 1.35 유지
+- module1 Karpenter NodePool limits: cpu 100 / **memory 200Gi** (문제지 명시)
+- module3 VPC Name 태그: `wsc-logging-vpc`
+- module3 서브넷 CIDR: pub-a=10.3.0.0/24, pub-c=10.3.1.0/24, priv-a=10.3.2.0/24, priv-c=10.3.3.0/24 (문제지 기준)
+- module3 App EC2 Name: `wsc-logging-app-bastion`
+- module3 대시보드 namespace label: `wsc-app-log`
+- module4 DynamoDB 키: **PK `name`(S) + SK `age`(N)** (문제지 복합 키), `country` 일반 속성
+
+문제지에 값이 주어지지 않은 항목(EKS 버전, NodeGroup max 등)은 Well-Architected 기준으로 적절히 설정했다.
 
 ## NEEDS-REVIEW
 - Karpenter/KEDA/LB Controller/Loki/Grafana 의 helm 차트 버전은 대회 시점 최신에 맞춰 필요 시 핀 고정.

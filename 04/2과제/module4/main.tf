@@ -10,14 +10,19 @@ provider "aws" {
   region = "us-east-1"
 }
 
-# ── DynamoDB (Query-only, PK = name; age/country 는 일반 속성) ─────────
+# ── DynamoDB (PK = name(S), SK = age(N); country 는 일반 속성) ─────────
 resource "aws_dynamodb_table" "rest" {
   name         = "wsc-rest-table"
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "name"
+  range_key    = "age"
   attribute {
     name = "name"
     type = "S"
+  }
+  attribute {
+    name = "age"
+    type = "N"
   }
 }
 
@@ -94,6 +99,25 @@ resource "aws_api_gateway_request_validator" "body" {
   validate_request_body       = true
 }
 
+# POST body 모델 — name/age/country 필수. API GW 에서 검증되어 잘못된 요청은 Lambda 에 도달하지 않음.
+resource "aws_api_gateway_model" "user_body" {
+  rest_api_id  = aws_api_gateway_rest_api.api.id
+  name         = "UserBody"
+  content_type = "application/json"
+  schema = jsonencode({
+    "$schema"            = "http://json-schema.org/draft-04/schema#"
+    title                = "UserBody"
+    type                 = "object"
+    required             = ["name", "age", "country"]
+    additionalProperties = false
+    properties = {
+      name    = { type = "string" }
+      age     = { type = "number" }
+      country = { type = "string" }
+    }
+  })
+}
+
 # POST /v1/user (API key required, body validation)
 resource "aws_api_gateway_method" "user_post" {
   rest_api_id          = aws_api_gateway_rest_api.api.id
@@ -102,6 +126,7 @@ resource "aws_api_gateway_method" "user_post" {
   authorization        = "NONE"
   api_key_required     = true
   request_validator_id = aws_api_gateway_request_validator.body.id
+  request_models       = { "application/json" = aws_api_gateway_model.user_body.name }
 }
 resource "aws_api_gateway_integration" "user_post" {
   rest_api_id             = aws_api_gateway_rest_api.api.id

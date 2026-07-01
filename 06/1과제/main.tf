@@ -360,6 +360,10 @@ data "aws_security_group" "cloudfront_vpc_origin" {
     name   = "group-name"
     values = ["CloudFront-VPCOrigins-Service-SG*"]
   }
+  filter {
+    name   = "vpc-id"
+    values = [local.vpc_id]
+  }
 
   depends_on = [module.CloudFront]
 }

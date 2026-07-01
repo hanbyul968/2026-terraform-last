@@ -106,8 +106,15 @@ TYPE_SPECS = {
                                       "needs": 'aws cloudfront list-origin-access-controls --query "OriginAccessControlList.Items[?Name==\'<name>\'].Id|[0]" --output text'},
     "aws_cloudfront_function":       {"id_kind": "함수 이름", "from_err": True,
                                       "needs": 'aws cloudfront list-functions --query "FunctionList.Items[?Name==\'<name>\'].Name|[0]" --output text'},
-    "aws_wafv2_web_acl":             {"id_kind": "ID/Name/Scope 형식", "from_err": False,
-                                      "needs": "<id>/<name>/<REGIONAL|CLOUDFRONT>"},
+    "aws_wafv2_web_acl":             {"id_kind": "WebACL ID (id/name/scope)", "from_err": False,
+                                      "needs": 'aws wafv2 list-web-acls --scope REGIONAL --query "WebACLs[?Name==\'<name>\'].Id|[0]" --output text',
+                                      "id_tmpl": "{var}/<name>/REGIONAL"},
+    "aws_launch_template":           {"id_kind": "Launch Template ID (lt-...)", "from_err": False,
+                                      "needs": 'aws ec2 describe-launch-templates --filters Name=launch-template-name,Values=<name> --query "LaunchTemplates[0].LaunchTemplateId" --output text'},
+    "aws_eks_access_entry":          {"id_kind": "cluster_name:principal_arn 형식", "from_err": False,
+                                      "needs": '형식 <cluster>:<principal_arn> — 목록: aws eks list-access-entries --cluster-name <cluster> --query "accessEntries" --output text'},
+    "aws_eks_access_policy_association": {"id_kind": "cluster_name#principal_arn#policy_arn 형식", "from_err": False,
+                                      "needs": '형식 <cluster>#<principal_arn>#<policy_arn> — 목록: aws eks list-associated-access-policies --cluster-name <cluster> --principal-arn <arn>'},
 }
 
 
@@ -214,9 +221,13 @@ def build(block, var_pairs=None):
             v = var_for(addr)
             lines.append(f"# {spec['id_kind']} 조회 후 변수에 저장")
             lines.append(f"{v}=$({hint})")
-            lines.append(f'{tf} {qaddr} "${v}"')
+            # id_tmpl 로 최종 import ID 조립 ({var}=조회값, <name>=에러에서 추출한 이름)
+            id_str = spec.get("id_tmpl", "{var}").replace("{var}", f"${v}")
+            if name:
+                id_str = id_str.replace("<name>", name)
+            lines.append(f'{tf} {qaddr} "{id_str}"')
             note = (f"import ID = {spec['id_kind']}. 위 두 줄을 그대로 실행하면 "
-                    f"조회한 ID(`${v}`)로 바로 import 됩니다.")
+                    f"조회한 값으로 조립된 ID 로 바로 import 됩니다.")
         else:
             if hint:
                 lines.append(f"# {spec['id_kind']} 조회/형식:")

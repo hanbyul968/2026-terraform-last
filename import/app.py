@@ -112,9 +112,18 @@ TYPE_SPECS = {
     "aws_launch_template":           {"id_kind": "Launch Template ID (lt-...)", "from_err": False,
                                       "needs": 'aws ec2 describe-launch-templates --filters Name=launch-template-name,Values=<name> --query "LaunchTemplates[0].LaunchTemplateId" --output text'},
     "aws_eks_access_entry":          {"id_kind": "cluster_name:principal_arn 형식", "from_err": False,
-                                      "needs": '형식 <cluster>:<principal_arn> — 목록: aws eks list-access-entries --cluster-name <cluster> --query "accessEntries" --output text'},
+                                      "vars": [
+                                          ("CLUSTER", 'aws eks list-clusters --query "clusters[0]" --output text'),
+                                          ("PRINCIPAL", 'aws eks list-access-entries --cluster-name "${CLUSTER}" --query "accessEntries[0]" --output text'),
+                                      ],
+                                      "id_tmpl": "${CLUSTER}:${PRINCIPAL}"},
     "aws_eks_access_policy_association": {"id_kind": "cluster_name#principal_arn#policy_arn 형식", "from_err": False,
-                                      "needs": '형식 <cluster>#<principal_arn>#<policy_arn> — 목록: aws eks list-associated-access-policies --cluster-name <cluster> --principal-arn <arn>'},
+                                      "vars": [
+                                          ("CLUSTER", 'aws eks list-clusters --query "clusters[0]" --output text'),
+                                          ("PRINCIPAL", 'aws eks list-access-entries --cluster-name "${CLUSTER}" --query "accessEntries[0]" --output text'),
+                                          ("POLICY", 'aws eks list-associated-access-policies --cluster-name "${CLUSTER}" --principal-arn "${PRINCIPAL}" --query "associatedAccessPolicies[0].policyArn" --output text'),
+                                      ],
+                                      "id_tmpl": "${CLUSTER}#${PRINCIPAL}#${POLICY}"},
 }
 
 
@@ -210,6 +219,24 @@ def build(block, var_pairs=None):
         import_id = name if ("/" not in name and " " not in name) else f'"{name}"'
         lines.append(f"{tf} {qaddr} {import_id}")
         note = f"import ID = {spec['id_kind']} (에러 메시지에서 '{name}' 자동 추출)"
+    elif spec.get("vars"):
+        # 여러 값을 조회해 복합 import ID 를 변수로 조립 (예: cluster:principal_arn)
+        prefix = var_for(addr)
+        # 스펙의 논리 변수명(CLUSTER 등)을 리소스별 고유 셸 변수명으로 매핑
+        subs = {logical: f"{prefix}_{logical}" for logical, _ in spec["vars"]}
+
+        def apply_subs(s):
+            for logical, real in subs.items():
+                s = s.replace("${" + logical + "}", "${" + real + "}")
+            return s
+
+        lines.append(f"# {spec['id_kind']} 조립을 위한 값 조회")
+        for logical, cmd in spec["vars"]:
+            lines.append(f"{subs[logical]}=$({apply_subs(cmd)})")
+        id_str = apply_subs(spec["id_tmpl"])
+        lines.append(f'{tf} {qaddr} "{id_str}"')
+        note = (f"import ID = {spec['id_kind']}. 위 줄들을 그대로 실행하면 조회한 값들로 "
+                f"조립된 ID 로 바로 import 됩니다. (클러스터/엔트리가 여러 개면 [0] 인덱스를 조정하세요)")
     else:
         # ID 를 별도로 구해야 함
         needs = spec.get("needs")

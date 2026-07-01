@@ -1,23 +1,23 @@
-terraform {
+﻿terraform {
   required_providers {
     aws = { source = "hashicorp/aws", version = "~> 5.0" }
   }
 }
 
-# 4-3 Container logging — ap-northeast-1
+# 4-3 Container logging ??ap-northeast-1
 provider "aws" {
   region = "ap-northeast-1"
 }
 
 variable "competitor_number" {
-  description = "비번호 — Grafana admin(wsc2026-admin-<번호> / admin<번호>!) 에 사용. deploy.sh 가 -var 로 전달."
+  description = "鍮꾨쾲????Grafana admin(wsc2026-admin-<踰덊샇> / admin<踰덊샇>!) ???ъ슜. deploy.sh 媛 -var 濡??꾨떖."
   type        = string
   default     = "00"
 }
 
 data "aws_caller_identity" "current" {}
 
-# ── VPC (10.3.0.0/16) ────────────────────────────────────────────────
+# ?? VPC (10.3.0.0/16) ????????????????????????????????????????????????
 resource "aws_vpc" "main" {
   cidr_block           = "10.3.0.0/16"
   enable_dns_support   = true
@@ -110,7 +110,7 @@ resource "aws_route_table_association" "priv_c" {
   route_table_id = aws_route_table.priv.id
 }
 
-# ── EKS (wsc-logging-cluster v1.35) ──────────────────────────────────
+# ?? EKS (wsc-logging-cluster v1.35) ??????????????????????????????????
 resource "aws_iam_role" "eks_cluster" {
   name = "wsc-logging-cluster-role"
   assume_role_policy = jsonencode({
@@ -164,6 +164,10 @@ resource "aws_eks_node_group" "main" {
   subnet_ids      = [aws_subnet.priv_a.id, aws_subnet.priv_c.id]
   instance_types  = ["t3.medium"]
   ami_type        = "AL2023_x86_64_STANDARD"
+  launch_template {
+    id      = aws_launch_template.node.id
+    version = "$Latest"
+  }
   scaling_config {
     desired_size = 2
     min_size     = 2
@@ -178,7 +182,7 @@ resource "aws_eks_node_group" "main" {
   ]
 }
 
-# ── EBS CSI Driver (Loki PVC 10Gi gp3 bind 용) ───────────────────────
+# ?? EBS CSI Driver (Loki PVC 10Gi gp3 bind ?? ???????????????????????
 resource "aws_iam_role_policy_attachment" "n_ebs" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
   role       = aws_iam_role.node.name
@@ -191,7 +195,7 @@ resource "aws_eks_addon" "ebs_csi" {
   depends_on                  = [aws_eks_node_group.main, aws_iam_role_policy_attachment.n_ebs]
 }
 
-# ── App EC2 (wsc-logging-app-bastion): docker flask wsc-log-app:5000 + Fluent Bit ──
+# ?? App EC2 (wsc-logging-app-bastion): docker flask wsc-log-app:5000 + Fluent Bit ??
 data "aws_ami" "al2023" {
   most_recent = true
   owners      = ["amazon"]
@@ -235,7 +239,7 @@ resource "aws_iam_role" "app" {
     Statement = [{ Action = "sts:AssumeRole", Effect = "Allow", Principal = { Service = "ec2.amazonaws.com" } }]
   })
 }
-# 컨테이너 빌드/실행 + helm(Loki/Grafana/LB controller) + EKS 접근 + SSM 을 위해 Admin 사용
+# 而⑦뀒?대꼫 鍮뚮뱶/?ㅽ뻾 + helm(Loki/Grafana/LB controller) + EKS ?묎렐 + SSM ???꾪빐 Admin ?ъ슜
 resource "aws_iam_role_policy_attachment" "app_admin" {
   policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
   role       = aws_iam_role.app.name
@@ -245,7 +249,7 @@ resource "aws_iam_instance_profile" "app" {
   role = aws_iam_role.app.name
 }
 
-# app EC2 가 kubectl/helm 으로 클러스터를 제어할 수 있도록 cluster-admin access entry 부여
+# app EC2 媛 kubectl/helm ?쇰줈 ?대윭?ㅽ꽣瑜??쒖뼱?????덈룄濡?cluster-admin access entry 遺??
 resource "aws_eks_access_entry" "app" {
   cluster_name  = aws_eks_cluster.main.name
   principal_arn = aws_iam_role.app.arn
@@ -259,7 +263,7 @@ resource "aws_eks_access_policy_association" "app_admin" {
   depends_on = [aws_eks_access_entry.app]
 }
 
-# ── 배포 아티팩트 S3 (app/ 배포파일 + setup.sh + ec2-bootstrap.sh) ────
+# ?? 諛고룷 ?꾪떚?⑺듃 S3 (app/ 諛고룷?뚯씪 + setup.sh + ec2-bootstrap.sh) ????
 resource "aws_s3_bucket" "artifacts" {
   bucket        = "wsc-logging-artifacts-${data.aws_caller_identity.current.account_id}"
   force_destroy = true
@@ -303,8 +307,8 @@ resource "aws_s3_object" "ec2_bootstrap_sh" {
   etag   = filemd5("${path.module}/ec2-bootstrap.sh")
 }
 
-# 배포파일 app.py/requirements.txt/Dockerfile 를 S3 로 배포하고, EC2 부팅 시
-# ec2-bootstrap.sh 를 내려받아 실행한다(도커 빌드/실행 + Loki/Grafana + Fluent Bit).
+# 諛고룷?뚯씪 app.py/requirements.txt/Dockerfile 瑜?S3 濡?諛고룷?섍퀬, EC2 遺????
+# ec2-bootstrap.sh 瑜??대젮諛쏆븘 ?ㅽ뻾?쒕떎(?꾩빱 鍮뚮뱶/?ㅽ뻾 + Loki/Grafana + Fluent Bit).
 resource "aws_instance" "app" {
   ami                         = data.aws_ami.al2023.id
   instance_type               = "t3.small"
@@ -339,3 +343,34 @@ output "cluster_name" { value = aws_eks_cluster.main.name }
 output "cluster_endpoint" { value = aws_eks_cluster.main.endpoint }
 output "app_ec2_id" { value = aws_instance.app.id }
 output "app_public_ip" { value = aws_instance.app.public_ip }
+
+
+# Launch template: IMDS hop limit 2 so in-cluster pods (EBS CSI controller) can
+# reach IMDS and assume the node role. Without it the aws-ebs-csi-driver addon
+# hangs in CREATING (controller CrashLoopBackOff: "no EC2 IMDS role found").
+resource "aws_launch_template" "node" {
+  name_prefix = "wsc-logging-ng-"
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 2
+  }
+  tag_specifications {
+    resource_type = "instance"
+    tags          = { Name = "wsc-logging-node" }
+  }
+}
+
+
+# Allow in-VPC clients (the app EC2 wsc-logging-app-bastion running setup.sh:
+# kubectl/helm to deploy Loki/Grafana) to reach the EKS API server on 443.
+# Without this the cluster security group blocks the app EC2 and kubectl hangs.
+resource "aws_security_group_rule" "cluster_api_from_vpc" {
+  description       = "In-VPC access to EKS API (app EC2 setup.sh)"
+  type              = "ingress"
+  from_port         = 443
+  to_port           = 443
+  protocol          = "tcp"
+  cidr_blocks       = [aws_vpc.main.cidr_block]
+  security_group_id = aws_eks_cluster.main.vpc_config[0].cluster_security_group_id
+}

@@ -104,7 +104,7 @@ resource "aws_security_group_rule" "alb_to_nodes" {
   from_port                = 8080
   to_port                  = 8080
   protocol                 = "tcp"
-  source_security_group_id = aws_security_group.alb.id
+  source_security_group_id = data.aws_security_group.alb.id
   security_group_id        = aws_eks_cluster.cluster.vpc_config[0].cluster_security_group_id
 }
 
@@ -113,7 +113,7 @@ resource "aws_security_group_rule" "alb_to_nodes_grafana" {
   from_port                = 3000
   to_port                  = 3000
   protocol                 = "tcp"
-  source_security_group_id = aws_security_group.alb.id
+  source_security_group_id = data.aws_security_group.alb.id
   security_group_id        = aws_eks_cluster.cluster.vpc_config[0].cluster_security_group_id
 }
 
@@ -123,8 +123,8 @@ resource "aws_eks_cluster" "cluster" {
   role_arn = aws_iam_role.eks_cluster.arn
 
   vpc_config {
-    subnet_ids              = [aws_subnet.private_a.id, aws_subnet.private_b.id]
-    security_group_ids      = [aws_security_group.eks_cluster.id]
+    subnet_ids              = [data.aws_subnet.private_a.id, data.aws_subnet.private_b.id]
+    security_group_ids      = [data.aws_security_group.eks_cluster.id]
     endpoint_private_access = true
     endpoint_public_access  = true
   }
@@ -303,7 +303,7 @@ resource "aws_eks_node_group" "addon" {
   cluster_name    = aws_eks_cluster.cluster.name
   node_group_name = "gj2026-eks-addon-nodegroup"
   node_role_arn   = aws_iam_role.eks_node["addon"].arn
-  subnet_ids      = [aws_subnet.private_a.id, aws_subnet.private_b.id]
+  subnet_ids      = [data.aws_subnet.private_a.id, data.aws_subnet.private_b.id]
   instance_types  = ["t3.medium"]
   # LT 에 image_id 를 넣으면 amiType=CUSTOM 이 되어 채점(BOTTLEROCKET_x86_64 일치) 불통.
   ami_type = "BOTTLEROCKET_x86_64"
@@ -327,11 +327,6 @@ resource "aws_eks_node_group" "addon" {
 
   depends_on = [
     aws_iam_role_policy_attachment.node,
-    aws_vpc_endpoint.interface,
-    aws_vpc_endpoint.s3,
-    aws_vpc_endpoint.dynamodb,
-    aws_route_table_association.private_a,
-    aws_route_table_association.private_b,
     null_resource.build_push_bootstrap,
     # 노드 join 전에 aws-auth 매핑이 존재해야 함
     null_resource.aws_auth,
@@ -342,7 +337,7 @@ resource "aws_eks_node_group" "app" {
   cluster_name    = aws_eks_cluster.cluster.name
   node_group_name = "gj2026-eks-app-nodegroup"
   node_role_arn   = aws_iam_role.eks_node["app"].arn
-  subnet_ids      = [aws_subnet.private_a.id, aws_subnet.private_b.id]
+  subnet_ids      = [data.aws_subnet.private_a.id, data.aws_subnet.private_b.id]
   instance_types  = ["m5.large"]
   ami_type        = "BOTTLEROCKET_x86_64"
 
@@ -365,11 +360,6 @@ resource "aws_eks_node_group" "app" {
 
   depends_on = [
     aws_iam_role_policy_attachment.node,
-    aws_vpc_endpoint.interface,
-    aws_vpc_endpoint.s3,
-    aws_vpc_endpoint.dynamodb,
-    aws_route_table_association.private_a,
-    aws_route_table_association.private_b,
     null_resource.build_push_bootstrap,
     null_resource.aws_auth,
   ]

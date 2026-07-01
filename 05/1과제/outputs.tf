@@ -1,13 +1,13 @@
 output "vpc_id" {
-  value = aws_vpc.vpc.id
+  value = data.aws_vpc.vpc.id
 }
 
 output "subnet_a_id" {
-  value = aws_subnet.private_a.id
+  value = data.aws_subnet.private_a.id
 }
 
 output "subnet_b_id" {
-  value = aws_subnet.private_b.id
+  value = data.aws_subnet.private_b.id
 }
 
 output "eks_cluster_name" {

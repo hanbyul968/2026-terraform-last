@@ -2,8 +2,8 @@ resource "aws_lb" "alb" {
   name               = "gj2026-alb"
   internal           = true
   load_balancer_type = "application"
-  security_groups    = [aws_security_group.alb.id]
-  subnets            = [aws_subnet.private_a.id, aws_subnet.private_b.id]
+  security_groups    = [data.aws_security_group.alb.id]
+  subnets            = [data.aws_subnet.private_a.id, data.aws_subnet.private_b.id]
 
   enable_cross_zone_load_balancing = true
 }
@@ -12,7 +12,7 @@ resource "aws_lb_target_group" "book" {
   name        = "gj2026-book-tg"
   port        = 8080
   protocol    = "HTTP"
-  vpc_id      = aws_vpc.vpc.id
+  vpc_id      = data.aws_vpc.vpc.id
   target_type = "ip"
 
   health_check {
@@ -26,7 +26,7 @@ resource "aws_lb_target_group" "grafana" {
   name        = "gj2026-grafana-tg"
   port        = 3000
   protocol    = "HTTP"
-  vpc_id      = aws_vpc.vpc.id
+  vpc_id      = data.aws_vpc.vpc.id
   target_type = "ip"
 
   health_check {

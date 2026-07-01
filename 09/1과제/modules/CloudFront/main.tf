@@ -21,6 +21,7 @@ resource "aws_cloudfront_vpc_origin" "alb" {
 
 resource "aws_cloudfront_distribution" "this" {
   enabled             = true
+  comment             = var.distribution_name
   default_root_object = "index.html"
   price_class         = "PriceClass_All"
 

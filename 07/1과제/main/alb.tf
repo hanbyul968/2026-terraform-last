@@ -17,6 +17,8 @@ resource "aws_lb_target_group" "ecs" {
   health_check {
     path = "/health"
   }
+
+  tags = { Name = "skills-book-tg" }
 }
 
 resource "aws_lb_listener" "http" {

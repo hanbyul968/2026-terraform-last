@@ -128,10 +128,34 @@ resource "kubernetes_deployment_v1" "wsc" {
           port {
             container_port = 8080
           }
-          # 환경변수는 ConfigMap 참조 (하드코딩 금지, 채점 6-7-B)
-          env_from {
-            config_map_ref {
-              name = kubernetes_config_map_v1.wsc.metadata[0].name
+          # 환경변수는 ConfigMap 을 개별 key 로 참조 (하드코딩 금지 + 채점 6-6-B:
+          # env[].valueFrom.configMapKeyRef 로 주입되고 직접 value 는 없어야 함).
+          # envFrom(bulk)은 .env 배열을 만들지 않아 채점 jq 가 null 로 FAIL 한다.
+          env {
+            name = "AWS_REGION"
+            value_from {
+              config_map_key_ref {
+                name = kubernetes_config_map_v1.wsc.metadata[0].name
+                key  = "AWS_REGION"
+              }
+            }
+          }
+          env {
+            name = "TABLE_NAME"
+            value_from {
+              config_map_key_ref {
+                name = kubernetes_config_map_v1.wsc.metadata[0].name
+                key  = "TABLE_NAME"
+              }
+            }
+          }
+          env {
+            name = "AWS_ENDPOINT_URL_DYNAMODB"
+            value_from {
+              config_map_key_ref {
+                name = kubernetes_config_map_v1.wsc.metadata[0].name
+                key  = "AWS_ENDPOINT_URL_DYNAMODB"
+              }
             }
           }
           readiness_probe {

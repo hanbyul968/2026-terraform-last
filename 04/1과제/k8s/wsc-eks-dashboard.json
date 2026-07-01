@@ -25,7 +25,7 @@
       "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "expr": "count(kube_pod_labels{namespace=\"wsc\", label_app=\"wsc-deploy\"})" }
+        { "refId": "A", "expr": "count(kube_pod_info{namespace=\"wsc\"})" }
       ]
     },
     {

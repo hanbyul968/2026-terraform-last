@@ -78,7 +78,8 @@ resource "null_resource" "aws_auth" {
     }
     command = <<-EOT
       set -eu
-      aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER" >/dev/null
+      export KUBECONFIG=/tmp/gj2026.kubeconfig
+      aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER" --kubeconfig "$KUBECONFIG" >/dev/null
       f=$(mktemp /tmp/gj2026-aws-auth.XXXXXX.yaml)
       printf '%s' "$AWSAUTH" > "$f"
       kubectl apply -f "$f"
@@ -114,7 +115,8 @@ resource "null_resource" "strip_node_access_entries" {
         echo "kubectl not found in PATH" >&2
         exit 1
       fi
-      aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER" >/dev/null 2>&1
+      export KUBECONFIG=/tmp/gj2026.kubeconfig
+      aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER" --kubeconfig "$KUBECONFIG" >/dev/null 2>&1
       f=$(mktemp /tmp/gj2026-aws-auth.XXXXXX.yaml)
       printf '%s' "$AWSAUTH" > "$f"
       i=0

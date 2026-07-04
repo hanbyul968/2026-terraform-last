@@ -35,8 +35,8 @@ def _run_command(instance_id: str, commands: list) -> tuple[str, bool]:
     )
     cmd_id = resp["Command"]["CommandId"]
 
-    for _ in range(30):
-        time.sleep(3)
+    for _ in range(20):
+        time.sleep(1)
         result = ssm_client.get_command_invocation(
             CommandId=cmd_id, InstanceId=instance_id
         )
@@ -106,13 +106,14 @@ def lambda_handler(event, context):
     )
     diff_text = "".join(diff_lines) if diff_lines else "(변경 없음)"
 
-    # 복원: SSM 백업을 app.py에 덮어쓰기
-    escape = backup_content.replace("'", "'\\''")
-    _run_command(instance_id, [f"echo '{escape}' > {APP_PATH}"])
+    # 복원: SSM Parameter Store에서 직접 가져와 app.py에 덮어쓰기 (echo 쉘 해석 문제 회피)
+    _run_command(instance_id, [
+        f"aws ssm get-parameter --name {PARAM_NAME} --query 'Parameter.Value' --output text --region {REGION} > {APP_PATH}",
+        f"chown ec2-user:ec2-user {APP_PATH}"
+    ])
 
     # 서비스 재시작
     _run_command(instance_id, [f"systemctl restart {SERVICE_NAME}"])
-    time.sleep(5)
 
     # 복구 완료 시각 (KST)
     now_kst = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")

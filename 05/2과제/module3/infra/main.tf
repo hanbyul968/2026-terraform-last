@@ -226,28 +226,38 @@ CWEOF
   -a fetch-config -m ec2 -s \
   -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
 
-# 커스텀 메트릭 수집 스크립트 (app_process_count, 10초 간격)
+# 커스텀 메트릭 수집 스크립트 (app_process_count, systemd 타이머로 주기 실행)
 cat > /usr/local/bin/put-app-metric.sh << 'METRICEOF'
 #!/bin/bash
-COUNT=$(systemctl is-active gj2026-app 2>/dev/null | grep -c '^active' || echo 0)
+# 앱 활성 여부를 깔끔한 정수(1/0)로 발행 (grep -c || echo 조합은 "0\n0" 버그 유발)
+if systemctl is-active --quiet gj2026-app; then COUNT=1; else COUNT=0; fi
 aws cloudwatch put-metric-data \
   --namespace "GJ2026/Events" \
   --metric-name "app_process_count" \
   --value "$COUNT" \
+  --storage-resolution 1 \
   --region ap-northeast-2
 METRICEOF
 
 chmod +x /usr/local/bin/put-app-metric.sh
 
-# 매 분 6회 실행 (약 10초 간격)
-cat > /etc/cron.d/app-metric << 'CRONEOF'
-* * * * * root /usr/local/bin/put-app-metric.sh
-* * * * * root sleep 10 && /usr/local/bin/put-app-metric.sh
-* * * * * root sleep 20 && /usr/local/bin/put-app-metric.sh
-* * * * * root sleep 30 && /usr/local/bin/put-app-metric.sh
-* * * * * root sleep 40 && /usr/local/bin/put-app-metric.sh
-* * * * * root sleep 50 && /usr/local/bin/put-app-metric.sh
-CRONEOF
+# AL2023엔 cron(cronie)이 기본 미설치 → systemd 서비스로 5초 간격 발행 (고해상도 메트릭)
+cat > /etc/systemd/system/gj2026-metric.service << 'METRICSVCEOF'
+[Unit]
+Description=GJ2026 app_process_count publisher
+After=network.target
+
+[Service]
+ExecStart=/bin/bash -c 'while true; do /usr/local/bin/put-app-metric.sh; sleep 5; done'
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+METRICSVCEOF
+
+systemctl daemon-reload
+systemctl enable --now gj2026-metric.service
 EOF
 
   tags = { Name = "gj2026-event-ec2" }
@@ -286,7 +296,7 @@ resource "aws_cloudwatch_metric_alarm" "app" {
   evaluation_periods  = 1
   metric_name         = "app_process_count"
   namespace           = "GJ2026/Events"
-  period              = 60
+  period              = 10
   statistic           = "Average"
   threshold           = 1
   alarm_description   = "gj2026-app 프로세스 다운 감지"

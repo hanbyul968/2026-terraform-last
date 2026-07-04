@@ -135,10 +135,15 @@ systemctl restart sshd
 
 dnf install -y nginx openssl jq
 
+# Public IP (IMDSv2) — 인증서 SAN 에 포함해야 STS OIDC 의 TLS 검증 통과 (최신 TLS 클라이언트는 CN 무시, SAN 필수)
+IMDS_TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+PUBIP=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4)
+
 openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
   -keyout /etc/nginx/ssl.key \
   -out /etc/nginx/ssl.crt \
-  -subj "/CN=keycloak/O=GJ2026"
+  -subj "/CN=$PUBIP/O=GJ2026" \
+  -addext "subjectAltName=IP:$PUBIP,DNS:keycloak"
 
 cat > /etc/nginx/conf.d/keycloak.conf << 'NGINXEOF'
 server {
@@ -180,7 +185,7 @@ cat > /opt/keycloak/conf/keycloak.conf << 'KCEOF'
 http-enabled=true
 http-port=8080
 hostname-strict=false
-proxy=edge
+proxy-headers=xforwarded
 KCEOF
 
 cat > /etc/systemd/system/keycloak.service << 'SVCEOF'
@@ -285,6 +290,10 @@ create_user() {
     \"username\": \"$USERNAME\",
     \"enabled\": true,
     \"emailVerified\": true,
+    \"email\": \"$USERNAME@example.com\",
+    \"firstName\": \"$USERNAME\",
+    \"lastName\": \"user\",
+    \"requiredActions\": [],
     \"credentials\": [{\"type\":\"password\",\"value\":\"$PASSWORD\",\"temporary\":false}],
     \"attributes\": {\"team\":[\"$TEAM\"]}
   }"
@@ -327,11 +336,11 @@ case "$TEAM" in
   *) echo "unknown team: $TEAM" >&2; exit 1 ;;
 esac
 
-# 현재 인스턴스 Public IP (IMDSv2)
-IMDS_TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
-  -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
-IP=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
-  http://169.254.169.254/latest/meta-data/public-ipv4)
+# Keycloak EC2 Public IP (태그로 조회 → CloudShell/EC2 어디서든 동작; IMDS 의존 제거)
+IP=$(aws ec2 describe-instances \
+  --filters "Name=tag:Name,Values=gj2026-keycloak-ec2" "Name=instance-state-name,Values=running" \
+  --region "$REGION" \
+  --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
 
 # Keycloak 비밀번호 그랜트로 ID Token 발급 (public client)
 ID_TOKEN=$(curl -sk -X POST "https://$IP/realms/team/protocol/openid-connect/token" \

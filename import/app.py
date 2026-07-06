@@ -113,15 +113,7 @@ TYPE_SPECS = {
     "aws_cloudfront_origin_request_policy": {"id_kind": "Origin Request Policy ID", "from_err": False,
                                       "needs": 'aws cloudfront list-origin-request-policies --query "OriginRequestPolicyList.Items[?OriginRequestPolicy.OriginRequestPolicyConfig.Name==\'<name>\'].OriginRequestPolicy.Id|[0]" --output text'},
     "aws_wafv2_web_acl":             {"id_kind": "WebACL ID (id/name/scope)", "from_err": False,
-                                      "script": [
-                                          '{P}_SCOPE=REGIONAL',
-                                          '{P}_ID=$(aws wafv2 list-web-acls --scope REGIONAL --query "WebACLs[?Name==\'{name}\'].Id|[0]" --output text)',
-                                          'if [ -z "${P}_ID" ] || [ "${P}_ID" = "None" ]; then',
-                                          '  {P}_SCOPE=CLOUDFRONT',
-                                          '  {P}_ID=$(aws wafv2 list-web-acls --scope CLOUDFRONT --region us-east-1 --query "WebACLs[?Name==\'{name}\'].Id|[0]" --output text)',
-                                          'fi',
-                                      ],
-                                      "id_tmpl": "${P}_ID/{name}/${P}_SCOPE"},
+                                      "wafv2_scope": True},
     "aws_launch_template":           {"id_kind": "Launch Template ID (lt-...)", "from_err": False,
                                       "needs": 'aws ec2 describe-launch-templates --filters Name=launch-template-name,Values=<name> --query "LaunchTemplates[0].LaunchTemplateId" --output text'},
     "aws_eks_access_entry":          {"id_kind": "cluster_name:principal_arn 형식", "from_err": False,
@@ -196,7 +188,14 @@ def var_for(addr):
     return f"ID_{safe}"
 
 
-def build(block, var_pairs=None):
+def sh_assign(var, cmd, shell):
+    """명령 출력을 변수에 담는 셸별 구문. (변수 참조는 양쪽 모두 ${var} 로 통일)"""
+    if shell == "powershell":
+        return f"${var} = {cmd}"
+    return f"{var}=$({cmd})"
+
+
+def build(block, var_pairs=None, shell="powershell"):
     addr = block["addr"]
     name = block["name"]
     rtype = type_of(addr)
@@ -205,7 +204,7 @@ def build(block, var_pairs=None):
     var = ""
     for v_name, v_value in (var_pairs or []):
         if v_name and v_value:
-            var += f' -var="{v_name}={v_value}"'
+            var += f' -var "{v_name}={v_value}"'
     tf = f"terraform import{var}"
     qaddr = quote_addr(addr)  # 인덱스/공백 있는 주소는 작은따옴표로 감쌈
 
@@ -232,20 +231,35 @@ def build(block, var_pairs=None):
         import_id = name if ("/" not in name and " " not in name) else f'"{name}"'
         lines.append(f"{tf} {qaddr} {import_id}")
         note = f"import ID = {spec['id_kind']} (에러 메시지에서 '{name}' 자동 추출)"
-    elif spec.get("script"):
-        # 여러 줄 셸 스크립트로 값을 구해 import ID 조립 ({P}=리소스별 접두사, {name}=추출한 이름)
+    elif spec.get("wafv2_scope"):
+        # WAFv2 WebACL: scope(REGIONAL/CLOUDFRONT) 를 자동 감지해 id/name/scope 조립
         P = var_for(addr)
-        for ln in spec["script"]:
-            ln = ln.replace("{P}", P)
-            if name:
-                ln = ln.replace("{name}", name)
-            lines.append(ln)
-        id_str = spec["id_tmpl"].replace("{P}", P)
-        if name:
-            id_str = id_str.replace("{name}", name)
+        sid, iid = P + "_SCOPE", P + "_ID"
+        nm = name or "<name>"
+        q_reg = f"aws wafv2 list-web-acls --scope REGIONAL --query \"WebACLs[?Name=='{nm}'].Id|[0]\" --output text"
+        q_cf = f"aws wafv2 list-web-acls --scope CLOUDFRONT --region us-east-1 --query \"WebACLs[?Name=='{nm}'].Id|[0]\" --output text"
+        id_str = "${" + iid + "}/" + nm + "/${" + sid + "}"
+        if shell == "powershell":
+            lines += [
+                f'${sid} = "REGIONAL"',
+                f'${iid} = {q_reg}',
+                f'if (-not ${iid} -or ${iid} -eq "None") {{',
+                f'  ${sid} = "CLOUDFRONT"',
+                f'  ${iid} = {q_cf}',
+                f'}}',
+            ]
+        else:
+            lines += [
+                f'{sid}=REGIONAL',
+                f'{iid}=$({q_reg})',
+                f'if [ -z "${{{iid}}}" ] || [ "${{{iid}}}" = "None" ]; then',
+                f'  {sid}=CLOUDFRONT',
+                f'  {iid}=$({q_cf})',
+                f'fi',
+            ]
         lines.append(f'{tf} {qaddr} "{id_str}"')
-        note = (f"import ID = {spec['id_kind']}. 위 스크립트가 scope(REGIONAL/CLOUDFRONT)를 "
-                f"자동 감지해 ID 를 조립하므로 그대로 실행하면 import 됩니다.")
+        note = (f"import ID = {spec['id_kind']}. scope(REGIONAL/CLOUDFRONT)를 자동 감지해 "
+                f"조립하므로 그대로 실행하면 import 됩니다.")
     elif spec.get("vars"):
         # 여러 값을 조회해 복합 import ID 를 변수로 조립 (예: cluster:principal_arn)
         prefix = var_for(addr)
@@ -259,7 +273,7 @@ def build(block, var_pairs=None):
 
         lines.append(f"# {spec['id_kind']} 조립을 위한 값 조회")
         for logical, cmd in spec["vars"]:
-            lines.append(f"{subs[logical]}=$({apply_subs(cmd)})")
+            lines.append(sh_assign(subs[logical], apply_subs(cmd), shell))
         id_str = apply_subs(spec["id_tmpl"])
         lines.append(f'{tf} {qaddr} "{id_str}"')
         note = (f"import ID = {spec['id_kind']}. 위 줄들을 그대로 실행하면 조회한 값들로 "
@@ -274,9 +288,9 @@ def build(block, var_pairs=None):
         if needs and needs.lstrip().startswith("aws "):
             v = var_for(addr)
             lines.append(f"# {spec['id_kind']} 조회 후 변수에 저장")
-            lines.append(f"{v}=$({hint})")
+            lines.append(sh_assign(v, hint, shell))
             # id_tmpl 로 최종 import ID 조립 ({var}=조회값, <name>=에러에서 추출한 이름)
-            id_str = spec.get("id_tmpl", "{var}").replace("{var}", f"${v}")
+            id_str = spec.get("id_tmpl", "{var}").replace("{var}", "${" + v + "}")
             if name:
                 id_str = id_str.replace("<name>", name)
             lines.append(f'{tf} {qaddr} "{id_str}"')
@@ -335,6 +349,13 @@ TEMPLATE = """
 <p>terraform apply 시 <code>EntityAlreadyExists</code> / <code>AlreadyExists</code> 등
    "이미 존재함" 에러를 통째로 붙여넣으세요. 어느 terraform 프로젝트든 동작합니다.</p>
 <form method="post">
+  <div class="row">
+    <label>셸:
+      <label><input type="radio" name="shell" value="powershell" {{ 'checked' if shell != 'bash' else '' }}> PowerShell</label>
+      <label><input type="radio" name="shell" value="bash" {{ 'checked' if shell == 'bash' else '' }}> bash</label>
+    </label>
+    <span class="hint">※ 실행할 터미널에 맞춰 선택하세요. (PowerShell 은 <code>$VAR = ...</code>, bash 는 <code>VAR=$(...)</code> 형식)</span>
+  </div>
   <div class="row">
     <label>(선택) 변수 — 여러 개 추가 가능</label>
     <span class="hint">※ var 가 필요한 프로젝트면 변수명과 값을 모두 입력, 아니면 비워두세요.</span>
@@ -399,10 +420,12 @@ if (!document.querySelector('.var-row')) addVarRow();
 def index():
     error_text = ""
     var_pairs = []
+    shell = "powershell"
     results = None
     all_commands = ""
     if request.method == "POST":
         error_text = request.form.get("error", "")
+        shell = request.form.get("shell", "powershell")
         names = request.form.getlist("var_name")
         values = request.form.getlist("var_value")
         # 입력된 (변수명, 값) 쌍을 모두 수집 (둘 다 채워진 것만 사용)
@@ -414,13 +437,13 @@ def index():
         results = []
         cmd_blocks = []
         for b in blocks:
-            built = build(b, used_pairs)
+            built = build(b, used_pairs, shell)
             results.append(built)
             if built["commands"].strip():
                 cmd_blocks.append(built["commands"])
         all_commands = "\n\n".join(cmd_blocks)
     return render_template_string(
-        TEMPLATE, error_text=error_text, var_pairs=var_pairs,
+        TEMPLATE, error_text=error_text, var_pairs=var_pairs, shell=shell,
         results=results, all_commands=all_commands,
     )
 

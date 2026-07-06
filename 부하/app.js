@@ -241,36 +241,149 @@ var EC2_PRICING = {
 
 var detectedInstances = [];
 
-async function detectInstances() {
-  log('\uD83D\uDD0D \uC778\uC2A4\uD134\uC2A4 \uC790\uB3D9 \uAC10\uC9C0 \uC2DC\uC791...');
-  try {
-    var region = document.getElementById('awsRegion').value;
-    var cluster = document.getElementById('clusterName').value;
-    var resp = await fetch('http://localhost:8765/instances?region=' + region + '&cluster=' + cluster);
-    if (resp.ok) {
-      detectedInstances = await resp.json();
-      renderInstances();
-      log('\u2705 ' + detectedInstances.length + '\uAC1C \uC778\uC2A4\uD134\uC2A4 \uAC10\uC9C0 \uC644\uB8CC');
-    } else {
-      throw new Error('Backend not available');
+// AWS Signature V4 helper
+function getSignatureKey(key, dateStamp, regionName, serviceName) {
+  var kDate = hmacSHA256(utf8Encode('AWS4' + key), utf8Encode(dateStamp));
+  var kRegion = hmacSHA256(kDate, utf8Encode(regionName));
+  var kService = hmacSHA256(kRegion, utf8Encode(serviceName));
+  var kSigning = hmacSHA256(kService, utf8Encode('aws4_request'));
+  return kSigning;
+}
+
+function utf8Encode(str) {
+  return new TextEncoder().encode(str);
+}
+
+async function hmacSHA256(key, data) {
+  var cryptoKey = await crypto.subtle.importKey('raw', key instanceof ArrayBuffer ? key : key.buffer || key, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  var sig = await crypto.subtle.sign('HMAC', cryptoKey, data instanceof ArrayBuffer ? data : data.buffer || data);
+  return new Uint8Array(sig);
+}
+
+async function sha256(data) {
+  var encoded = typeof data === 'string' ? utf8Encode(data) : data;
+  var hash = await crypto.subtle.digest('SHA-256', encoded);
+  return Array.from(new Uint8Array(hash)).map(function(b) { return b.toString(16).padStart(2, '0'); }).join('');
+}
+
+function toHex(arr) {
+  return Array.from(arr).map(function(b) { return b.toString(16).padStart(2, '0'); }).join('');
+}
+
+async function awsRequest(accessKey, secretKey, region, service, action, params) {
+  var host = service + '.' + region + '.amazonaws.com';
+  var endpoint = 'https://' + host;
+  var now = new Date();
+  var amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '');
+  var dateStamp = amzDate.substring(0, 8);
+
+  // Build query string
+  var queryParams = Object.assign({ Action: action, Version: '2016-11-15' }, params);
+  var sortedKeys = Object.keys(queryParams).sort();
+  var queryString = sortedKeys.map(function(k) { return encodeURIComponent(k) + '=' + encodeURIComponent(queryParams[k]); }).join('&');
+
+  var headers = {
+    'host': host,
+    'x-amz-date': amzDate
+  };
+  var signedHeaders = 'host;x-amz-date';
+  var payloadHash = await sha256('');
+
+  var canonicalRequest = 'GET\n/\n' + queryString + '\nhost:' + host + '\nx-amz-date:' + amzDate + '\n\n' + signedHeaders + '\n' + payloadHash;
+  var credentialScope = dateStamp + '/' + region + '/' + service + '/aws4_request';
+  var stringToSign = 'AWS4-HMAC-SHA256\n' + amzDate + '\n' + credentialScope + '\n' + (await sha256(canonicalRequest));
+
+  var kDate = await hmacSHA256(utf8Encode('AWS4' + secretKey), utf8Encode(dateStamp));
+  var kRegion = await hmacSHA256(kDate, utf8Encode(region));
+  var kService2 = await hmacSHA256(kRegion, utf8Encode(service));
+  var kSigning = await hmacSHA256(kService2, utf8Encode('aws4_request'));
+  var signature = toHex(await hmacSHA256(kSigning, utf8Encode(stringToSign)));
+
+  var authHeader = 'AWS4-HMAC-SHA256 Credential=' + accessKey + '/' + credentialScope + ', SignedHeaders=' + signedHeaders + ', Signature=' + signature;
+
+  var resp = await fetch(endpoint + '/?' + queryString, {
+    method: 'GET',
+    headers: {
+      'X-Amz-Date': amzDate,
+      'Authorization': authHeader
     }
-  } catch(e) {
-    log('\u26A0\uFE0F \uC790\uB3D9 \uAC10\uC9C0 \uC2E4\uD328 - \uC218\uB3D9 \uC785\uB825 \uBAA8\uB4DC', true);
-    var input = prompt('\uC778\uC2A4\uD134\uC2A4 \uC815\uBCF4 \uC785\uB825 (\uD615\uC2DD: \uD0C0\uC785:\uAC1C\uC218, \uC608: t3.medium:3,t3.micro:1)', 't3.medium:2');
-    if (input) {
-      detectedInstances = [];
-      var parts = input.split(',');
-      for (var idx = 0; idx < parts.length; idx++) {
-        var item = parts[idx].trim().split(':');
-        var type = item[0];
-        var count = parseInt(item[1] || '1');
-        for (var i = 0; i < count; i++) {
-          detectedInstances.push({ id: 'manual-' + idx + '-' + i, type: type, state: 'running', role: 'EKS Node' });
+  });
+  return await resp.text();
+}
+
+async function detectInstances() {
+  var accessKey = document.getElementById('awsAccessKey').value.trim();
+  var secretKey = document.getElementById('awsSecretKey').value.trim();
+  var region = document.getElementById('awsRegion').value.trim();
+
+  if (!accessKey || !secretKey) {
+    log('\u26A0\uFE0F Access Key\uC640 Secret Key\uB97C \uC785\uB825\uD558\uC138\uC694', true);
+    return;
+  }
+
+  log('\uD83D\uDD0D EC2 \uC778\uC2A4\uD134\uC2A4 \uC870\uD68C \uC911...');
+
+  try {
+    var params = {
+      'Filter.1.Name': 'instance-state-name',
+      'Filter.1.Value.1': 'running'
+    };
+
+    var xmlText = await awsRequest(accessKey, secretKey, region, 'ec2', 'DescribeInstances', params);
+    var parser = new DOMParser();
+    var xml = parser.parseFromString(xmlText, 'text/xml');
+
+    // Check for errors
+    var errors = xml.getElementsByTagName('Error');
+    if (errors.length > 0) {
+      var errMsg = errors[0].getElementsByTagName('Message')[0].textContent;
+      log('\u274C AWS \uC624\uB958: ' + errMsg, true);
+      return;
+    }
+
+    var items = xml.getElementsByTagName('item');
+    detectedInstances = [];
+
+    for (var i = 0; i < items.length; i++) {
+      var item = items[i];
+      // Only process instance items (has instanceId)
+      var instanceIdEl = item.getElementsByTagName('instanceId');
+      var instanceTypeEl = item.getElementsByTagName('instanceType');
+      if (instanceIdEl.length === 0 || instanceTypeEl.length === 0) continue;
+
+      var instanceId = instanceIdEl[0].textContent;
+      var instanceType = instanceTypeEl[0].textContent;
+
+      // Get Name tag
+      var name = '';
+      var tagSets = item.getElementsByTagName('tagSet');
+      if (tagSets.length > 0) {
+        var tags = tagSets[0].getElementsByTagName('item');
+        for (var t = 0; t < tags.length; t++) {
+          var keyEl = tags[t].getElementsByTagName('key');
+          var valEl = tags[t].getElementsByTagName('value');
+          if (keyEl.length > 0 && keyEl[0].textContent === 'Name' && valEl.length > 0) {
+            name = valEl[0].textContent;
+          }
         }
       }
-      renderInstances();
-      log('\u2705 \uC218\uB3D9 \uC785\uB825: ' + detectedInstances.length + '\uAC1C \uC778\uC2A4\uD134\uC2A4');
+
+      // Avoid duplicates
+      var exists = false;
+      for (var d = 0; d < detectedInstances.length; d++) {
+        if (detectedInstances[d].id === instanceId) { exists = true; break; }
+      }
+      if (!exists) {
+        detectedInstances.push({ id: instanceId, type: instanceType, state: 'running', name: name });
+      }
     }
+
+    renderInstances();
+    calcCost();
+    log('\u2705 ' + detectedInstances.length + '\uAC1C \uC2E4\uD589 \uC911 \uC778\uC2A4\uD134\uC2A4 \uAC10\uC9C0 \uC644\uB8CC');
+
+  } catch(e) {
+    log('\u274C \uC624\uB958: ' + e.message, true);
   }
 }
 
@@ -281,7 +394,7 @@ function renderInstances() {
   for (var i = 0; i < detectedInstances.length; i++) {
     var inst = detectedInstances[i];
     var price = EC2_PRICING[inst.type] || 0;
-    html += '<tr><td>' + inst.id + '</td><td>' + inst.type + '</td><td style="color:#2ed573">' + inst.state + '</td><td>' + (inst.role || '-') + '</td><td>$' + price.toFixed(4) + '</td></tr>';
+    html += '<tr><td>' + inst.id + '</td><td>' + inst.type + '</td><td style="color:#2ed573">' + inst.state + '</td><td>' + (inst.name || '-') + '</td><td>$' + price.toFixed(4) + '</td></tr>';
   }
   tbody.innerHTML = html;
 }

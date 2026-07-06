@@ -99,12 +99,22 @@ h1 { text-align: center; margin-bottom: 10px; color: #00d4ff; font-size: 1.8em; 
 <h2>💰 비용 계산기 (Cost Ratio) - 자동 감지</h2>
 <div class="form-row">
 <div class="form-group">
-<label>AWS Region</label>
+<label>AWS Access Key ID</label>
+<input type="text" id="awsAccessKey" placeholder="AKIA..." />
+</div>
+<div class="form-group">
+<label>AWS Secret Access Key</label>
+<input type="password" id="awsSecretKey" placeholder="시크릿 키" />
+</div>
+</div>
+<div class="form-row">
+<div class="form-group">
+<label>Region</label>
 <input type="text" id="awsRegion" value="ap-northeast-2" />
 </div>
 <div class="form-group">
-<label>EKS Cluster Name</label>
-<input type="text" id="clusterName" value="wsi2026-cluster" />
+<label>EKS Cluster Name (선택)</label>
+<input type="text" id="clusterName" value="" placeholder="필터용 (비워도 됨)" />
 </div>
 </div>
 <div class="btn-group" style="margin-bottom:12px">
@@ -114,7 +124,7 @@ h1 { text-align: center; margin-bottom: 10px; color: #00d4ff; font-size: 1.8em; 
 <div id="detectedInstances" style="display:none;margin-bottom:12px">
 <h3 style="font-size:0.85em;color:#aaa;margin-bottom:8px">감지된 인스턴스</h3>
 <table class="results-table" id="instanceTable">
-<thead><tr><th>Instance ID</th><th>Type</th><th>State</th><th>Role</th><th>시간당 비용</th></tr></thead>
+<thead><tr><th>Instance ID</th><th>Type</th><th>State</th><th>Name</th><th>시간당 비용</th></tr></thead>
 <tbody id="instanceBody"></tbody>
 </table>
 </div>
@@ -134,7 +144,7 @@ h1 { text-align: center; margin-bottom: 10px; color: #00d4ff; font-size: 1.8em; 
 <div class="cost-section" id="costResult" style="display:none">
 <div class="cost-row"><span>EC2 인스턴스 합계 (<span id="costNodes">0</span>대)</span><span id="costNodeVal">$0.000</span></div>
 <div class="cost-row"><span>RDS (db.t3.micro)</span><span id="costRdsVal">$0.000</span></div>
-<div class="cost-row" style="font-weight:bold;color:#00d4ff"><span>총 EC2 비용 (시간당)</span><span id="costTotal">$0.000</span></div>
+<div class="cost-row" style="font-weight:bold;color:#00d4ff"><span>총 비용 (시간당)</span><span id="costTotal">$0.000</span></div>
 <div class="cost-row" style="font-weight:bold;color:#ffa502"><span>기준 비용 (t3.medium × 2, 시간당)</span><span id="costBase">$0.000</span></div>
 <div class="cost-row" style="font-weight:bold;font-size:1.2em;color:#2ed573"><span>⭐ Cost Ratio</span><span id="costRatio">0.00</span></div>
 <div class="cost-row"><span>총 운영 비용</span><span id="costTotalHours">$0.000</span></div>

@@ -5,7 +5,7 @@ variable "region" {
 
 variable "project" {
   type    = string
-  default = "wsi2026e"
+  default = "wsi2026"
 }
 
 variable "vpc_cidr" {
@@ -67,6 +67,6 @@ variable "aws_profile" {
 
 variable "is_windows" {
   type        = bool
-  default     = false
-  description = "Set true when running terraform from Windows PowerShell (no bash). build.tf then uses PowerShell instead of /bin/sh for the docker build/push step."
+  default     = true
+  description = "Set true when running terraform from Windows PowerShell (no bash). build.tf then uses PowerShell instead of /bin/sh for the docker build/push step. CloudShell/Linux?먯꽌 ?ㅽ뻾 ??-var is_windows=false 瑜?吏?뺥븯?몄슂."
 }

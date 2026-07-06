@@ -5,8 +5,8 @@
 ## 빠른 시작
 
 ```powershell
-# 브라우저에서 바로 열기
-start load-test\index.html
+cd 부하
+start index.html
 ```
 
 1. 엔드포인트 URL 입력 (예: `http://dxxxxxx.cloudfront.net`)
@@ -19,7 +19,7 @@ start load-test\index.html
 
 ```powershell
 # 새 PowerShell 창에서 실행
-powershell -ExecutionPolicy Bypass -File load-test\detect-server.ps1
+powershell -ExecutionPolicy Bypass -File detect-server.ps1
 ```
 
 서버 실행 후 웹페이지에서 "🔍 인스턴스 자동 감지" 버튼 클릭.
@@ -68,7 +68,7 @@ Cost Ratio = 실제 EC2 비용(시간당) / 기준 비용(t3.medium × 2, 시간
 ## 파일 구조
 
 ```
-load-test/
+부하/
 ├── index.html          # 웹 UI
 ├── app.js              # 부하 테스트 + 채점 로직
 ├── detect-server.ps1   # EC2 인스턴스 자동 감지 로컬 서버

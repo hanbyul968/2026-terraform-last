@@ -6,13 +6,12 @@
 
 ```powershell
 cd 부하
-python -m http.server 9000
-
-# 별도 PowerShell 창에서 Chrome CORS 비활성화 모드로 실행 (필수)
-& "C:\Program Files\Google\Chrome\Application\chrome.exe" --disable-web-security --user-data-dir=C:\temp\chrome-cors http://localhost:9000
+python server.py
 ```
 
-> ⚠️ **반드시 `--disable-web-security` Chrome으로 열어야 합니다.** 일반 브라우저에서는 CORS 때문에 CloudFront 엔드포인트 요청이 전부 차단됩니다.
+브라우저에서 `http://localhost:9000` 접속. **일반 Chrome으로 바로 동작합니다.**
+
+> `server.py`가 프록시 역할을 해서 CORS 우회 없이 CloudFront 엔드포인트로 요청을 전달합니다.
 
 1. 엔드포인트 URL 입력 (예: `http://dxxxxxx.cloudfront.net`)
 2. ▶ 부하 시작 클릭

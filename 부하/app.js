@@ -20,18 +20,30 @@ function log(msg, isError) {
 
 // ===== Load Test =====
 async function sendRequest(api, url, opts) {
-  const start = performance.now();
+  var method = (opts && opts.method) || 'GET';
+  var proxyUrl = '/proxy?url=' + encodeURIComponent(url);
+  var fetchOpts = { method: method, headers: {} };
+  if (opts && opts.body) {
+    fetchOpts.body = opts.body;
+    fetchOpts.headers['Content-Type'] = 'application/json';
+  }
+
   try {
-    const res = await fetch(url, opts);
-    const ms = performance.now() - start;
+    var res = await fetch(proxyUrl, fetchOpts);
+    var data = await res.json();
+
+    var status = data.status || 0;
+    var ms = data.ms || 5000;
+
     stats[api].total++;
     stats[api].times.push(ms);
-    if (res.ok || res.status === 201) {
+
+    if (status >= 200 && status < 300) {
       stats[api].success++;
-      const threshold = api === 'stress' ? 1000 : 200;
+      var threshold = api === 'stress' ? 1000 : 200;
       if (ms <= threshold) stats[api].fast++;
     }
-    return { ok: res.ok || res.status === 201, status: res.status, ms: ms };
+    return { ok: status >= 200 && status < 300, status: status, ms: ms };
   } catch (e) {
     stats[api].total++;
     stats[api].times.push(5000);
@@ -89,17 +101,20 @@ async function testException(endpoint) {
   var attack = attacks[Math.floor(Math.random() * attacks.length)];
   var url = endpoint + attack.path;
   try {
-    var opts = { method: attack.method };
-    if (attack.body) { opts.headers = { 'Content-Type': 'application/json' }; opts.body = attack.body; }
-    var res = await fetch(url, opts);
+    var proxyUrl = '/proxy?url=' + encodeURIComponent(url);
+    var fetchOpts = { method: attack.method, headers: {} };
+    if (attack.body) { fetchOpts.headers['Content-Type'] = 'application/json'; fetchOpts.body = attack.body; }
+    var res = await fetch(proxyUrl, fetchOpts);
+    var data = await res.json();
+    var status = data.status || 0;
     stats.exception.total++;
-    if (res.status === 403) {
+    if (status === 403) {
       stats.exception.success++;
       log('\u{1F6E1}\uFE0F WAF \uCC28\uB2E8 (403): ' + attack.path.substring(0, 60));
     } else {
-      log('\u26A0\uFE0F WAF \uBBF8\uCC28\uB2E8 (' + res.status + '): ' + attack.path.substring(0, 60), true);
+      log('\u26A0\uFE0F WAF \uBBF8\uCC28\uB2E8 (' + status + '): ' + attack.path.substring(0, 60), true);
     }
-    return { status: res.status };
+    return { status: status };
   } catch(e) {
     stats.exception.total++;
     return { status: 0 };
@@ -109,13 +124,15 @@ async function testException(endpoint) {
 async function testImage(endpoint) {
   var rnd = Math.floor(Math.random() * 100) + 1;
   var url = endpoint + '/images/product' + rnd + '.jpg';
-  var start = performance.now();
   try {
-    var res = await fetch(url, { method: 'GET' });
-    var ms = performance.now() - start;
+    var proxyUrl = '/proxy?url=' + encodeURIComponent(url);
+    var res = await fetch(proxyUrl);
+    var data = await res.json();
+    var ms = data.ms || 5000;
+    var status = data.status || 0;
     stats.image.total++;
-    if (res.ok && ms <= 5000) stats.image.success++;
-    return { ok: res.ok, ms: ms };
+    if (status >= 200 && status < 300 && ms <= 5000) stats.image.success++;
+    return { ok: status >= 200 && status < 300, ms: ms };
   } catch(e) {
     stats.image.total++;
     return { ok: false, ms: 5000 };
@@ -127,15 +144,18 @@ async function test404(endpoint) {
   var path = paths[Math.floor(Math.random() * paths.length)];
   var url = endpoint + path;
   try {
-    var res = await fetch(url, { method: 'GET' });
+    var proxyUrl = '/proxy?url=' + encodeURIComponent(url);
+    var res = await fetch(proxyUrl);
+    var data = await res.json();
+    var status = data.status || 0;
     stats.notfound = stats.notfound || { total: 0, success: 0 };
     stats.notfound.total++;
-    if (res.status === 404) {
+    if (status === 404) {
       stats.notfound.success++;
     } else {
-      log('\u26A0\uFE0F 404 \uBBF8\uBC18\uD658 (' + res.status + '): ' + path, true);
+      log('\u26A0\uFE0F 404 \uBBF8\uBC18\uD658 (' + status + '): ' + path, true);
     }
-    return { status: res.status };
+    return { status: status };
   } catch(e) {
     stats.notfound = stats.notfound || { total: 0, success: 0 };
     stats.notfound.total++;

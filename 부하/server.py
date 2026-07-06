@@ -108,8 +108,8 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
 
 if __name__ == '__main__':
     os.chdir(os.path.dirname(os.path.abspath(__file__)) or '.')
-    server = http.server.HTTPServer(('', PORT), ProxyHandler)
-    print(f'=== Load Test Proxy Server ===')
+    server = http.server.ThreadingHTTPServer(('', PORT), ProxyHandler)
+    print(f'=== Load Test Proxy Server (threaded) ===')
     print(f'http://localhost:{PORT}')
     print(f'Press Ctrl+C to stop')
     try:

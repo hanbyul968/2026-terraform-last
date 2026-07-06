@@ -106,9 +106,22 @@ TYPE_SPECS = {
                                       "needs": 'aws cloudfront list-origin-access-controls --query "OriginAccessControlList.Items[?Name==\'<name>\'].Id|[0]" --output text'},
     "aws_cloudfront_function":       {"id_kind": "함수 이름", "from_err": True,
                                       "needs": 'aws cloudfront list-functions --query "FunctionList.Items[?Name==\'<name>\'].Name|[0]" --output text'},
+    "aws_cloudfront_cache_policy":   {"id_kind": "Cache Policy ID", "from_err": False,
+                                      "needs": 'aws cloudfront list-cache-policies --query "CachePolicyList.Items[?CachePolicy.CachePolicyConfig.Name==\'<name>\'].CachePolicy.Id|[0]" --output text'},
+    "aws_cloudfront_response_headers_policy": {"id_kind": "Response Headers Policy ID", "from_err": False,
+                                      "needs": 'aws cloudfront list-response-headers-policies --query "ResponseHeadersPolicyList.Items[?ResponseHeadersPolicy.ResponseHeadersPolicyConfig.Name==\'<name>\'].ResponseHeadersPolicy.Id|[0]" --output text'},
+    "aws_cloudfront_origin_request_policy": {"id_kind": "Origin Request Policy ID", "from_err": False,
+                                      "needs": 'aws cloudfront list-origin-request-policies --query "OriginRequestPolicyList.Items[?OriginRequestPolicy.OriginRequestPolicyConfig.Name==\'<name>\'].OriginRequestPolicy.Id|[0]" --output text'},
     "aws_wafv2_web_acl":             {"id_kind": "WebACL ID (id/name/scope)", "from_err": False,
-                                      "needs": 'aws wafv2 list-web-acls --scope REGIONAL --query "WebACLs[?Name==\'<name>\'].Id|[0]" --output text',
-                                      "id_tmpl": "{var}/<name>/REGIONAL"},
+                                      "script": [
+                                          '{P}_SCOPE=REGIONAL',
+                                          '{P}_ID=$(aws wafv2 list-web-acls --scope REGIONAL --query "WebACLs[?Name==\'{name}\'].Id|[0]" --output text)',
+                                          'if [ -z "${P}_ID" ] || [ "${P}_ID" = "None" ]; then',
+                                          '  {P}_SCOPE=CLOUDFRONT',
+                                          '  {P}_ID=$(aws wafv2 list-web-acls --scope CLOUDFRONT --region us-east-1 --query "WebACLs[?Name==\'{name}\'].Id|[0]" --output text)',
+                                          'fi',
+                                      ],
+                                      "id_tmpl": "${P}_ID/{name}/${P}_SCOPE"},
     "aws_launch_template":           {"id_kind": "Launch Template ID (lt-...)", "from_err": False,
                                       "needs": 'aws ec2 describe-launch-templates --filters Name=launch-template-name,Values=<name> --query "LaunchTemplates[0].LaunchTemplateId" --output text'},
     "aws_eks_access_entry":          {"id_kind": "cluster_name:principal_arn 형식", "from_err": False,
@@ -219,6 +232,20 @@ def build(block, var_pairs=None):
         import_id = name if ("/" not in name and " " not in name) else f'"{name}"'
         lines.append(f"{tf} {qaddr} {import_id}")
         note = f"import ID = {spec['id_kind']} (에러 메시지에서 '{name}' 자동 추출)"
+    elif spec.get("script"):
+        # 여러 줄 셸 스크립트로 값을 구해 import ID 조립 ({P}=리소스별 접두사, {name}=추출한 이름)
+        P = var_for(addr)
+        for ln in spec["script"]:
+            ln = ln.replace("{P}", P)
+            if name:
+                ln = ln.replace("{name}", name)
+            lines.append(ln)
+        id_str = spec["id_tmpl"].replace("{P}", P)
+        if name:
+            id_str = id_str.replace("{name}", name)
+        lines.append(f'{tf} {qaddr} "{id_str}"')
+        note = (f"import ID = {spec['id_kind']}. 위 스크립트가 scope(REGIONAL/CLOUDFRONT)를 "
+                f"자동 감지해 ID 를 조립하므로 그대로 실행하면 import 됩니다.")
     elif spec.get("vars"):
         # 여러 값을 조회해 복합 import ID 를 변수로 조립 (예: cluster:principal_arn)
         prefix = var_for(addr)

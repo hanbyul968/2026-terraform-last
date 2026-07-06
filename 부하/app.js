@@ -52,7 +52,7 @@ async function sendRequest(api, url, opts) {
 }
 
 async function testUser(endpoint) {
-  var rnd = Math.floor(Math.random() * 500000) + 1;
+  var rnd = Math.floor(Math.random() * 1000) + 1;
   var rid = Date.now().toString();
   var uuid = crypto.randomUUID();
   var url = endpoint + '/v1/user?email=dbdump' + rnd + '%40example.org&requestid=' + rid + '&uuid=' + uuid;
@@ -60,7 +60,7 @@ async function testUser(endpoint) {
 }
 
 async function testProduct(endpoint) {
-  var rnd = Math.floor(Math.random() * 500000) + 1;
+  var rnd = Math.floor(Math.random() * 1000) + 1;
   var rid = Date.now().toString();
   var uuid = crypto.randomUUID();
   // POST로 product 생성

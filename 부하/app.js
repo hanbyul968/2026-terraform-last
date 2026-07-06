@@ -43,16 +43,21 @@ async function testUser(endpoint) {
   var rnd = Math.floor(Math.random() * 500000) + 1;
   var rid = Date.now().toString();
   var uuid = crypto.randomUUID();
-  var url = endpoint + '/v1/user?email=dbdump' + rnd + '@example.org&requestid=' + rid + '&uuid=' + uuid;
+  var url = endpoint + '/v1/user?email=dbdump' + rnd + '%40example.org&requestid=' + rid + '&uuid=' + uuid;
   return sendRequest('user', url, { method: 'GET' });
 }
 
 async function testProduct(endpoint) {
-  var rnd = Math.floor(Math.random() * 50000) + 1;
+  var rnd = Math.floor(Math.random() * 500000) + 1;
   var rid = Date.now().toString();
   var uuid = crypto.randomUUID();
-  var url = endpoint + '/v1/product?id=dbdump' + rnd + '&requestid=' + rid + '&uuid=' + uuid;
-  return sendRequest('product', url, { method: 'GET' });
+  // POST로 product 생성
+  var url = endpoint + '/v1/product';
+  return sendRequest('product', url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ requestid: rid, uuid: uuid, id: 'loadtest' + rnd, name: 'test' + rnd, price: 1000 })
+  });
 }
 
 async function testStress(endpoint, length) {

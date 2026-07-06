@@ -8,6 +8,14 @@ variable "project" {
   default = "wsi2026"
 }
 
+# EKS 클러스터가 아직 없을 때(import/최초 클러스터 생성 단계) false 로 두면
+# kubernetes/helm/kubectl provider 가 더미 값을 써서 "Invalid provider configuration"
+# 에러 없이 진행됩니다. 클러스터가 생성된 뒤 true 로 바꿔 k8s 리소스를 apply 하세요.
+variable "k8s_provider_ready" {
+  type    = bool
+  default = false
+}
+
 variable "vpc_cidr" {
   type    = string
   default = "10.20.0.0/16"

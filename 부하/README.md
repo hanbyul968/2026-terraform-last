@@ -6,7 +6,15 @@
 
 ```powershell
 cd 부하
-start index.html
+python -m http.server 9000
+```
+
+브라우저에서 `http://localhost:9000` 접속.
+
+CORS 에러 발생 시 Chrome을 보안 비활성화 모드로 실행:
+
+```powershell
+& "C:\Program Files\Google\Chrome\Application\chrome.exe" --disable-web-security --user-data-dir=C:\temp\chrome-cors http://localhost:9000
 ```
 
 1. 엔드포인트 URL 입력 (예: `http://dxxxxxx.cloudfront.net`)

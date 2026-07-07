@@ -1,12 +1,12 @@
 // ===== State =====
 let running = false;
-let stats = { user: { total: 0, success: 0, fast: 0, sum: 0, count: 0 }, product: { total: 0, success: 0, fast: 0, sum: 0, count: 0 }, stress: { total: 0, success: 0, fast: 0, sum: 0, count: 0 }, exception: { total: 0, success: 0 }, image: { total: 0, success: 0 } };
+let stats = { user: { total: 0, success: 0, fast: 0, sum: 0, count: 0 }, product: { total: 0, success: 0, fast: 0, sum: 0, count: 0 }, stress: { total: 0, success: 0, fast: 0, sum: 0, count: 0 }, exception: { total: 0, success: 0 }, image: { total: 0, success: 0 }, probe: { total: 0, blocked: 0, notfound: 0, badreq: 0, passed: 0, other: 0 } };
 let workers = [];
 let uiTimer = null;
 var uploadedImages = [];
 
 function resetStats() {
-  stats = { user: { total: 0, success: 0, fast: 0, sum: 0, count: 0 }, product: { total: 0, success: 0, fast: 0, sum: 0, count: 0 }, stress: { total: 0, success: 0, fast: 0, sum: 0, count: 0 }, exception: { total: 0, success: 0 }, image: { total: 0, success: 0 } };
+  stats = { user: { total: 0, success: 0, fast: 0, sum: 0, count: 0 }, product: { total: 0, success: 0, fast: 0, sum: 0, count: 0 }, stress: { total: 0, success: 0, fast: 0, sum: 0, count: 0 }, exception: { total: 0, success: 0 }, image: { total: 0, success: 0 }, probe: { total: 0, blocked: 0, notfound: 0, badreq: 0, passed: 0, other: 0 } };
   uploadedImages = [];
   updateUI();
 }
@@ -264,6 +264,56 @@ async function test404(endpoint) {
   }
 }
 
+// 다양한 탐침 요청 — WAF 허점 파악용. 채점 지표(비정상 처리율)엔 섞지 않고
+// 응답코드 분포만 별도로 보여준다. 2xx(passed)로 통과하면 "뚫린" 것.
+async function testProbe(endpoint) {
+  var probes = [
+    // 파라미터 누락/변조 (403 또는 400/404 여야 정상)
+    { path: '/v1/user?email=a@b.com', method: 'GET' },
+    { path: '/v1/product', method: 'GET' },
+    { path: '/v1/stress', method: 'GET' },
+    // 정의된 API 에 잘못된 메서드
+    { path: '/v1/user?email=a@b.com&requestid=1&uuid=1', method: 'DELETE' },
+    { path: '/v1/product?id=1&requestid=1&uuid=1', method: 'PUT' },
+    { path: '/v1/stress', method: 'GET' },
+    // 경로 우회/널바이트/트래버설
+    { path: '/v1/user/../admin?requestid=1&uuid=1', method: 'GET' },
+    { path: '/v1/user%00.json?email=a@b.com&requestid=1&uuid=1', method: 'GET' },
+    { path: '/v1/USER?email=a@b.com&requestid=1&uuid=1', method: 'GET' },
+    { path: '/v1/user/?email=a@b.com&requestid=1&uuid=1', method: 'GET' },
+    // 민감/스캐너 경로
+    { path: '/.env', method: 'GET' },
+    { path: '/actuator/health', method: 'GET' },
+    { path: '/wp-login.php', method: 'GET' },
+    { path: '/../../etc/passwd', method: 'GET' },
+    // 헤더 기반 (User-Agent 스캐너 흉내는 프록시가 못 바꾸니 경로로만)
+    { path: '/v1/user?email=a@b.com&requestid=1&uuid=1&debug=true', method: 'GET' },
+  ];
+  var p = probes[Math.floor(Math.random() * probes.length)];
+  var url = endpoint + p.path;
+  try {
+    var proxyUrl = '/proxy?url=' + encodeURIComponent(url);
+    var fetchOpts = { method: p.method, headers: {} };
+    if (p.body) { fetchOpts.headers['Content-Type'] = 'application/json'; fetchOpts.body = p.body; }
+    var res = await fetch(proxyUrl, fetchOpts);
+    var data = await res.json();
+    var status = data.status || 0;
+    if (status === 0) return { status: 0 };  // 프록시 오류 제외
+    stats.probe.total++;
+    if (status === 403) { stats.probe.blocked++; }
+    else if (status === 404) { stats.probe.notfound++; }
+    else if (status === 400) { stats.probe.badreq++; }
+    else if (status >= 200 && status < 300) {
+      stats.probe.passed++;
+      log('\uD83D\uDD13 \uD1B5\uacfc\uB428 (' + status + '): ' + p.method + ' ' + p.path.substring(0, 55), true);
+    }
+    else { stats.probe.other++; log('\u2753 \uD504\uB85C\uBE0C (' + status + '): ' + p.method + ' ' + p.path.substring(0, 50)); }
+    return { status: status };
+  } catch(e) {
+    return { status: 0 };
+  }
+}
+
 async function runWorker(id) {
   var endpoint = document.getElementById('endpoint').value.replace(/\/$/, '');
   var interval = parseInt(document.getElementById('interval').value);
@@ -271,18 +321,20 @@ async function runWorker(id) {
 
   while (running) {
     var pick = Math.random();
-    if (pick < 0.22) {
+    if (pick < 0.20) {
       await testUser(endpoint);
-    } else if (pick < 0.40) {
+    } else if (pick < 0.37) {
       await testProduct(endpoint);
-    } else if (pick < 0.52) {
+    } else if (pick < 0.49) {
       await testStress(endpoint, stressLen);
-    } else if (pick < 0.62) {
+    } else if (pick < 0.59) {
       await uploadProductImage(endpoint);   // 이미지 업로드 (S3 채우기)
-    } else if (pick < 0.75) {
-      await testException(endpoint);
-    } else if (pick < 0.85) {
+    } else if (pick < 0.71) {
+      await testException(endpoint);        // 명확한 공격 → 403 기대 (비정상 처리율)
+    } else if (pick < 0.80) {
       await test404(endpoint);
+    } else if (pick < 0.90) {
+      await testProbe(endpoint);            // 다양한 탐침 (WAF 허점 파악, 지표 분리)
     } else {
       await testImage(endpoint);            // 이미지 다운로드
     }
@@ -362,6 +414,12 @@ function updateUI() {
 
   var imgRate2 = stats.image.total ? ((stats.image.success / stats.image.total) * 100).toFixed(1) : '-';
   html += '<tr><td>\uD83D\uDDBC\uFE0F \uC774\uBBF8\uC9C0</td><td>' + stats.image.total + '</td><td>' + stats.image.success + '</td><td>' + imgRate2 + '%</td><td colspan="2">' + stats.image.success + '/' + stats.image.total + ' \uC131\uACF5</td></tr>';
+
+  // 프로브 (WAF 허점 탐침) — 응답 분포. passed(2xx)가 있으면 뚫린 것.
+  var pb = stats.probe || { total: 0, blocked: 0, notfound: 0, badreq: 0, passed: 0, other: 0 };
+  var pbDetail = '403:' + pb.blocked + ' 404:' + pb.notfound + ' 400:' + pb.badreq + ' 2xx:' + pb.passed + ' \uae30\ud0c0:' + pb.other;
+  var pbColor = pb.passed > 0 ? 'color:#ff4757' : 'color:#7bed9f';
+  html += '<tr><td>\uD83D\uDD0D \uD504\uB85C\uBE0C</td><td>' + pb.total + '</td><td style="' + pbColor + '">' + pb.passed + ' \ud1b5\uacfc</td><td colspan="3">' + pbDetail + '</td></tr>';
 
   tbody.innerHTML = html;
 }

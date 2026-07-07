@@ -379,6 +379,66 @@ function stopTest() {
   updateUI();  // \uB9C8\uC9C0\uB9C9 \uCD5C\uC885 \uC9D1\uACC4 \uBC18\uC601
 }
 
+// ===== \uC11C\uBC84 \uACE0\uBD80\uD558 (\uB178\uB4DC \uC2A4\uCF00\uC77C\uC6A9) =====
+// \uBE0C\uB77C\uC6B0\uC800\uB294 \uC624\uB9AC\uC9C4\uB2F9 \uB3D9\uC2DC \uC5F0\uACB0\uC774 ~6\uAC1C(HTTP/1.1)\uB77C fetch \uB85C\uB294 \uC544\uBB34\uB9AC \uC6CC\uCEE4\uB97C \uB298\uB824\uB3C4
+// \uC2E4\uC81C in-flight \uAC00 6\uAC1C\uBFD0\uC774\uB77C \uB178\uB4DC\uAC00 \uC798 \uC548 \uB298\uC5B4\uB09C\uB2E4. \uC774 \uBC84\uD2BC\uC740 server.py \uAC00 \uC2A4\uB808\uB4DC\uD480\uB85C
+// \uC9C1\uC811 \uC694\uCCAD\uC744 \uC3D8\uAC8C \uD574\uC11C(\uBE0C\uB77C\uC6B0\uC800 \uC81C\uD55C\uACFC \uBB34\uAD00) \uC2E4\uC81C \uBD80\uD558\uB97C \uD06C\uAC8C \uC62C\uB9B0\uB2E4.
+// \uC704\uCABD \uBE0C\uB77C\uC6B0\uC800 \uD14C\uC2A4\uD2B8/\uCC44\uC810 \uB85C\uC9C1\uACFC\uB294 \uC644\uC804\uD788 \uBD84\uB9AC(\uCE21\uC815\uAC12\uC5D0 \uC601\uD5A5 \uC5C6\uC74C).
+var blastTimer = null;
+var blastPrevTotal = 0, blastPrevT = 0;
+
+function serverTotal(s) {
+  if (!s) return 0;
+  var keys = ['user', 'product', 'stress', 'exception', 'image', 'notfound'];
+  var t = 0;
+  for (var i = 0; i < keys.length; i++) { if (s[keys[i]]) t += (s[keys[i]].total || 0); }
+  return t;
+}
+
+function startServerLoad() {
+  var endpoint = document.getElementById('endpoint').value.trim();
+  if (!endpoint) { alert('\uC5D4\uB4DC\uD3EC\uC778\uD2B8 URL\uC744 \uC785\uB825\uD558\uC138\uC694'); return; }
+  var cfg = {
+    endpoint: endpoint,
+    concurrency: parseInt(document.getElementById('concurrency').value),
+    duration: parseInt(document.getElementById('duration').value),
+    interval: parseInt(document.getElementById('interval').value) || 0,
+    stressLength: parseInt(document.getElementById('stressLength').value)
+  };
+  document.getElementById('btnBlast').disabled = true;
+  document.getElementById('btnBlastStop').disabled = false;
+  document.getElementById('blastStatus').textContent = '\uC2DC\uC791 \uC911...';
+  log('\uD83D\uDE80 \uC11C\uBC84 \uACE0\uBD80\uD558 \uC2DC\uC791 (\uC6CC\uCEE4 ' + cfg.concurrency + '): ' + endpoint);
+  fetch('/load/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) })
+    .then(function(r) { return r.json(); })
+    .then(function(d) { log('\uC11C\uBC84 \uC6CC\uCEE4 ' + (d.workers || cfg.concurrency) + '\uAC1C \uAC00\uB3D9 \u2014 \uBE0C\uB77C\uC6B0\uC800 \uC5F0\uACB0 \uC81C\uD55C \uC6B0\uD68C'); })
+    .catch(function(e) { log('\uC11C\uBC84 \uACE0\uBD80\uD558 \uC2DC\uC791 \uC2E4\uD328(server.py \uCD5C\uC2E0\uC778\uC9C0 \uD655\uC778): ' + e, true); stopServerLoad(true); });
+  blastPrevTotal = 0; blastPrevT = Date.now();
+  if (blastTimer) clearInterval(blastTimer);
+  blastTimer = setInterval(pollServerLoad, 1000);
+}
+
+function pollServerLoad() {
+  fetch('/load/stats').then(function(r) { return r.json(); }).then(function(d) {
+    var tot = serverTotal(d.stats);
+    var now = Date.now();
+    var rps = blastPrevT ? Math.round((tot - blastPrevTotal) * 1000 / (now - blastPrevT)) : 0;
+    blastPrevTotal = tot; blastPrevT = now;
+    document.getElementById('blastStatus').textContent = '\uB204\uC801 ' + tot + '\uAC74 \u00B7 ~' + rps + ' req/s' + (d.running ? '' : ' \u00B7 \uC885\uB8CC\uB428');
+    if (!d.running) { stopServerLoad(true); }
+  }).catch(function() {});
+}
+
+function stopServerLoad(auto) {
+  document.getElementById('btnBlast').disabled = false;
+  document.getElementById('btnBlastStop').disabled = true;
+  if (blastTimer) { clearInterval(blastTimer); blastTimer = null; }
+  if (!auto) {
+    fetch('/load/stop', { method: 'POST' }).catch(function() {});
+    log('\uD83D\uDE80 \uC11C\uBC84 \uACE0\uBD80\uD558 \uC911\uC9C0');
+  }
+}
+
 // ===== UI Update =====
 function updateUI() {
   var total = stats.user.total + stats.product.total + stats.stress.total + stats.exception.total + stats.image.total;

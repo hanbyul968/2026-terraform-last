@@ -167,7 +167,11 @@ resource "aws_eks_node_group" "main" {
     workload = "general"
   }
 
-  depends_on = [aws_iam_role_policy_attachment.eks_node]
+  depends_on = [
+    aws_iam_role_policy_attachment.eks_node,
+    aws_route_table_association.public,
+    aws_internet_gateway.this,
+  ]
 }
 
 # Managed addons

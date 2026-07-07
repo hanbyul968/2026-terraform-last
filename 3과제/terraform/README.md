@@ -243,7 +243,36 @@ terraform destroy -auto-approve
 # variables.tf의 project를 "wsi2026f" 등으로 변경 후 apply
 ```
 
-### 2. Service 생성이 전부 막힘 (웹훅 문제)
+### 2. `NodeCreationFailure` (노드가 클러스터에 조인 실패)
+
+```
+NodeGroup ... NodeCreationFailure: Instances failed to join the kubernetes cluster
+```
+
+노드가 EC2 API / EKS 엔드포인트에 접근 못 해서 발생. 노드 부팅 로그(`aws ec2 get-console-output --instance-id i-xxx`)에 `EC2/DescribeInstances retrying` 가 반복되면 **인터넷 라우트 없음**이 원인.
+
+원인 대부분은 **state 오염**: route table association이 실제 서브넷이 아닌 옛 배포 서브넷을 가리킴. 확인:
+
+```powershell
+# 노드 서브넷에 0.0.0.0/0 → IGW 라우트가 있는지 확인
+aws ec2 describe-route-tables --region ap-northeast-2 --filters "Name=association.subnet-id,Values=<노드-서브넷ID>" --query "RouteTables[0].Routes[]" --output table
+```
+
+라우트가 없으면(association이 딴 서브넷을 가리킴):
+
+```powershell
+# 잘못된 association 제거 후 재생성
+terraform state rm 'aws_route_table_association.public[0]' 'aws_route_table_association.public[1]'
+terraform apply -auto-approve "-target=aws_route_table_association.public"
+# 실패한 노드그룹 삭제 후 재생성
+aws eks delete-nodegroup --cluster-name wsi2026-cluster --nodegroup-name wsi2026-ng --region ap-northeast-2
+terraform state rm aws_eks_node_group.main
+terraform apply -auto-approve "-target=aws_eks_node_group.main"
+```
+
+> 코드에는 노드그룹이 route association + IGW 생성 후에 뜨도록 `depends_on`이 걸려 있어, **깨끗한 state(새 계정/새 PC)에서는 이 문제가 발생하지 않습니다.** 위 절차는 state가 오염됐을 때만 필요.
+
+### 3. Service 생성이 전부 막힘 (웹훅 문제)
 
 ```
 AdmissionRequestDenied: failed calling webhook "mservice.elbv2.k8s.aws"
@@ -252,34 +281,34 @@ AdmissionRequestDenied: failed calling webhook "mservice.elbv2.k8s.aws"
 AWS LB Controller의 Service 변형 웹훅이 Ready 전에 fail-closed → 모든 Service 생성 차단. 코드에서 이미 `enableServiceMutatorWebhook=false`로 비활성화했지만, 이미 깨진 웹훅이 남아있으면:
 
 ```powershell
-aws eks update-kubeconfig --name wsi2026e-cluster --region ap-northeast-2
+aws eks update-kubeconfig --name wsi2026-cluster --region ap-northeast-2
 kubectl delete mutatingwebhookconfiguration aws-load-balancer-webhook --ignore-not-found
 kubectl delete validatingwebhookconfiguration aws-load-balancer-webhook --ignore-not-found
-terraform apply -auto-approve
+terraform apply -auto-approve -var "k8s_provider_ready=true"
 ```
 
-### 3. 애드온/Helm이 실패 상태로 끼어 재적용이 막힐 때
+### 4. 애드온/Helm이 실패 상태로 끼어 재적용이 막힐 때
 
 ```powershell
 # metrics-server 애드온이 CREATE_FAILED 로 남아 재생성 거부 시
-aws eks delete-addon --cluster-name wsi2026e-cluster --addon-name metrics-server --region ap-northeast-2
+aws eks delete-addon --cluster-name wsi2026-cluster --addon-name metrics-server --region ap-northeast-2
 # karpenter helm 이 failed 상태일 때
 helm uninstall karpenter -n kube-system
 # 이후
-terraform apply -auto-approve
+terraform apply -auto-approve -var "k8s_provider_ready=true"
 ```
 
-### 4. `Unauthorized` 등 일시적 인증 오류
+### 5. `Unauthorized` 등 일시적 인증 오류
 
 클러스터 초기화/액세스 전파 타이밍 문제 → `terraform apply` 재실행 시 대개 해소.
 
-### 5. 이름 충돌이 안 풀릴 때 — 프로젝트명 변경 (비상 탈출)
+### 6. 이름 충돌이 안 풀릴 때 — 프로젝트명 변경 (비상 탈출)
 
 ```powershell
 Remove-Item terraform.tfstate, terraform.tfstate.backup -ErrorAction SilentlyContinue
-# variables.tf 열어서 project = "wsi2026e" → "wsi2026f" 변경
+# variables.tf 열어서 project = "wsi2026" → "wsi2026x" 변경
 terraform init
-terraform apply -auto-approve
+terraform apply -auto-approve -var "k8s_provider_ready=true"
 ```
 
 ⚠️ 옛 `wsi2026e-*` 리소스는 **그대로 남아 비용 발생** → 채점 전 콘솔/CLI로 삭제.

@@ -70,7 +70,7 @@ h1 { text-align: center; margin-bottom: 10px; color: #00d4ff; font-size: 1.8em; 
 <div class="form-row">
 <div class="form-group">
 <label>동시 요청 수 (Concurrency)</label>
-<input type="number" id="concurrency" value="10" min="1" max="100" />
+<input type="number" id="concurrency" value="30" min="1" max="500" />
 </div>
 <div class="form-group">
 <label>테스트 시간 (초)</label>
@@ -79,8 +79,8 @@ h1 { text-align: center; margin-bottom: 10px; color: #00d4ff; font-size: 1.8em; 
 </div>
 <div class="form-row">
 <div class="form-group">
-<label>요청 간격 (ms)</label>
-<input type="number" id="interval" value="100" min="10" max="5000" />
+<label>요청 간격 (ms, 0=최대속도)</label>
+<input type="number" id="interval" value="0" min="0" max="5000" />
 </div>
 <div class="form-group">
 <label>Stress length</label>

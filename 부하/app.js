@@ -1,10 +1,11 @@
 // ===== State =====
 let running = false;
-let stats = { user: { total: 0, success: 0, fast: 0, times: [] }, product: { total: 0, success: 0, fast: 0, times: [] }, stress: { total: 0, success: 0, fast: 0, times: [] }, exception: { total: 0, success: 0 }, image: { total: 0, success: 0 } };
+let stats = { user: { total: 0, success: 0, fast: 0, sum: 0, count: 0 }, product: { total: 0, success: 0, fast: 0, sum: 0, count: 0 }, stress: { total: 0, success: 0, fast: 0, sum: 0, count: 0 }, exception: { total: 0, success: 0 }, image: { total: 0, success: 0 } };
 let workers = [];
+let uiTimer = null;
 
 function resetStats() {
-  stats = { user: { total: 0, success: 0, fast: 0, times: [] }, product: { total: 0, success: 0, fast: 0, times: [] }, stress: { total: 0, success: 0, fast: 0, times: [] }, exception: { total: 0, success: 0 }, image: { total: 0, success: 0 } };
+  stats = { user: { total: 0, success: 0, fast: 0, sum: 0, count: 0 }, product: { total: 0, success: 0, fast: 0, sum: 0, count: 0 }, stress: { total: 0, success: 0, fast: 0, sum: 0, count: 0 }, exception: { total: 0, success: 0 }, image: { total: 0, success: 0 } };
   updateUI();
 }
 
@@ -36,7 +37,8 @@ async function sendRequest(api, url, opts) {
     var ms = data.ms || 5000;
 
     stats[api].total++;
-    stats[api].times.push(ms);
+    stats[api].sum += ms;
+    stats[api].count++;
 
     if (status >= 200 && status < 300) {
       stats[api].success++;
@@ -46,7 +48,8 @@ async function sendRequest(api, url, opts) {
     return { ok: status >= 200 && status < 300, status: status, ms: ms };
   } catch (e) {
     stats[api].total++;
-    stats[api].times.push(5000);
+    stats[api].sum += 5000;
+    stats[api].count++;
     return { ok: false, status: 0, ms: 5000 };
   }
 }
@@ -183,8 +186,11 @@ async function runWorker(id) {
     } else {
       await testImage(endpoint);
     }
-    updateUI();
-    await new Promise(function(r) { setTimeout(r, interval); });
+    // UI 갱신은 별도 타이머에서 처리(요청 루프를 막지 않음).
+    // interval 이 0 이면 지연 없이 다음 요청(마이크로태스크로만 양보).
+    if (interval > 0) {
+      await new Promise(function(r) { setTimeout(r, interval); });
+    }
   }
 }
 
@@ -204,6 +210,10 @@ function startTest() {
     workers.push(runWorker(i));
   }
 
+  // UI 는 요청 루프와 분리해 주기적으로만 갱신(요청 처리량 극대화).
+  if (uiTimer) clearInterval(uiTimer);
+  uiTimer = setInterval(updateUI, 250);
+
   setTimeout(function() { if (running) stopTest(); }, duration);
 }
 
@@ -213,6 +223,8 @@ function stopTest() {
   document.getElementById('btnStop').disabled = true;
   log('\uBD80\uD558 \uD14C\uC2A4\uD2B8 \uC911\uC9C0');
   workers = [];
+  if (uiTimer) { clearInterval(uiTimer); uiTimer = null; }
+  updateUI();  // \uB9C8\uC9C0\uB9C9 \uCD5C\uC885 \uC9D1\uACC4 \uBC18\uC601
 }
 
 // ===== UI Update =====
@@ -220,8 +232,9 @@ function updateUI() {
   var total = stats.user.total + stats.product.total + stats.stress.total + stats.exception.total + stats.image.total;
   var success = stats.user.success + stats.product.success + stats.stress.success + stats.exception.success + stats.image.success;
   var fail = total - success;
-  var allTimes = stats.user.times.concat(stats.product.times, stats.stress.times);
-  var avgMs = allTimes.length ? (allTimes.reduce(function(a, b) { return a + b; }, 0) / allTimes.length).toFixed(0) : 0;
+  var timeSum = stats.user.sum + stats.product.sum + stats.stress.sum;
+  var timeCount = stats.user.count + stats.product.count + stats.stress.count;
+  var avgMs = timeCount ? (timeSum / timeCount).toFixed(0) : 0;
 
   document.getElementById('statTotal').textContent = total;
   document.getElementById('statSuccess').textContent = success;
@@ -236,7 +249,7 @@ function updateUI() {
     var s = stats[api];
     var avail = s.total ? ((s.success / s.total) * 100).toFixed(1) : '-';
     var perf = s.total ? ((s.fast / s.total) * 100).toFixed(1) : '-';
-    var avg = s.times.length ? (s.times.reduce(function(a,b){return a+b;}, 0) / s.times.length).toFixed(0) + 'ms' : '-';
+    var avg = s.count ? (s.sum / s.count).toFixed(0) + 'ms' : '-';
     html += '<tr><td>' + api + '</td><td>' + s.total + '</td><td>' + s.success + '</td><td>' + avail + '%</td><td>' + perf + '%</td><td>' + avg + '</td></tr>';
   }
 

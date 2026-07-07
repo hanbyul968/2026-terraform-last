@@ -149,7 +149,9 @@ async function testStress(endpoint, length) {
 
 async function testException(endpoint) {
   // 비정상(악성) 요청. 문제지: 사용자 제공 엔드포인트로의 비정상 요청은 403 으로 차단되어야 함.
+  // WAF 허점을 찾기 위해 기본 패턴 + 우회/변형 + 다양한 경로/메서드로 탐침.
   var attacks = [
+    // --- 기본 패턴 (managed rules 가 보통 잡음) ---
     { path: '/v1/user?email=' + encodeURIComponent('\x3cscript\x3ealert(1)\x3c/script\x3e') + '&requestid=1&uuid=1', method: 'GET' },
     { path: '/v1/user?email=' + encodeURIComponent('"\x3e\x3cimg src=x onerror=alert(1)\x3e') + '&requestid=1&uuid=1', method: 'GET' },
     { path: "/v1/user?email=' OR 1=1 --&requestid=1&uuid=1", method: 'GET' },
@@ -161,6 +163,33 @@ async function testException(endpoint) {
     { path: "/v1/product?id=http://169.254.169.254/latest/meta-data&requestid=1&uuid=1", method: 'GET' },
     { path: '/v1/user', method: 'POST', body: JSON.stringify({ requestid: "1", uuid: "1", username: "admin' OR '1'='1", email: "a@b.com" }) },
     { path: '/v1/user', method: 'POST', body: JSON.stringify({ requestid: "1", uuid: "1", username: "\x3cscript\x3ealert(1)\x3c/script\x3e", email: "a@b.com" }) },
+
+    // --- 우회/변형 (managed rules 를 뚫을 수 있는 것 - WAF 허점 탐침) ---
+    // 대소문자 섞기
+    { path: "/v1/user?email=' Or 1=1 -- &requestid=1&uuid=1", method: 'GET' },
+    { path: "/v1/product?id=1 uNiOn sElEcT 1,2,3--&requestid=1&uuid=1", method: 'GET' },
+    // 이중 인코딩
+    { path: "/v1/user?email=%2527%2520OR%25201%253D1&requestid=1&uuid=1", method: 'GET' },
+    // 인라인 주석으로 키워드 분리
+    { path: "/v1/product?id=1/**/UNION/**/SELECT/**/1&requestid=1&uuid=1", method: 'GET' },
+    // SVG/이벤트 기반 XSS
+    { path: '/v1/user?email=' + encodeURIComponent('\x3csvg/onload=alert(1)\x3e') + '&requestid=1&uuid=1', method: 'GET' },
+    { path: '/v1/user?email=' + encodeURIComponent('javascript:alert(1)') + '&requestid=1&uuid=1', method: 'GET' },
+    // 헤더 기반 인젝션 시도 (body 로)
+    { path: '/v1/product', method: 'POST', body: JSON.stringify({ requestid: "1", uuid: "1", id: "1' OR SLEEP(5)--", name: "x", price: 1 }) },
+    // NoSQL / 연산자 인젝션
+    { path: '/v1/user', method: 'POST', body: JSON.stringify({ requestid: "1", uuid: "1", username: { "$ne": null }, email: "a@b.com" }) },
+    // 매우 긴 payload (버퍼/정규식 우회)
+    { path: "/v1/user?email=" + 'A'.repeat(3000) + "'OR'1'='1&requestid=1&uuid=1", method: 'GET' },
+    // 정의된 API 에 잘못된 메서드
+    { path: '/v1/user?email=a@b.com&requestid=1&uuid=1', method: 'DELETE' },
+    { path: '/v1/product?id=1&requestid=1&uuid=1', method: 'DELETE' },
+    // 필수 쿼리스트링 누락(변조)
+    { path: '/v1/user?email=a@b.com', method: 'GET' },
+    { path: '/v1/product', method: 'GET' },
+    // 관리/민감 경로 (valid path 아님 → 404 여야 하지만 WAF/앱 반응 확인용)
+    { path: '/v1/user/../admin?requestid=1&uuid=1', method: 'GET' },
+    { path: '/v1/user%00.json?email=a@b.com&requestid=1&uuid=1', method: 'GET' },
   ];
 
   var attack = attacks[Math.floor(Math.random() * attacks.length)];

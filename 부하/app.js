@@ -149,7 +149,7 @@ async function testStress(endpoint, length) {
 
 async function testException(endpoint) {
   // 비정상(악성) 요청. 문제지: 사용자 제공 엔드포인트로의 비정상 요청은 403 으로 차단되어야 함.
-  // WAF 허점을 찾기 위해 기본 패턴 + 우회/변형 + 다양한 경로/메서드로 탐침.
+  // → 명확한 공격 시그니처만 사용 (파라미터 누락/valid-notfound 같은 정상 요청은 제외).
   var attacks = [
     // --- 기본 패턴 (managed rules 가 보통 잡음) ---
     { path: '/v1/user?email=' + encodeURIComponent('\x3cscript\x3ealert(1)\x3c/script\x3e') + '&requestid=1&uuid=1', method: 'GET' },
@@ -175,21 +175,12 @@ async function testException(endpoint) {
     // SVG/이벤트 기반 XSS
     { path: '/v1/user?email=' + encodeURIComponent('\x3csvg/onload=alert(1)\x3e') + '&requestid=1&uuid=1', method: 'GET' },
     { path: '/v1/user?email=' + encodeURIComponent('javascript:alert(1)') + '&requestid=1&uuid=1', method: 'GET' },
-    // 헤더 기반 인젝션 시도 (body 로)
+    // 시간기반 SQLi (body)
     { path: '/v1/product', method: 'POST', body: JSON.stringify({ requestid: "1", uuid: "1", id: "1' OR SLEEP(5)--", name: "x", price: 1 }) },
-    // NoSQL / 연산자 인젝션
+    // NoSQL / 연산자 인젝션 (body)
     { path: '/v1/user', method: 'POST', body: JSON.stringify({ requestid: "1", uuid: "1", username: { "$ne": null }, email: "a@b.com" }) },
-    // 매우 긴 payload (버퍼/정규식 우회)
+    // 매우 긴 payload + SQLi
     { path: "/v1/user?email=" + 'A'.repeat(3000) + "'OR'1'='1&requestid=1&uuid=1", method: 'GET' },
-    // 정의된 API 에 잘못된 메서드
-    { path: '/v1/user?email=a@b.com&requestid=1&uuid=1', method: 'DELETE' },
-    { path: '/v1/product?id=1&requestid=1&uuid=1', method: 'DELETE' },
-    // 필수 쿼리스트링 누락(변조)
-    { path: '/v1/user?email=a@b.com', method: 'GET' },
-    { path: '/v1/product', method: 'GET' },
-    // 관리/민감 경로 (valid path 아님 → 404 여야 하지만 WAF/앱 반응 확인용)
-    { path: '/v1/user/../admin?requestid=1&uuid=1', method: 'GET' },
-    { path: '/v1/user%00.json?email=a@b.com&requestid=1&uuid=1', method: 'GET' },
   ];
 
   var attack = attacks[Math.floor(Math.random() * attacks.length)];

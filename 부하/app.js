@@ -121,13 +121,13 @@ async function uploadProductImage(endpoint) {
       if ((data.ms || 9999) <= 200) stats.product.fast++;
       // 응답 body 에서 이미지 경로 추출 (image_path 또는 path)
       var m = (data.body || '').match(/([\w\-./]+\.(jpg|jpeg|png|gif|webp))/i);
+      var p;
       if (m) {
-        var p = m[1].replace(/^.*images\//, '');
-        if (uploadedImages.indexOf(p) === -1) uploadedImages.push(p);
+        p = m[1].replace(/^.*images\//, '').replace(/^\/+/, '');
       } else {
-        // 경로를 못 찾으면 id 기반 추정
-        if (uploadedImages.indexOf(id + '.png') === -1) uploadedImages.push(id + '.png');
+        p = id + '.png';
       }
+      if (p && uploadedImages.indexOf(p) === -1) uploadedImages.push(p);
     }
     return { status: status };
   } catch (e) {
@@ -195,7 +195,7 @@ async function testImage(endpoint) {
     }
   }
   var name = uploadedImages[Math.floor(Math.random() * uploadedImages.length)];
-  var url = endpoint + '/images/' + name;
+  var url = endpoint + '/images/' + name.replace(/^\/+/, '');
   try {
     var proxyUrl = '/proxy?url=' + encodeURIComponent(url);
     var res = await fetch(proxyUrl);

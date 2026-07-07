@@ -109,6 +109,90 @@ resource "aws_wafv2_web_acl" "cloudfront" {
     }
   }
 
+  # 관리형 룰(SQLi/XSS)이 못 잡는 비정상 body 패턴 → 403.
+  # 정상 요청 body 에는 절대 없고 공격에만 나오는 토큰만 검사 → 오탐(정상요청 차단) 방지.
+  rule {
+    name     = "AbnormalBodyPatterns"
+    priority = 6
+    action {
+      block {}
+    }
+    statement {
+      or_statement {
+        statement {
+          byte_match_statement {
+            search_string         = "$ne"
+            positional_constraint = "CONTAINS"
+            field_to_match {
+              body {}
+            }
+            text_transformation {
+              priority = 0
+              type     = "NONE"
+            }
+          }
+        }
+        statement {
+          byte_match_statement {
+            search_string         = "$gt"
+            positional_constraint = "CONTAINS"
+            field_to_match {
+              body {}
+            }
+            text_transformation {
+              priority = 0
+              type     = "NONE"
+            }
+          }
+        }
+        statement {
+          byte_match_statement {
+            search_string         = "$where"
+            positional_constraint = "CONTAINS"
+            field_to_match {
+              body {}
+            }
+            text_transformation {
+              priority = 0
+              type     = "NONE"
+            }
+          }
+        }
+        statement {
+          byte_match_statement {
+            search_string         = "sleep("
+            positional_constraint = "CONTAINS"
+            field_to_match {
+              body {}
+            }
+            text_transformation {
+              priority = 0
+              type     = "LOWERCASE"
+            }
+          }
+        }
+        statement {
+          byte_match_statement {
+            search_string         = "benchmark("
+            positional_constraint = "CONTAINS"
+            field_to_match {
+              body {}
+            }
+            text_transformation {
+              priority = 0
+              type     = "LOWERCASE"
+            }
+          }
+        }
+      }
+    }
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "abnormal-body"
+      sampled_requests_enabled   = true
+    }
+  }
+
   rule {
     name     = "AWSManagedRulesCommonRuleSet"
     priority = 10

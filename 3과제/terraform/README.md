@@ -221,6 +221,41 @@ kubectl -n app logs job/db-init        # "seed load done" 또는 "skipping seed"
 | **S3 버킷 이름 지정** | `s3.tf` `aws_s3_bucket.images.bucket` | |
 | **비정상 요청 응답코드 변경** | `waf.tf` (403) / `alb.tf` default (404) | |
 
+### 앱 입력/출력(스펙)이 바뀌었을 때
+
+대회 중 새 앱 바이너리가 오면 **요청 형식(입력)이나 응답(출력)이 바뀔 수 있습니다.** 아래를 점검·수정합니다.
+
+**1) 요청 경로/파라미터가 바뀐 경우** (예: `/v1/user` → `/v2/user`, `email` → `mail`)
+- `waf.tf`: 관리형 룰의 `scope_down_statement` 에 있는 경로 문자열(`/v1/user`, `/v1/product`, `/v1/stress`)을 새 경로로 변경. (안 바꾸면 새 경로에 WAF 미적용 → 비정상 요청이 안 막힘)
+- `alb.tf`: 리스너 규칙에서 유효 경로 매칭을 쓰면 그 경로도 변경.
+- `cloudfront.tf`: 캐시 동작(cache behavior)의 path pattern(`/v1/product*`, `/images/*` 등)이 경로 기반이면 변경.
+- `부하/app.js`: 부하 도구의 `testUser`/`testProduct`/`testStress` 의 URL·파라미터도 새 스펙으로 변경.
+
+**2) 요청 body 필드가 바뀐 경우** (예: `length` → `size`)
+- 앱이 알아서 처리하므로 인프라 수정은 대부분 불필요.
+- 단 `부하/app.js` 의 POST body(`JSON.stringify({...})`)를 새 필드명으로 맞춰야 부하 테스트가 성공.
+- db-init 시드가 새 컬럼을 요구하면 `k8s_base.tf` 의 `CREATE TABLE` 도 변경.
+
+**3) 응답 코드가 바뀐 경우** (예: POST 성공이 201 → 200)
+- 인프라 수정 불필요. `부하/app.js` 의 성공 판정(`status >= 200 && status < 300`)은 이미 2xx 전체를 성공으로 보므로 대부분 그대로 동작.
+- 특정 코드로 판정해야 하면 `부하/app.js` `sendRequest` 의 성공 조건 수정.
+
+**4) 새 환경변수를 앱이 요구하는 경우**
+- `k8s_base.tf`: ConfigMap(`s3-config`) 또는 Secret(`db-credentials`)에 키 추가.
+- `k8s_apps.tf`: 해당 Deployment 의 `env_from` 로 이미 주입되므로, 같은 Secret/ConfigMap 에 넣으면 자동 반영. 새 소스면 `env_from` 블록 추가.
+
+**5) 포트가 바뀐 경우** (8080 → 다른 값)
+- `k8s_apps.tf`: 3개 앱의 `container_port`, `readiness_probe`/`liveness_probe` 의 `port`, Service 의 `target_port`
+- `alb.tf`: target group `port`
+- → **총 여러 곳을 모두 같은 값으로** 맞춰야 함.
+
+**6) 이미지 저장/다운로드 경로가 바뀐 경우**
+- `cloudfront.tf`: `/images/*` URI-rewrite function 과 path pattern
+- `부하/app.js`: `testImage` 의 다운로드 경로, `uploadProductImage` 의 업로드 필드
+
+> 변경 후에는 반드시 `terraform apply -auto-approve -var "k8s_provider_ready=true"` 로 반영하고,
+> `부하` 도구로 스모크 테스트하여 user/product/stress/이미지/WAF 가 정상인지 확인합니다.
+
 ### 인프라 / 리전 관련
 
 | 문제지 변경 | 고칠 곳 | 비고 |

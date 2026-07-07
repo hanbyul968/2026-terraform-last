@@ -244,9 +244,9 @@ kubectl -n app logs job/db-init        # "seed load done" 또는 "skipping seed"
 
 ```powershell
 # state가 있는 쪽에서 먼저 destroy
-terraform destroy -auto-approve
+terraform destroy -auto-approve -var "k8s_provider_ready=true"
 # 또는 project명 변경으로 우회
-# variables.tf의 project를 "wsi2026f" 등으로 변경 후 apply
+# variables.tf의 project를 "wsi2026x" 등으로 변경 후 apply
 ```
 
 ### 2. `NodeCreationFailure` (노드가 클러스터에 조인 실패)
@@ -338,9 +338,18 @@ kubectl -n kube-system get pods -l app.kubernetes.io/name=aws-load-balancer-cont
 
 ## 정리
 
+destroy 할 때도 **`-var "k8s_provider_ready=true"`** 를 붙여야 합니다. (안 붙이면 kubernetes/helm provider 가 `https://localhost` 를 가리켜 `connectex: No connection` 에러 발생)
+
 ```powershell
-terraform destroy -auto-approve
+terraform destroy -auto-approve -var "k8s_provider_ready=true"
 ```
+
+> 이미 클러스터가 지워져 연결이 안 되는데 k8s 리소스가 state 에 남아 destroy 가 막히면:
+> ```powershell
+> # k8s/helm/kubectl 리소스를 state 에서 제거 후 나머지 destroy
+> terraform state list | Select-String "kubernetes_|helm_|kubectl_" | ForEach-Object { terraform state rm $_.ToString().Trim() }
+> terraform destroy -auto-approve -var "k8s_provider_ready=true"
+> ```
 
 ## 파일 구조
 

@@ -305,9 +305,9 @@ cd ..\terraform ; terraform apply -auto-approve
 ### 1. 실행
 ```powershell
 pip install boto3        # 최초 1회만
-python waf_header_stats.py --log-group aws-waf-logs-wsi2026e --region us-east-1 --hours 1
+python waf_header_stats.py --log-group aws-waf-logs-wsi2026 --region us-east-1 --hours 1
 ```
-- `<project>`가 `wsi2026e`면 로그그룹은 `aws-waf-logs-wsi2026e`.
+- 로그그룹 이름 = `aws-waf-logs-<project>` (이 프로젝트는 `project=wsi2026` → `aws-waf-logs-wsi2026`).
 - ⚠ **`--hours 1` 로 보라.** `--hours 24`는 *룰을 적용하기 전* 옛날 기록까지 섞여서, 이미 고친 것도
   "안 막혔다"고 보일 수 있다. 지금 상태를 보려면 짧게.
 
@@ -438,7 +438,7 @@ curl.exe -s -o NUL -w "%{http_code}`n" -H "X-Evil: 1" "$EP/v1/user?email=x@x.org
 curl.exe -s -o NUL -w "%{http_code}`n" "$EP/.env"        # 404
 
 # 다시 통계 — '아직 안 막힌' 칸이 빌 때까지 반복
-python waf_header_stats.py --log-group aws-waf-logs-wsi2026e --region us-east-1 --hours 1
+python waf_header_stats.py --log-group aws-waf-logs-wsi2026 --region us-east-1 --hours 1
 ```
 
 > 정상 트래픽이 같이 막히면 안 된다 → **대시보드 avail% 100% 유지** 확인하면서 조이기.
@@ -455,7 +455,7 @@ python waf_header_stats.py --log-group aws-waf-logs-wsi2026e --region us-east-1 
 
 ### STEP 0 — 돌리기
 ```powershell
-python waf_header_stats.py --log-group aws-waf-logs-<project> --region us-east-1 --hours 1
+python waf_header_stats.py --log-group aws-waf-logs-wsi2026 --region us-east-1 --hours 1
 ```
 
 ### STEP 1 — 행마다 **경로**부터 본다 (헤더 말고 경로 먼저!)
@@ -536,7 +536,7 @@ curl.exe -s -o NUL -w "%{http_code}`n" -H "X-Debug: 1" "http://<ep>/v1/user?emai
 # 없는 경로는 여전히 404 인지
 curl.exe -s -o NUL -w "%{http_code}`n" "http://<ep>/.env"   # 404
 # 다시 통계 (공격이 BLOCK 으로 바뀌었는지)
-python waf_header_stats.py --log-group aws-waf-logs-<project> --region us-east-1 --hours 1
+python waf_header_stats.py --log-group aws-waf-logs-wsi2026 --region us-east-1 --hours 1
 ```
 - 마지막에 **대시보드 avail% 100%** 확인 (정상 오차단 없는지).
 

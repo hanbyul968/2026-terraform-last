@@ -24,8 +24,8 @@
 ```bash
 pip3 install --user flask                 # 최초 1회 (CloudShell/로컬 공통)
 cd ~/2026-terraform/3과제/tools
-aws eks update-kubeconfig --name wsi2026b-cluster --region ap-northeast-2
-python3 dashboard.py --namespace app --waf-log-group aws-waf-logs-wsi2026b
+aws eks update-kubeconfig --name wsi2026-cluster --region ap-northeast-2
+python3 dashboard.py --namespace app --waf-log-group aws-waf-logs-wsi2026
 # → http://<host>:8080
 ```
 
@@ -46,7 +46,7 @@ cd ~/2026-terraform/3과제/tools
 pip3 install --user flask
 
 # 3. kubeconfig 연결 (클러스터명/리전은 본인 환경에 맞게)
-aws eks update-kubeconfig --name wsi2026b-cluster --region ap-northeast-2
+aws eks update-kubeconfig --name wsi2026-cluster --region ap-northeast-2
 
 # 4. 터널 실행 → 대시보드 + cloudflared 한방에
 bash tunnel.sh
@@ -59,9 +59,9 @@ bash tunnel.sh
 ==================================================================
 ```
 
-옵션은 환경변수로 바꿉니다(기본값: PORT=8080, NS=app, WAF=aws-waf-logs-wsi2026b):
+옵션은 환경변수로 바꿉니다(기본값: PORT=8080, NS=app, WAF=aws-waf-logs-wsi2026):
 ```bash
-PORT=8080 NS=app WAF=aws-waf-logs-wsi2026b bash tunnel.sh
+PORT=8080 NS=app WAF=aws-waf-logs-wsi2026 bash tunnel.sh
 ```
 
 **종료 / 정리** (Ctrl+C 후에도 백그라운드 프로세스가 남을 수 있음):
@@ -98,13 +98,13 @@ pkill -f dashboard.py ; pkill cloudflared
 ### A. CloudShell — 터미널 출력 (브라우저 불필요) ← 대회 환경
 ```bash
 cd ~/2026-terraform/3과제/tools
-aws eks update-kubeconfig --name wsi2026b-cluster --region ap-northeast-2   # 최초 1회
+aws eks update-kubeconfig --name wsi2026-cluster --region ap-northeast-2   # 최초 1회
 
 python3 monitor.py --once   --since 15m            # 1회 스냅샷
 python3 monitor.py --watch 10 --since 15m          # 10초마다 갱신 (Ctrl+C 종료)
 
-# WAF 로깅을 켰고 프로젝트명이 wsi2026b 면 로그그룹 지정:
-python3 monitor.py --watch 10 --waf-log-group aws-waf-logs-wsi2026b
+# WAF 로깅을 켰으면 로그그룹 지정 (이 프로젝트: project=wsi2026):
+python3 monitor.py --watch 10 --waf-log-group aws-waf-logs-wsi2026
 ```
 출력 순서: 요약(allow/block·2xx/4xx/5xx·pod·node) → 앱별 카운트+최근 5xx/4xx
 → Pod(상태/재시작/CPU·MEM/사유) → 노드 → WAF → **진단(원인·해결)**.
@@ -112,7 +112,7 @@ python3 monitor.py --watch 10 --waf-log-group aws-waf-logs-wsi2026b
 ### B. 로컬 PC — 그래프 웹 UI
 브라우저가 되는 PC(노트북)에서 (aws CLI·kubectl·python3 필요):
 ```bash
-aws eks update-kubeconfig --name wsi2026b-cluster --region ap-northeast-2
+aws eks update-kubeconfig --name wsi2026-cluster --region ap-northeast-2
 python3 monitor.py --namespace app                 # 브라우저: http://127.0.0.1:8080
 ```
 탭: 개요 / user / product / stress / Pod / 노드 / WAF / 진단

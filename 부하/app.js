@@ -3,9 +3,11 @@ let running = false;
 let stats = { user: { total: 0, success: 0, fast: 0, sum: 0, count: 0 }, product: { total: 0, success: 0, fast: 0, sum: 0, count: 0 }, stress: { total: 0, success: 0, fast: 0, sum: 0, count: 0 }, exception: { total: 0, success: 0 }, image: { total: 0, success: 0 } };
 let workers = [];
 let uiTimer = null;
+var uploadedImages = [];
 
 function resetStats() {
   stats = { user: { total: 0, success: 0, fast: 0, sum: 0, count: 0 }, product: { total: 0, success: 0, fast: 0, sum: 0, count: 0 }, stress: { total: 0, success: 0, fast: 0, sum: 0, count: 0 }, exception: { total: 0, success: 0 }, image: { total: 0, success: 0 } };
+  uploadedImages = [];
   updateUI();
 }
 
@@ -26,7 +28,8 @@ async function sendRequest(api, url, opts) {
   var fetchOpts = { method: method, headers: {} };
   if (opts && opts.body) {
     fetchOpts.body = opts.body;
-    fetchOpts.headers['Content-Type'] = 'application/json';
+    // opts.contentType 이 있으면 그걸 쓰고, 없으면 JSON (멀티파트는 caller가 지정)
+    fetchOpts.headers['Content-Type'] = (opts.contentType) || 'application/json';
   }
 
   try {
@@ -73,6 +76,64 @@ async function testProduct(endpoint) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ requestid: rid, uuid: uuid, id: 'loadtest' + rnd, name: 'test' + rnd, price: 1000 })
   });
+}
+
+// 1x1 투명 PNG (base64)
+var TINY_PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+
+function b64ToBytes(b64) {
+  var bin = atob(b64);
+  var bytes = new Uint8Array(bin.length);
+  for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+async function uploadProductImage(endpoint) {
+  var rnd = Math.floor(Math.random() * 1000) + 1;
+  var id = 'loadtest' + rnd;
+  var rid = Date.now().toString();
+  var uuid = crypto.randomUUID();
+
+  // 먼저 product 를 생성(없으면 PUT 대상이 없을 수 있음)
+  await sendRequest('product', endpoint + '/v1/product', {
+    method: 'POST',
+    body: JSON.stringify({ requestid: rid, uuid: uuid, id: id, name: id, price: 1000 })
+  });
+
+  // multipart 로 이미지 PUT
+  var fd = new FormData();
+  fd.append('requestid', rid);
+  fd.append('uuid', uuid);
+  fd.append('id', id);
+  fd.append('image', new Blob([b64ToBytes(TINY_PNG_B64)], { type: 'image/png' }), id + '.png');
+
+  var proxyUrl = '/proxy?url=' + encodeURIComponent(endpoint + '/v1/product');
+  try {
+    // FormData → 브라우저가 boundary 포함 Content-Type 자동 설정 (직접 설정 금지)
+    var res = await fetch(proxyUrl, { method: 'PUT', body: fd });
+    var data = await res.json();
+    var status = data.status || 0;
+    stats.product.total++;
+    stats.product.count++;
+    stats.product.sum += (data.ms || 0);
+    if (status >= 200 && status < 300) {
+      stats.product.success++;
+      if ((data.ms || 9999) <= 200) stats.product.fast++;
+      // 응답 body 에서 이미지 경로 추출 (image_path 또는 path)
+      var m = (data.body || '').match(/([\w\-./]+\.(jpg|jpeg|png|gif|webp))/i);
+      if (m) {
+        var p = m[1].replace(/^.*images\//, '');
+        if (uploadedImages.indexOf(p) === -1) uploadedImages.push(p);
+      } else {
+        // 경로를 못 찾으면 id 기반 추정
+        if (uploadedImages.indexOf(id + '.png') === -1) uploadedImages.push(id + '.png');
+      }
+    }
+    return { status: status };
+  } catch (e) {
+    stats.product.total++; stats.product.count++; stats.product.sum += 5000;
+    return { status: 0 };
+  }
 }
 
 async function testStress(endpoint, length) {
@@ -125,8 +186,16 @@ async function testException(endpoint) {
 }
 
 async function testImage(endpoint) {
-  var rnd = Math.floor(Math.random() * 100) + 1;
-  var url = endpoint + '/images/product' + rnd + '.jpg';
+  // 업로드된 이미지가 있으면 그걸 다운로드, 없으면 먼저 업로드
+  if (uploadedImages.length === 0) {
+    await uploadProductImage(endpoint);
+    if (uploadedImages.length === 0) {
+      // 업로드 실패 → 이미지 다운로드 테스트 스킵
+      return { ok: false };
+    }
+  }
+  var name = uploadedImages[Math.floor(Math.random() * uploadedImages.length)];
+  var url = endpoint + '/images/' + name;
   try {
     var proxyUrl = '/proxy?url=' + encodeURIComponent(url);
     var res = await fetch(proxyUrl);
@@ -135,6 +204,7 @@ async function testImage(endpoint) {
     var status = data.status || 0;
     stats.image.total++;
     if (status >= 200 && status < 300 && ms <= 5000) stats.image.success++;
+    else log('\u26A0\uFE0F \uC774\uBBF8\uC9C0 \uB2E4\uC6B4\uB85C\uB4DC \uC2E4\uD328 (' + status + '): /images/' + name, true);
     return { ok: status >= 200 && status < 300, ms: ms };
   } catch(e) {
     stats.image.total++;
@@ -173,18 +243,20 @@ async function runWorker(id) {
 
   while (running) {
     var pick = Math.random();
-    if (pick < 0.25) {
+    if (pick < 0.22) {
       await testUser(endpoint);
-    } else if (pick < 0.45) {
+    } else if (pick < 0.40) {
       await testProduct(endpoint);
-    } else if (pick < 0.60) {
+    } else if (pick < 0.52) {
       await testStress(endpoint, stressLen);
+    } else if (pick < 0.62) {
+      await uploadProductImage(endpoint);   // 이미지 업로드 (S3 채우기)
     } else if (pick < 0.75) {
       await testException(endpoint);
     } else if (pick < 0.85) {
       await test404(endpoint);
     } else {
-      await testImage(endpoint);
+      await testImage(endpoint);            // 이미지 다운로드
     }
     // UI 갱신은 별도 타이머에서 처리(요청 루프를 막지 않음).
     // interval 이 0 이면 지연 없이 다음 요청(마이크로태스크로만 양보).

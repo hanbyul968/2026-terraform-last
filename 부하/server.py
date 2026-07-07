@@ -62,7 +62,10 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
                 body = self.rfile.read(length)
 
         try:
-            req = urllib.request.Request(target_url, data=body, method=method)
+            # URL 에 공백 등 제어문자가 있으면 urllib 이 거부하므로 안전하게 정규화.
+            # (브라우저 fetch 는 자동 인코딩하지만 urllib 은 안 함)
+            safe_url = urllib.parse.quote(target_url, safe="://?&=@%+.,;!~*'()[]#$")
+            req = urllib.request.Request(safe_url, data=body, method=method)
             if content_type:
                 req.add_header('Content-Type', content_type)
 

@@ -1,39 +1,43 @@
-# tuning/ — 부하 테스트 & 자동 튜닝 (AWS CloudShell 기준)
+# tuning/ — 부하 테스트 & 자동 튜닝 (Windows PowerShell 기준)
 
 대회 채점 방식(가용성 / 성능효율 / 비용)과 동일하게 부하를 걸고, HPA·request 값을
-**자동으로 스윕해 최적값을 찾는** 도구 모음. **AWS CloudShell**에서 바로 돌아간다.
+**자동으로 스윕해 최적값을 찾는** 도구 모음. **Windows PowerShell**에서 바로 돌아간다.
 
-> ⚠️ 절대값(예: `cpu 500m`)은 **앱마다 다르다**. 대회날 새 앱을 받으면 `config.env`만
-> 고쳐 `autotune.sh`로 그 자리에서 최적값을 다시 찾는 게 이 도구의 목적이다.
+> ⚠️ 절대값(예: `cpu 500m`)은 **앱마다 다르다**. 대회날 새 앱을 받으면 `config.ps1`만
+> 고쳐 `autotune.ps1`로 그 자리에서 최적값을 다시 찾는 게 이 도구의 목적이다.
 > terraform 의 기본값은 "앱 안 타는 견고한 출발점"일 뿐, 정답이 아니다.
 
 ## 구성 파일
 
 | 파일 | 역할 |
 |---|---|
-| `config.env`         | **대회날 여기만 수정** — 엔드포인트 API 목록·SLO·부하파라미터·시드 |
-| `cloudshell-setup.sh`| CloudShell 부트스트랩 (hey·kubectl 설치 + kubeconfig) |
-| `loadtest.sh`        | 1회 부하 + 채점식 측정 (가용성/perf/노드수) |
-| `autotune.sh`        | 조합 그리드 자동 스윕 → 채점 → 우승자 적용 |
-| `autotune-hc.sh`     | 힐클라이밍 정밀탐색 (노드 드레인으로 노이즈↓) |
+| `config.ps1`    | **대회날 여기만 수정** — 엔드포인트 API 목록·SLO·부하파라미터·시드 |
+| `setup.ps1`     | 부트스트랩 (hey.exe·kubectl.exe 설치 + kubeconfig) |
+| `loadtest.ps1`  | 1회 부하 + 채점식 측정 (가용성/perf/노드수) |
+| `autotune.ps1`  | 조합 그리드 자동 스윕 → 채점 → 우승자 적용 |
+| `autotune-hc.ps1`| 힐클라이밍 정밀탐색 (노드 드레인으로 노이즈↓) |
+| `score.py`      | hey CSV 채점기 (위 스크립트들이 공용으로 호출) |
+| `waf_header_stats.py`| WAF 로그 분석 (boto3, 크로스플랫폼) |
+
+> 기존 `*.sh`(CloudShell/bash 판)도 참조용으로 남아 있지만, Windows 에서는 위 `*.ps1` 을 쓴다.
 
 ---
 
-## CloudShell 빠른 시작
+## PowerShell 빠른 시작
 
-CloudShell은 **리소스가 떠 있는 그 AWS 계정**에서 연다(콘솔 우상단 `>_` 아이콘).
-크레덴셜은 자동(ambient) — **프로파일 지정 불필요**.
+전제: **`aws` CLI + `python`(+`boto3`) 설치**, 그리고 `aws configure`로 **리소스가 떠 있는
+그 계정**의 자격증명이 잡혀 있어야 한다(CloudShell 처럼 ambient 아님).
 
-```bash
+```powershell
 # 0) 도구 받기 (이 레포의 tuning 폴더)
 git clone https://github.com/gmst-cc/wsi-2026-task3.git
-cd wsi-2026-task3/tuning
+cd wsi-2026-task3\tuning
 
-# 1) 부트스트랩 — hey/kubectl 설치 + kubeconfig (클러스터명/리전)
-./cloudshell-setup.sh wsi2026-cluster ap-northeast-2
+# (실행 정책 때문에 스크립트가 막히면 이 세션만 허용)
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
-# 1-1) 현재 셸 PATH 적용 (직접 kubectl/hey 칠 때 필요. 새 세션은 자동)
-export PATH="$HOME/bin:$PATH"
+# 1) 부트스트랩 — hey.exe/kubectl.exe 설치(%USERPROFILE%\bin) + kubeconfig
+.\setup.ps1 -Cluster wsi2026-cluster -Region ap-northeast-2
 
 # 2) 클러스터 보이는지 확인
 kubectl -n app get pods
@@ -42,64 +46,60 @@ kubectl -n app get pods
 #    예: http://dj1k92w9552mb.cloudfront.net
 
 # 4) baseline 측정
-./loadtest.sh http://<endpoint> 180s baseline
+.\loadtest.ps1 http://<endpoint> 180s baseline
 
 # 5) 최적값 자동 탐색
-./autotune.sh http://<endpoint> 90s
+.\autotune.ps1 http://<endpoint> 90s
 ```
 
 ### hey 설치 실패 시 (loadtest가 전부 `NO DATA`)
-`cloudshell-setup.sh`는 hey를 공식 S3 미러에서 받는데, 이 미러가 **403(AccessDenied)** 를
-내면 깨진 파일(에러 XML)이 `~/bin/hey`로 저장돼 실행이 안 되고 측정이 `NO DATA`로 나온다.
-확인·복구:
+`setup.ps1`은 hey.exe 를 공식 S3 미러에서 받는데, 미러가 **403(AccessDenied)** 를 내면
+깨진 파일이 저장돼 실행이 안 되고 측정이 `NO DATA`로 나온다. 확인·복구:
 
-```bash
-# 진단: 깨졌으면 XML/200바이트 내외 + 실행 시 'syntax error near ... <?xml'
-hey -h 2>&1 | head -1
-head -c 200 ~/bin/hey
+```powershell
+# 진단: 정상이면 usage, 깨졌으면 에러/빈 출력
+hey -h
+Get-Item "$env:USERPROFILE\bin\hey.exe" | Select-Object Length   # 수 MB 면 정상, 수백 B 면 깨짐
 
-# 복구: hey를 Go로 직접 빌드 (다른 도구로 바꾸는 게 아니라 hey 그대로)
-sudo dnf install -y golang
-GOPATH=/tmp/go GOCACHE=/tmp/gocache GOBIN="$HOME/bin" go install github.com/rakyll/hey@latest
-hey -h | head -1     # usage 뜨면 정상
+# 복구 1) 다시 받기
+Invoke-WebRequest 'https://hey-release.s3.us-east-2.amazonaws.com/hey_windows_amd64' `
+  -OutFile "$env:USERPROFILE\bin\hey.exe"
+
+# 복구 2) Go 로 직접 빌드 (Go 설치돼 있으면)
+$env:GOBIN = "$env:USERPROFILE\bin"; go install github.com/rakyll/hey@latest
 ```
-> 빌드 캐시는 `/tmp`(overlay, 넉넉)로 빼 1GB 홈을 안 쓴다. S3 미러가 복구되면 위 과정 불필요.
 
-> CloudShell은 홈(`~`) 1GB만 영속이고 컴퓨트는 세션 종료 시 초기화된다.
-> `~/bin`(설치물)과 `~/.kube/config`는 남고, `/tmp`의 결과 CSV는 세션 한정.
-
-### CloudShell이 아닌 환경
-- **macOS**: `brew install hey kubectl awscli python3`
-- **Linux**: `cloudshell-setup.sh`가 그대로 동작(Amazon Linux/Ubuntu 공통, `~/bin` 설치).
-- **Windows**: WSL2 우분투에서 Linux와 동일하게.
-- CloudShell이 아니면 본인 계정 자격증명이 필요(`aws configure` 또는 프로파일).
-  이 프로젝트의 리소스 생성은 **`lee` 프로파일** 전제 — 단, CloudShell은 ambient라 불필요.
+> `setup.ps1`은 `%USERPROFILE%\bin` 에 설치하고 사용자 PATH 에 등록한다(새 창부터 자동 적용).
+> 결과 CSV 는 `%TEMP%\tune-<label>\` 에 쌓인다.
 
 ---
 
-## config.env — 대회날 채우는 곳
+## config.ps1 — 대회날 채우는 곳
 
-```bash
-APIS=(
-  # name | slo_sec | conc | qps | METHOD | path(쿼리포함) | json_body(POST만)
-  "user|0.2|30|10|GET|/v1/user?email=loadseed1@example.org&...|"
-  "product|0.2|30|10|GET|/v1/product?id=loadseedp1&...|"
-  "stress|1.0|12|2|POST|/v1/stress|{...json...}"
+```powershell
+$APIS = @(
+  # name / slo(초) / conc / qps / method / path(쿼리포함) / body(POST만, GET은 $null)
+  @{ name='user';    slo=0.2; conc=30; qps=10; method='GET';  path="/v1/user?email=loadseed1@example.org&..."; body=$null }
+  @{ name='product'; slo=0.2; conc=30; qps=10; method='GET';  path="/v1/product?id=loadseedp1&...";            body=$null }
+  @{ name='stress';  slo=1.0; conc=12; qps=2;  method='POST'; path='/v1/stress'; body=(@{requestid='1';uuid=$UUID;length=64}|ConvertTo-Json -Compress) }
 )
-SEEDS=( "POST|/v1/user|{...}" "POST|/v1/product|{...}" )  # GET 부하가 맞힐 행 미리 삽입
-AVAIL_GATE=99      # 가용성 합격선(%); 미만이면 autotune 점수 실격
-COST_PENALTY=6     # 노드 평균 1대 초과당 감점
-NS=app             # k8s 네임스페이스
+$SEEDS = @(  # GET 부하가 맞힐 행 미리 삽입
+  @{ method='POST'; path='/v1/user';    body=(@{requestid='1';uuid=$UUID;username='loadseed1';email='loadseed1@example.org'}|ConvertTo-Json -Compress) }
+  @{ method='POST'; path='/v1/product'; body=(@{requestid='1';uuid=$UUID;id='loadseedp1';name='loadseedp1';price=1}|ConvertTo-Json -Compress) }
+)
+$AVAIL_GATE   = 99     # 가용성 합격선(%); 미만이면 autotune 점수 실격
+$COST_PENALTY = 6      # 노드 평균 1대 초과당 감점
+$NS           = 'app'  # k8s 네임스페이스
 ```
 - `name`은 **같은 이름의 Deployment**를 autotune이 튜닝한다(앱 이름 = Deployment 이름 전제).
-- `slo_sec`는 채점기준표의 성능 기준을 그대로 넣는다.
+- `slo`는 채점기준표의 성능 기준(초)을 그대로 넣는다.
 
 ---
 
-## loadtest.sh
+## loadtest.ps1
 
-```bash
-./loadtest.sh <endpoint> [duration] [label]
+```powershell
+.\loadtest.ps1 <endpoint> [duration] [label]
 ```
 config의 모든 API에 동시에 부하 → 출력:
 
@@ -112,37 +112,37 @@ stress        720  100.0%  81.6%   0.630   0.940   0.980   1.120
 nodes      min=2 max=6 avg=3.40  (cost proxy avg/2 = 1.70)
 ```
 - `perf%`↑ = 성능점수↑, `nodes avg`↓ = 비용점수↑ (트레이드오프).
-- 산출물: `/tmp/tune-<label>/{<api>.csv, nodes.csv}`.
+- 산출물: `%TEMP%\tune-<label>\{<api>.csv, nodes.csv}`.
 
-## autotune.sh — 그리드 자동 스윕
+## autotune.ps1 — 그리드 자동 스윕
 
-```bash
-./autotune.sh <endpoint> [duration]
+```powershell
+.\autotune.ps1 <endpoint> [duration]
 ```
 - config의 모든 앱에 **균일한 (cpu·util·min·max)** 조합을 차례로 적용(live `kubectl patch`, terraform 재apply 없음).
 - 조합당: patch → rollout → 45s 안정화 → loadtest → 채점.
 - 점수 = `평균 perf% − 노드비용패널티 − (가용성<GATE면 실격)`.
 - 끝나면 **우승 조합을 클러스터에 적용**하고 terraform 반영값을 출력.
-- 조합은 스크립트 상단 `COMBOS`에서 추가/수정.
+- 조합은 스크립트 상단 `$COMBOS`에서 추가/수정.
 
-## autotune-hc.sh — 힐클라이밍 정밀탐색
+## autotune-hc.ps1 — 힐클라이밍 정밀탐색
 
-```bash
-./autotune-hc.sh <endpoint> [duration] [start_cpu] [start_util] [max_moves]
+```powershell
+.\autotune-hc.ps1 <endpoint> [duration] [start_cpu] [start_util] [max_moves]
 ```
 - 시작점에서 cpu(±100m)·util(±5)을 흔들어 점수 개선 방향으로 이동(first-improvement).
 - 매 trial 전 **노드를 baseline까지 드레인**(Karpenter consolidation 대기) → 비용 측정 노이즈↓.
-- `autotune.sh`로 대략 우승 영역 찾은 뒤, 그 근처를 정밀화할 때 사용.
+- `autotune.ps1`로 대략 우승 영역 찾은 뒤, 그 근처를 정밀화할 때 사용.
 
 ---
 
 ## 대회날 워크플로 (요약)
 
-1. 리소스 띄운 계정에서 **CloudShell** 열기 → `git clone` → `cd tuning`.
-2. `./cloudshell-setup.sh <cluster> <region>`.
-3. 받은 앱·채점기준표 보고 **`config.env`의 APIS/SEEDS/SLO 수정**.
-4. `./loadtest.sh <ep> 180s baseline`로 현재 상태 확인.
-5. `./autotune.sh <ep> 90s`로 최적 조합 선정 → 필요하면 `autotune-hc.sh`로 정밀화.
+1. **PowerShell** 열기 → `git clone` → `cd tuning` (자격증명은 미리 `aws configure`).
+2. `.\setup.ps1 -Cluster <cluster> -Region <region>`.
+3. 받은 앱·채점기준표 보고 **`config.ps1`의 $APIS/$SEEDS/SLO 수정**.
+4. `.\loadtest.ps1 <ep> 180s baseline`로 현재 상태 확인.
+5. `.\autotune.ps1 <ep> 90s`로 최적 조합 선정 → 필요하면 `autotune-hc.ps1`로 정밀화.
 6. 출력된 값으로 `terraform/k8s_apps.tf` 수정 후 `terraform apply` (영구 반영).
 
 > 부하는 Karpenter 노드를 띄워 **비용 발생**. 끝나면 consolidation(~60s) 확인,
@@ -152,7 +152,7 @@ nodes      min=2 max=6 avg=3.40  (cost proxy avg/2 = 1.70)
 
 ## 결과 쉽게 읽는 법 (초보용)
 
-`loadtest.sh` / `autotune.sh` 출력을 한 줄씩 풀면:
+`loadtest.ps1` / `autotune.ps1` 출력을 한 줄씩 풀면:
 
 ```
 api      n      avail%  perf%   p50    p95    p99    max
@@ -219,20 +219,20 @@ spec {
 **두 가지 적용 방법**
 
 ① **빠른 실험 (즉시 반영, 임시)** — 코드 고치기 전에 효과만 확인:
-```bash
+```powershell
 # 예: stress 만 CPU 900m, HPA min3/max10/util45 로 즉시 변경
 kubectl -n app set resources deploy/stress --requests=cpu=900m
-kubectl -n app patch hpa stress --type=merge -p \
-  '{"spec":{"minReplicas":3,"maxReplicas":10,"metrics":[{"type":"Resource","resource":{"name":"cpu","target":{"type":"Utilization","averageUtilization":45}}}]}}'
+$patch = '{"spec":{"minReplicas":3,"maxReplicas":10,"metrics":[{"type":"Resource","resource":{"name":"cpu","target":{"type":"Utilization","averageUtilization":45}}}]}}'
+kubectl -n app patch hpa stress --type=merge -p $patch
 kubectl -n app rollout status deploy/stress
 # 다시 측정해서 perf% 올랐는지 확인
-./loadtest.sh http://<endpoint> 180s after
+.\loadtest.ps1 http://<endpoint> 180s after
 ```
 → 좋으면 ②로 코드에 박는다. (이 patch는 `terraform apply`나 재배포 시 사라짐)
 
 ② **영구 반영** — 위 (1)(2) 숫자를 `k8s_apps.tf`에서 그 앱만 수정 후:
-```bash
-cd terraform && terraform apply -auto-approve
+```powershell
+cd ..\terraform ; terraform apply -auto-approve
 ```
 
 **처방별 구체 예시 (전 → 후)**
@@ -247,7 +247,7 @@ cd terraform && terraform apply -auto-approve
 > 한 번에 하나씩만 바꾸고 → `loadtest`로 재측정 → 효과 확인. 여러 개 동시에 바꾸면 뭐가 효과인지 모름.
 
 ### autotune 우승값을 그대로 쓰면 안 되는 이유
-`autotune.sh`는 **모든 앱에 똑같은 cpu/util**을 적용해 비교한다. 그래서 우승값(예: `300m 균일`)을
+`autotune.ps1`는 **모든 앱에 똑같은 cpu/util**을 적용해 비교한다. 그래서 우승값(예: `300m 균일`)을
 그대로 박으면:
 - user/product엔 **과함** → 노드 늘어 비용↑
 - stress엔 **부족** → 성능 그대로
@@ -284,8 +284,8 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "stress" {
 }
 ```
 
-```bash
-cd terraform && terraform apply -auto-approve
+```powershell
+cd ..\terraform ; terraform apply -auto-approve
 ```
 
 > 요약: **perf% 낮은 그 앱 하나만** 골라 → `cpu↑` 또는 `HPA util↓/min↑` → 비용(`nodes avg`)과
@@ -303,14 +303,13 @@ cd terraform && terraform apply -auto-approve
 > `terraform/waf.tf`에 룰로 추가하고 `apply` → 다시 돌려서 그 칸이 빌 때까지 반복.
 
 ### 1. 실행
-```bash
+```powershell
 pip install boto3        # 최초 1회만
-python3 waf_header_stats.py --log-group aws-waf-logs-wsi2026e --region us-east-1 --hours 1
+python waf_header_stats.py --log-group aws-waf-logs-wsi2026e --region us-east-1 --hours 1
 ```
 - `<project>`가 `wsi2026e`면 로그그룹은 `aws-waf-logs-wsi2026e`.
 - ⚠ **`--hours 1` 로 보라.** `--hours 24`는 *룰을 적용하기 전* 옛날 기록까지 섞여서, 이미 고친 것도
   "안 막혔다"고 보일 수 있다. 지금 상태를 보려면 짧게.
-- Windows면 `python3` 대신 `python`.
 
 ### 2. 출력은 3덩어리
 
@@ -431,15 +430,15 @@ rule {
 cd C:\Users\competitor\2026-terraform\3과제\terraform
 terraform apply -auto-approve -var is_windows=true
 ```
-```bash
+```powershell
 # 그 공격 흉내로 직접 호출 → 403 떠야 막힌 것
-EP=http://d35rfootcsla2a.cloudfront.net
-curl -s -o /dev/null -w "%{http_code}\n" -H "X-Evil: 1" "$EP/v1/user?email=x@x.org&requestid=1&uuid=1"   # 403
+$EP = 'http://d35rfootcsla2a.cloudfront.net'
+curl.exe -s -o NUL -w "%{http_code}`n" -H "X-Evil: 1" "$EP/v1/user?email=x@x.org&requestid=1&uuid=1"   # 403
 # 없는 경로는 여전히 404 인지도 확인
-curl -s -o /dev/null -w "%{http_code}\n" "$EP/.env"        # 404
+curl.exe -s -o NUL -w "%{http_code}`n" "$EP/.env"        # 404
 
 # 다시 통계 — '아직 안 막힌' 칸이 빌 때까지 반복
-python3 waf_header_stats.py --log-group aws-waf-logs-wsi2026e --region us-east-1 --hours 1
+python waf_header_stats.py --log-group aws-waf-logs-wsi2026e --region us-east-1 --hours 1
 ```
 
 > 정상 트래픽이 같이 막히면 안 된다 → **대시보드 avail% 100% 유지** 확인하면서 조이기.
@@ -455,8 +454,8 @@ python3 waf_header_stats.py --log-group aws-waf-logs-wsi2026e --region us-east-1
 > 자동으로 뽑아준다. (AI 없이 오프라인 동작) 아래는 그 원리/수동 절차.
 
 ### STEP 0 — 돌리기
-```bash
-python3 waf_header_stats.py --log-group aws-waf-logs-<project> --region us-east-1 --hours 1
+```powershell
+python waf_header_stats.py --log-group aws-waf-logs-<project> --region us-east-1 --hours 1
 ```
 
 ### STEP 1 — 행마다 **경로**부터 본다 (헤더 말고 경로 먼저!)
@@ -531,13 +530,13 @@ rule {
 cd C:\Users\competitor\2026-terraform\3과제\terraform
 terraform apply -auto-approve -var is_windows=true
 ```
-```bash
+```powershell
 # 그 공격 흉내로 호출 → 403 떠야 함
-curl -s -o /dev/null -w "%{http_code}\n" -H "X-Debug: 1" "http://<ep>/v1/user?email=x@x.org&requestid=1&uuid=1"   # 403
+curl.exe -s -o NUL -w "%{http_code}`n" -H "X-Debug: 1" "http://<ep>/v1/user?email=x@x.org&requestid=1&uuid=1"   # 403
 # 없는 경로는 여전히 404 인지
-curl -s -o /dev/null -w "%{http_code}\n" "http://<ep>/.env"   # 404
+curl.exe -s -o NUL -w "%{http_code}`n" "http://<ep>/.env"   # 404
 # 다시 통계 (공격이 BLOCK 으로 바뀌었는지)
-python3 waf_header_stats.py --log-group aws-waf-logs-<project> --region us-east-1 --hours 1
+python waf_header_stats.py --log-group aws-waf-logs-<project> --region us-east-1 --hours 1
 ```
 - 마지막에 **대시보드 avail% 100%** 확인 (정상 오차단 없는지).
 

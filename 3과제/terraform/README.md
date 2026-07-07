@@ -88,21 +88,27 @@ cd 2026-0621-jaemu-task3\terraform
 
 ## 배포 (Windows PowerShell)
 
+kubernetes/helm provider는 EKS 클러스터가 존재해야 초기화되므로, **EKS를 먼저 만든 뒤 전체 apply** 하는 2단계로 진행합니다.
+
 ```powershell
 cd C:\Users\competitor\2026-0621-jaemu-task3\terraform
 
 terraform init
-terraform apply -auto-approve            # ~20분 (EKS + RDS 동시 생성)
+
+# 1단계: 네트워크 + EKS 클러스터 + 노드그룹 먼저 (~15분)
+terraform apply -auto-approve "-target=aws_eks_node_group.main"
+
+# 2단계: kubeconfig 갱신
+aws eks update-kubeconfig --name wsi2026-cluster --region ap-northeast-2
+
+# 3단계: 나머지 전체 (앱/ALB/CloudFront/WAF 등)
+terraform apply -auto-approve -var "k8s_provider_ready=true"
 
 terraform output endpoint
 # http://dXXXXX.cloudfront.net    ← 채점 플랫폼에 입력
 ```
 
-> **PowerShell 5.1에서는 `&&`가 없습니다.** 초기화→배포를 한 줄로:
-> ```powershell
-> terraform init; if ($?) { terraform apply -auto-approve }
-> ```
-> PowerShell 7+는 `&&` 사용 가능.
+> `-target=aws_eks_node_group.main` 하나면 VPC·서브넷·라우트·IGW·EKS 클러스터까지 의존성으로 함께 생성됩니다 (노드그룹이 그것들에 `depends_on` 되어 있음). 따라서 노드가 뜰 때 인터넷 라우트가 반드시 준비되어 있어 `NodeCreationFailure` 가 발생하지 않습니다.
 
 `null_resource.build_push`가 `terraform apply` 안에서 ECR 로그인 + `docker build` + `docker push`를 자동 수행합니다. 바이너리(`application/binary/{user,product,stress}`) hash가 바뀌면 자동 재빌드됩니다.
 

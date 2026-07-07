@@ -41,7 +41,7 @@ resource "kubernetes_deployment" "user" {
         }
         container {
           name              = "user"
-          image             = "${local.ecr_url["user"]}:${var.app_image_tag}"
+          image             = "${local.ecr_url["user"]}:${local.app_image_tags["user"]}"
           image_pull_policy = "Always"
           port { container_port = 8080 }
           env_from {
@@ -187,7 +187,7 @@ resource "kubernetes_deployment" "product" {
         }
         container {
           name              = "product"
-          image             = "${local.ecr_url["product"]}:${var.app_image_tag}"
+          image             = "${local.ecr_url["product"]}:${local.app_image_tags["product"]}"
           image_pull_policy = "Always"
           port { container_port = 8080 }
           env_from {
@@ -317,7 +317,7 @@ resource "kubernetes_deployment" "stress" {
         service_account_name             = kubernetes_service_account.stress.metadata[0].name
         container {
           name              = "stress"
-          image             = "${local.ecr_url["stress"]}:${var.app_image_tag}"
+          image             = "${local.ecr_url["stress"]}:${local.app_image_tags["stress"]}"
           image_pull_policy = "Always"
           port { container_port = 8080 }
           resources {

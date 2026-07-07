@@ -8,11 +8,24 @@
 locals {
   ecr_registry = "${local.account_id}.dkr.ecr.${var.region}.amazonaws.com"
 
+  # 앱 바이너리 hash → 이미지 태그 자동 파생. 바이너리가 바뀌면 태그가 바뀌어
+  # 자동 롤링 업데이트. -var app_image_tag 로 강제 override 가능.
+  app_bins = {
+    user    = filesha256("${path.module}/../application/binary/user")
+    product = filesha256("${path.module}/../application/binary/product")
+    stress  = filesha256("${path.module}/../application/binary/stress")
+  }
+  dockerfile_hash = filesha256("${path.module}/../application/binary/Dockerfile")
+  app_image_tags = {
+    for app, h in local.app_bins :
+    app => var.app_image_tag != "latest" ? var.app_image_tag : substr(sha256("${h}${local.dockerfile_hash}"), 0, 12)
+  }
+
   # one "build + push" pair per app, fully interpolated (no shell vars)
   build_lines = join("\n", flatten([
     for app in ["user", "product", "stress"] : [
-      "docker build --platform linux/amd64 --build-arg APP=${app} -t ${local.ecr_registry}/${local.name}/${app}:${var.app_image_tag} .",
-      "docker push ${local.ecr_registry}/${local.name}/${app}:${var.app_image_tag}",
+      "docker build --platform linux/amd64 --build-arg APP=${app} -t ${local.ecr_registry}/${local.name}/${app}:${local.app_image_tags[app]} .",
+      "docker push ${local.ecr_registry}/${local.name}/${app}:${local.app_image_tags[app]}",
     ]
   ]))
 
@@ -37,11 +50,11 @@ locals {
 
 resource "null_resource" "build_push" {
   triggers = {
-    user_bin    = filesha256("${path.module}/../application/binary/user")
-    product_bin = filesha256("${path.module}/../application/binary/product")
-    stress_bin  = filesha256("${path.module}/../application/binary/stress")
-    dockerfile  = filesha256("${path.module}/../application/binary/Dockerfile")
-    tag         = var.app_image_tag
+    user_bin    = local.app_bins["user"]
+    product_bin = local.app_bins["product"]
+    stress_bin  = local.app_bins["stress"]
+    dockerfile  = local.dockerfile_hash
+    tags        = join(",", values(local.app_image_tags))
   }
 
   depends_on = [aws_ecr_repository.this]

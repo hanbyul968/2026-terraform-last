@@ -15,8 +15,8 @@ resource "kubernetes_secret" "db" {
   data = {
     MYSQL_USER     = var.db_username
     MYSQL_PASSWORD = random_password.db.result
-    # 앱은 RDS 직접이 아니라 RDS Proxy 로 접속(커넥션 풀링 → 부하 시 커넥션 폭주 방지).
-    MYSQL_HOST   = aws_db_proxy.this.endpoint
+    # RDS Proxy와 Go mysql 드라이버 호환 이슈로 직접 RDS 엔드포인트 사용
+    MYSQL_HOST   = aws_db_instance.this.address
     MYSQL_PORT   = "3306"
     MYSQL_DBNAME = var.db_name
   }

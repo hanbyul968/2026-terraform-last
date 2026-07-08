@@ -2,10 +2,16 @@
 # 부하/채점 대상 정의. loadtest.ps1 / autotune.ps1 / autotune-hc.ps1 이 이 파일을 dot-source 한다:
 #     . .\config.ps1
 
-# 엔드포인트 — 대회날 여기 한 번만 붙여넣으면 loadtest/autotune/autotune-hc 전부 이 값을 쓴다.
-# (스크립트에 -Url 로 넘기면 그 값이 우선)
-
-if (-not $ENDPOINT) { $ENDPOINT = 'http://REPLACE-ME.cloudfront.net' }
+# 엔드포인트 — 비워두면 ../terraform 의 `terraform output endpoint` 에서 자동으로 가져온다.
+# (하드코딩 금지: 대회날 계정/주소가 바뀌어도 그대로 동작. 주소를 못 읽거나 다른 걸 쓰려면
+#  아래에 직접 넣거나, 스크립트에 -Url http://... 로 넘긴다.)
+if (-not $ENDPOINT) {
+  $ENDPOINT = ''
+  $tfdir = Join-Path $PSScriptRoot '..\terraform'
+  if (Test-Path $tfdir) {
+    try { $ENDPOINT = (& terraform "-chdir=$tfdir" output -raw endpoint 2>$null | Select-Object -First 1) } catch {}
+  }
+}
 
 # 공통 식별자(앱이 요구하면). 안 쓰면 비워둬도 됨.
 if (-not $UUID) { $UUID = '7c5a3c6a-758f-4bc5-9bdf-3e573a0ad729' }

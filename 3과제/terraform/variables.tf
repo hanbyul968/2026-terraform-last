@@ -73,6 +73,85 @@ variable "aws_profile" {
   description = "AWS named profile. Leave empty to use the default credential chain (env vars / default profile)."
 }
 
+# ---------- 경로/포트 (대회날 스펙 변경 대응: 여기 값만 바꿔 apply) ----------
+
+variable "api_prefix" {
+  type        = string
+  default     = "/v1"
+  description = "API 경로 prefix. 앱 경로는 <api_prefix>/<앱이름> 으로 계산됨 (예: /v1/user). 대회날 /v2 로 바뀌면 이 값만 변경."
+}
+
+variable "api_paths_override" {
+  type        = list(string)
+  default     = []
+  description = "앱 이름과 경로가 일치하지 않을 때만 사용 (예: [\"/v2/member\",\"/v1/product\",\"/v1/stress\"]). 비어 있으면 api_prefix/<앱이름> 자동 계산."
+}
+
+variable "healthcheck_path" {
+  type        = string
+  default     = "/healthcheck"
+  description = "앱 헬스체크 경로 (ALB TG 헬스체크 + k8s probe + 리스너 규칙에 공용)."
+}
+
+variable "images_prefix" {
+  type        = string
+  default     = "/images"
+  description = "이미지 다운로드 경로 prefix. CloudFront 캐시 동작과 URI rewrite 함수에 공용."
+}
+
+variable "container_port" {
+  type        = number
+  default     = 8080
+  description = "앱 컨테이너 포트. Deployment/probe/Service/ALB TG/SG 에 공용 (한 곳만 바꾸면 전부 반영)."
+}
+
+# ---------- WAF: "관찰 → 차단" (기본은 아무것도 차단하지 않음) ----------
+# 대회날 트래픽이 시작되면 tuning/waf_header_stats.py 로 비정상 패턴을 관찰한 뒤,
+# 아래 변수에 패턴만 추가하고 terraform apply 하면 즉시 차단된다 (waf.tf 수정 불필요).
+
+variable "waf_custom_rule_action" {
+  type        = string
+  default     = "block"
+  description = "커스텀 차단 룰의 액션. 오차단이 걱정되면 \"count\"로 먼저 넣고 WAF 로그로 확인 후 \"block\"으로 변경."
+  validation {
+    condition     = contains(["block", "count"], var.waf_custom_rule_action)
+    error_message = "waf_custom_rule_action must be \"block\" or \"count\"."
+  }
+}
+
+variable "waf_blocked_user_agents" {
+  type        = list(string)
+  default     = []
+  description = "User-Agent 에 이 문자열이 포함되면 403 (대소문자 무시). 예: [\"sqlmap\",\"nikto\",\"attack\"]"
+}
+
+variable "waf_blocked_headers" {
+  type        = list(string)
+  default     = []
+  description = "이 헤더가 존재하기만 하면 403. 소문자로 입력. 예: [\"x-junk\",\"x-debug\"]"
+}
+
+variable "waf_blocked_header_values" {
+  type = list(object({
+    header = string # 헤더 이름 (소문자)
+    value  = string # 이 문자열이 포함되면 차단 (대소문자 무시)
+  }))
+  default     = []
+  description = "특정 헤더 값에 문자열이 포함되면 403. 예: [{ header = \"referer\", value = \"evil.com\" }]"
+}
+
+variable "waf_blocked_body_patterns" {
+  type        = list(string)
+  default     = []
+  description = "요청 body 에 이 문자열이 포함되면 403 (대소문자 무시). 정상 body 에 절대 없는 토큰만. 예: [\"$ne\",\"sleep(\"]"
+}
+
+variable "waf_block_private_xff" {
+  type        = bool
+  default     = false
+  description = "true 면 X-Forwarded-For 에 루프백/사설/메타데이터 IP(127. 10. 192.168. 172.16-31. 169.254.)가 들어간 요청을 403."
+}
+
 variable "is_windows" {
   type        = bool
   default     = true

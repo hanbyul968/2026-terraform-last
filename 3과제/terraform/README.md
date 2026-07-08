@@ -14,7 +14,7 @@
 | 스토리지 | S3 (private, CloudFront OAC) | 이미지 버킷 |
 | 엔드포인트 | CloudFront → ALB + S3 | 단일 엔드포인트 |
 | 부하분산 | 네이티브 ALB + AWS LB Controller 3.4 (TargetGroupBinding) | pod IP 타겟 등록 |
-| 보안 | WAFv2 (Common/KnownBadInputs/SQLi) | 비정상 요청 403 차단 |
+| 보안 | WAFv2 (Common/KnownBadInputs/SQLi + 변수 기반 커스텀 룰) | "관찰 → 차단" 운영, 비정상 요청 403 |
 
 > **실행 환경: Windows PowerShell (`ap-northeast-2`)** 기준. Docker Desktop + Terraform + AWS CLI + kubectl이 필요합니다.
 
@@ -40,9 +40,11 @@
 * RDS Multi-AZ
 * topology spread constraint로 pod 분산
 
-### 비정상 요청 (4점)
-* WAFv2 AWS Managed Rules → 403
-* 정의 안 된 path → ALB fixed-response 404
+### 비정상 요청 (4점) — "관찰 → 차단" 운영
+* 기본: WAFv2 AWS Managed Rules(시그니처 기반, 오탐 없음)만 켜짐 → **정상 요청 오차단 위험 0**
+* 커스텀 차단은 전부 **변수**(`waf_blocked_*`) — 대회날 트래픽을 보고 값만 추가해 apply
+* 정의 안 된 path → ALB fixed-response 404 (커스텀 룰도 유효 경로에서만 동작해 404 유지)
+* 자세한 절차: 아래 [WAF 운영](#waf-운영--관찰--차단) 섹션
 
 ## 환경 준비 — 설치 (Windows PowerShell)
 
@@ -196,7 +198,65 @@ aws eks update-kubeconfig --name wsi2026e-cluster --region ap-northeast-2
 kubectl -n app logs job/db-init        # "seed load done" 또는 "skipping seed"
 ```
 
+## WAF 운영 — 관찰 → 차단
+
+> 원칙: **처음부터 다 막지 않는다.** 기본 상태는 관리형 룰만 켜져 있어 정상 요청을 절대 안 막는다.
+> 트래픽이 시작되면 로그를 보고, 비정상 패턴만 **변수로** 추가한다. `waf.tf` 는 수정할 필요 없다.
+
+### 1. 관찰 (트래픽 시작 후)
+
+```powershell
+cd ..\tuning
+python waf_header_stats.py --log-group aws-waf-logs-wsi2026 --region us-east-1 --hours 1
+```
+
+출력 맨 위 **"아직 안 막힌 비정상/의심 요청"** 과 그 아래 **"제안: terraform.tfvars"** 를 본다.
+스크립트가 추가할 변수 값까지 뽑아준다.
+
+### 2. 차단 (변수만 추가하고 apply)
+
+`terraform/terraform.tfvars` 파일을 만들거나 열어서 (없으면 새로):
+
+```hcl
+# 예: 관찰 결과에 맞춰 필요한 것만
+waf_blocked_user_agents   = ["sqlmap", "nikto", "attack"]                # UA 에 포함되면 403
+waf_blocked_headers       = ["x-junk", "x-debug"]                        # 헤더가 존재하면 403
+waf_blocked_header_values = [{ header = "referer", value = "evil.com" }] # 헤더 값에 포함되면 403
+waf_blocked_body_patterns = ["$ne", "sleep("]                            # body 에 포함되면 403
+waf_block_private_xff     = true                                         # XFF 위조(사설 IP) 403
+```
+
+```powershell
+terraform apply -auto-approve -var "k8s_provider_ready=true"
+```
+
+* 오차단이 걱정되면 `waf_custom_rule_action = "count"` 로 먼저 넣고 로그로 확인한 뒤 `"block"` 으로.
+* 커스텀 룰은 **유효 엔드포인트에서만** 동작 → 미정의 경로(`/.env` 등)는 여전히 404 (스펙 준수).
+* 룰 이름/개수는 변수 리스트에서 자동 생성되므로 추가/삭제 모두 변수 수정만으로 끝.
+
+### 3. 확인
+
+```powershell
+$EP = (terraform output -raw endpoint)
+curl.exe -s -o NUL -w "%{http_code}`n" -H "X-Junk: 1" "$EP/v1/user?email=x@x.org&requestid=1&uuid=1"  # 403
+curl.exe -s -o NUL -w "%{http_code}`n" "$EP/.env"                                                     # 404 (여전히)
+python ..\tuning\waf_header_stats.py --log-group aws-waf-logs-wsi2026 --region us-east-1 --hours 1     # 빈칸 될 때까지
+```
+
+> 마지막으로 대시보드/loadtest 의 `avail%` 가 안 떨어졌는지 확인 (정상 오차단 없음).
+
 ## 문제 변경 대응 (당일 ±30% 변경 대비)
+
+> **핵심: 경로·포트·헬스체크는 전부 변수다.** `terraform apply -var ...` 또는 `terraform.tfvars` 로 바꾸면
+> ALB·WAF·CloudFront·k8s(probe/Service) 에 **한 번에** 반영된다 (연쇄 수정 불필요).
+
+| 스펙 변경 | 변수 | 반영되는 곳 |
+|---|---|---|
+| API prefix 변경 (`/v1` → `/v2`) | `api_prefix` | ALB 리스너 경로, WAF scope-down, CloudFront product 캐시 |
+| 경로가 앱 이름과 불일치 | `api_paths_override = ["/v2/member", ...]` | WAF scope-down + ALB deny_direct (403/404 판정 기준) |
+| 헬스체크 경로 변경 | `healthcheck_path` | ALB TG 헬스체크·리스너 + k8s probe 6곳 |
+| 컨테이너 포트 변경 (8080 → 다른 값) | `container_port` | Deployment·probe·Service·ALB TG·SG 전부 |
+| 이미지 경로 변경 (`/images` → 다른 값) | `images_prefix` | CloudFront 캐시 동작 + URI rewrite 함수 |
 
 ### DB 관련
 
@@ -215,9 +275,10 @@ kubectl -n app logs job/db-init        # "seed load done" 또는 "skipping seed"
 | 문제지 변경 | 고칠 곳 | 비고 |
 |------------|---------|------|
 | **새 앱 바이너리** | `application/binary/` 덮어쓰기 + apply with 새 태그 | "대회 당일" 섹션 참고 |
-| **컨테이너 포트 변경** | `k8s_apps.tf` + `alb.tf` target group `port` | 세 곳 모두 일치 |
+| **컨테이너 포트 변경** | `variables.tf` `container_port` | Deployment·probe·Service·TG·SG 자동 반영 |
 | **새 환경변수 요구** | `k8s_base.tf` ConfigMap/Secret → `k8s_apps.tf` env | |
-| **이미지 경로 변경** | `cloudfront.tf` URI-rewrite function + path pattern | |
+| **이미지 경로 변경** | `variables.tf` `images_prefix` | CloudFront 캐시+rewrite 자동 반영 |
+| **API 경로 변경** | `variables.tf` `api_prefix` 또는 `api_paths_override` | ALB·WAF 자동 반영 |
 | **S3 버킷 이름 지정** | `s3.tf` `aws_s3_bucket.images.bucket` | |
 | **비정상 요청 응답코드 변경** | `waf.tf` (403) / `alb.tf` default (404) | |
 
@@ -226,10 +287,10 @@ kubectl -n app logs job/db-init        # "seed load done" 또는 "skipping seed"
 대회 중 새 앱 바이너리가 오면 **요청 형식(입력)이나 응답(출력)이 바뀔 수 있습니다.** 아래를 점검·수정합니다.
 
 **1) 요청 경로/파라미터가 바뀐 경우** (예: `/v1/user` → `/v2/user`, `email` → `mail`)
-- `waf.tf`: 관리형 룰의 `scope_down_statement` 에 있는 경로 문자열(`/v1/user`, `/v1/product`, `/v1/stress`)을 새 경로로 변경. (안 바꾸면 새 경로에 WAF 미적용 → 비정상 요청이 안 막힘)
-- `alb.tf`: 리스너 규칙에서 유효 경로 매칭을 쓰면 그 경로도 변경.
-- `cloudfront.tf`: 캐시 동작(cache behavior)의 path pattern(`/v1/product*`, `/images/*` 등)이 경로 기반이면 변경.
-- `부하/app.js`: 부하 도구의 `testUser`/`testProduct`/`testStress` 의 URL·파라미터도 새 스펙으로 변경.
+- **변수 하나로 끝**: prefix 만 바뀌면 `-var api_prefix=/v2`, 경로 자체가 다르면
+  `api_paths_override = ["/v2/member", ...]`. ALB 리스너·deny_direct(403/404 판정)·WAF scope-down·
+  CloudFront product 캐시가 전부 이 변수에서 계산되므로 **연쇄 수정이 없다**.
+- `부하/app.js` / `tuning/config.ps1`: 부하 도구의 URL·파라미터는 별도로 새 스펙으로 변경.
 
 **2) 요청 body 필드가 바뀐 경우** (예: `length` → `size`)
 - 앱이 알아서 처리하므로 인프라 수정은 대부분 불필요.
@@ -245,13 +306,11 @@ kubectl -n app logs job/db-init        # "seed load done" 또는 "skipping seed"
 - `k8s_apps.tf`: 해당 Deployment 의 `env_from` 로 이미 주입되므로, 같은 Secret/ConfigMap 에 넣으면 자동 반영. 새 소스면 `env_from` 블록 추가.
 
 **5) 포트가 바뀐 경우** (8080 → 다른 값)
-- `k8s_apps.tf`: 3개 앱의 `container_port`, `readiness_probe`/`liveness_probe` 의 `port`, Service 의 `target_port`
-- `alb.tf`: target group `port`
-- → **총 여러 곳을 모두 같은 값으로** 맞춰야 함.
+- `-var container_port=<새포트>` 하나로 Deployment·probe·Service·ALB TG·SG 전부 반영.
 
 **6) 이미지 저장/다운로드 경로가 바뀐 경우**
-- `cloudfront.tf`: `/images/*` URI-rewrite function 과 path pattern
-- `부하/app.js`: `testImage` 의 다운로드 경로, `uploadProductImage` 의 업로드 필드
+- `-var images_prefix=/newpath` 하나로 CloudFront path pattern + URI-rewrite 함수 반영.
+- `부하/app.js`: `testImage` 의 다운로드 경로, `uploadProductImage` 의 업로드 필드는 별도 변경.
 
 > 변경 후에는 반드시 `terraform apply -auto-approve -var "k8s_provider_ready=true"` 로 반영하고,
 > `부하` 도구로 스모크 테스트하여 user/product/stress/이미지/WAF 가 정상인지 확인합니다.
@@ -268,8 +327,8 @@ kubectl -n app logs job/db-init        # "seed load done" 또는 "skipping seed"
 
 > **변경 시 자주 놓치는 연쇄 의존**:
 > * 스키마명(`dev`) 변경 → **덤프의 `USE` 문**도 같이
-> * 포트 변경 → Deployment·probe·Service·ALB TG **4곳** 모두
-> * 엔드포인트 경로 변경 → ALB·WAF·CloudFront 중 **해당 계층** 확인
+> * 포트/경로 변경 → terraform 은 변수(`container_port`/`api_prefix` 등) 하나면 되지만,
+>   **부하 도구(`부하/app.js`, `tuning/config.ps1`)는 별도로** 새 스펙에 맞춰야 함
 
 ## 트러블슈팅
 

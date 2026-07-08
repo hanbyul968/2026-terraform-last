@@ -6,9 +6,13 @@ Windows 에는 heredoc 이 없으므로 파일로 분리하는 편이 깔끔하�
 
 사용법:
   python score.py report <outdir> <label> <slos>
-  python score.py score  <outdir> <slos> <avail_gate> <cost_penalty>
+  python score.py score  <outdir> <slos> <avail_gate> <cost_penalty> [focus_app]
 
   <slos> = "user=0.2,product=0.2,stress=1.0"
+  [focus_app] : 지정하면 perf 를 전체 평균 대신 그 앱의 perf 로 계산
+                (autotune.ps1 -App <앱> 앱별 튜닝 모드가 사용).
+                가용성 게이트는 여전히 모든 앱의 최소값 기준 — 다른 앱을 죽이는
+                조합이 이기지 못하게 한다.
 """
 import csv
 import sys
@@ -71,9 +75,11 @@ def main():
               f"(cost proxy avg/2 = {sum(ns)/len(ns)/2:.2f})")
     elif mode == "score":
         out, slo, gate, pen = sys.argv[2], parse_slo(sys.argv[3]), float(sys.argv[4]), float(sys.argv[5])
+        focus = sys.argv[6] if len(sys.argv) > 6 else None
         perf, avail, _ = load(out, slo)
         ns = nodes(out); navg = sum(ns) / len(ns)
-        avg = sum(perf.values()) / len(perf); mav = min(avail.values())
+        avg = perf[focus] if focus in perf else sum(perf.values()) / len(perf)
+        mav = min(avail.values())
         cost = max(0, (navg - 2)) * pen; g = 0 if mav >= gate else -50
         print(f"{avg:.1f} {mav:.1f} {navg:.2f} {avg-cost+g:.1f}")
     else:

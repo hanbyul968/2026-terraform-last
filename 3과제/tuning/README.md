@@ -117,11 +117,15 @@ nodes      min=2 max=6 avg=3.40  (cost proxy avg/2 = 1.70)
 ## autotune.ps1 — 그리드 자동 스윕
 
 ```powershell
-.\autotune.ps1 <endpoint> [duration]
+.\autotune.ps1 <endpoint> [-Duration 90s]            # 모든 앱 균일 (방향 탐색)
+.\autotune.ps1 <endpoint> -App stress                # 그 앱만 튜닝 (앱별 정밀) ★권장
 ```
-- config의 모든 앱에 **균일한 (cpu·util·min·max)** 조합을 차례로 적용(live `kubectl patch`, terraform 재apply 없음).
+- **기본 모드**: config의 모든 앱에 **균일한 (cpu·util·min·max)** 조합을 차례로 적용(live `kubectl patch`, terraform 재apply 없음). 대략적인 방향 탐색용.
+- **`-App <앱>` 모드**: **그 앱만** patch 하고 나머지는 현재 설정 유지. 점수도 그 앱의 perf 기준
+  (가용성 게이트는 여전히 전체 앱 최소값 — 다른 앱을 죽이는 조합은 탈락).
+  → **loadtest 로 병목 앱을 찾고 → 그 앱만 `-App` 으로 도는 것**이 낭비 없는 워크플로.
 - 조합당: patch → rollout → 45s 안정화 → loadtest → 채점.
-- 점수 = `평균 perf% − 노드비용패널티 − (가용성<GATE면 실격)`.
+- 점수 = `perf% − 노드비용패널티 − (가용성<GATE면 실격)`.
 - 끝나면 **우승 조합을 클러스터에 적용**하고 terraform 반영값을 출력.
 - 조합은 스크립트 상단 `$COMBOS`에서 추가/수정.
 
@@ -246,14 +250,15 @@ cd ..\terraform ; terraform apply -auto-approve
 
 > 한 번에 하나씩만 바꾸고 → `loadtest`로 재측정 → 효과 확인. 여러 개 동시에 바꾸면 뭐가 효과인지 모름.
 
-### autotune 우승값을 그대로 쓰면 안 되는 이유
-`autotune.ps1`는 **모든 앱에 똑같은 cpu/util**을 적용해 비교한다. 그래서 우승값(예: `300m 균일`)을
+### autotune 우승값을 그대로 쓰면 안 되는 이유 (기본 모드)
+기본 모드는 **모든 앱에 똑같은 cpu/util**을 적용해 비교한다. 그래서 우승값(예: `300m 균일`)을
 그대로 박으면:
 - user/product엔 **과함** → 노드 늘어 비용↑
 - stress엔 **부족** → 성능 그대로
 
-→ 우승값은 "대략 어느 방향"만 참고하고, **실제 반영은 앱별로 다르게** 한다.
-예) user/product `cpu=200m`, stress `cpu=750~900m`.
+→ 해결책은 **`-App` 모드**: 병목 앱만 골라 `.\autotune.ps1 <ep> -App stress` 로 돌리면
+그 앱만 patch/채점하므로 우승값을 **그 앱에 그대로 반영**해도 된다.
+예) user/product `cpu=200m` 유지, stress 만 `-App` 으로 `750~900m` 탐색.
 
 ### 점수 읽을 때 주의
 - `autotune`은 보통 **90초** 런이라 노이즈가 크다. 1~2점 차이는 **동률**로 본다.
@@ -300,7 +305,7 @@ cd ..\terraform ; terraform apply -auto-approve
 
 ### 한 줄 요약
 > 이 스크립트를 돌리면 **"지금 막아야 할 것"** 이 맨 위에 딱 나온다. 거기 뭔가 있으면 → 그 패턴을
-> `terraform/waf.tf`에 룰로 추가하고 `apply` → 다시 돌려서 그 칸이 빌 때까지 반복.
+> `terraform/terraform.tfvars` 의 `waf_blocked_*` 변수에 추가하고 `apply` → 다시 돌려서 그 칸이 빌 때까지 반복.
 
 ### 1. 실행
 ```powershell
@@ -337,9 +342,11 @@ python waf_header_stats.py --log-group aws-waf-logs-wsi2026 --region us-east-1 -
 |---|---|---|
 | `OK` | 정상 트래픽 (Host=cloudfront, gzip, UA=hey/Go/curl, json, /images/*) | 통과 |
 | `404` | **없는 경로** (`/.env` `/admin` `/v1/users` `/v2/user` `/v1/none`) | **404** (차단 아님!) |
-| `403-UA` | 악성 User-Agent (sqlmap 등 스캐너, attack) | **403 차단** |
-| `403-XFF` | X-Forwarded-For 위조 (127.0.0.1 같은 가짜 IP) | **403 차단** |
-| `403-HDR` | 비정상 헤더 (X-Junk 같은 쓰레기 헤더) | **403 차단** |
+| `403-UA` | 악성 User-Agent (sqlmap·nuclei 등 스캐너, attack) | **403 차단** |
+| `403-XFF` | X-Forwarded-For 위조 (127.0.0.1, 사설 IP, 169.254.x) | **403 차단** |
+| `SUSPECT` | **정상 트래픽에 없는 낯선 헤더** (`X-Junk`, `X-Debug` 등) | 값 보고 판단 — 공격이면 **403 차단**, 새 정상 스펙이면 무시 |
+
+> 경로가 바뀐 날은 `--api-paths "/v2/user,/v1/product,..."` 로 유효 경로를 맞춰줘야 404 판정이 정확하다.
 
 핵심 규칙 2개:
 - **없는 경로(/.env 등)는 막는 게 아니라 404** 다. (스펙: "제공 API 외 = 404")
@@ -388,45 +395,27 @@ OK  BLOCK  6137  /v1/user  Host  d35...cloudfront.net
 - `X-Forwarded-For: 127.0.0.1, …` → ③걸림(내부/루프백 IP = 위조)
 - `/wp-login.php` → 경로가 없는 것 = **404** (막지 않음)
 
-### 6. 막는 법 — 패턴 종류별 룰 (terraform/waf.tf 에 추가)
+### 6. 막는 법 — **변수만 추가** (waf.tf 수정 불필요!)
 
-`terraform/waf.tf`의 `aws_wafv2_web_acl.cloudfront` 안에 **rule 블록**을 추가한다 (priority는 안 쓰는 번호).
+WAF 커스텀 룰은 전부 **terraform 변수**로 생성된다. `terraform/terraform.tfvars` 에 값만 넣고 apply:
 
 ```hcl
-# (가) 악성 User-Agent — 이미 있는 BadUserAgent 의 regex 에 단어만 추가해도 됨
-#      regex_string = "(sqlmap|nikto|nmap|masscan|attack|wpscan|dirbuster|<새단어>)"
-
-# (나) 특정 헤더가 "있기만 하면" 차단 (예: X-Evil)
-rule {
-  name = "BlockXEvil"  priority = 6
-  action { block {} }
-  statement { size_constraint_statement {
-    comparison_operator = "GT"  size = 0
-    field_to_match { single_header { name = "x-evil" } }   # 헤더 이름은 소문자
-    text_transformation { priority = 0  type = "NONE" }
-  }}
-  visibility_config { cloudwatch_metrics_enabled = true  metric_name = "x-evil"  sampled_requests_enabled = true }
-}
-
-# (다) 특정 헤더 "값"에 문자열이 들어가면 차단 (예: Referer 에 evil.com)
-rule {
-  name = "BlockBadReferer"  priority = 7
-  action { block {} }
-  statement { byte_match_statement {
-    search_string = "evil.com"  positional_constraint = "CONTAINS"
-    field_to_match { single_header { name = "referer" } }
-    text_transformation { priority = 0  type = "LOWERCASE" }
-  }}
-  visibility_config { cloudwatch_metrics_enabled = true  metric_name = "bad-referer"  sampled_requests_enabled = true }
-}
+# terraform/terraform.tfvars — 관찰 결과에 맞춰 필요한 것만
+waf_blocked_user_agents   = ["sqlmap", "nikto", "attack"]                # (가) UA 에 포함되면 403
+waf_blocked_headers       = ["x-evil", "x-debug"]                        # (나) 헤더가 존재하면 403 (소문자)
+waf_blocked_header_values = [{ header = "referer", value = "evil.com" }] # (다) 헤더 값에 포함되면 403
+waf_blocked_body_patterns = ["$ne", "sleep("]                            # (라) body 에 포함되면 403
+waf_block_private_xff     = true                                         # (마) XFF 위조(사설 IP) 403
 ```
-> 더 많은 예(쿼리 인자 형식 검사 등)는 이미 적용된 `waf.tf`의 BadUserAgent/SpoofedForwardedFor/
-> OversizedJunkHeader 룰을 복사해서 헤더 이름·검색어만 바꾸면 된다.
+
+> * `waf_header_stats.py` 가 **"제안" 섹션**에 위 형식 그대로 뽑아준다 — 복붙하면 끝.
+> * 오차단 걱정되면 `waf_custom_rule_action = "count"` 로 먼저 넣고 로그 확인 후 `"block"`.
+> * 커스텀 룰은 유효 엔드포인트에서만 동작 → 없는 경로는 여전히 404 (스펙 준수).
 
 ### 7. 적용하고 확인
 
 ```powershell
-# 룰 추가 후 적용 (Windows, Docker 켜져 있어야 함)
+# 변수 추가 후 적용 (Windows, Docker 켜져 있어야 함)
 cd C:\Users\competitor\2026-terraform\3과제\terraform
 terraform apply -auto-approve -var is_windows=true
 ```
@@ -449,9 +438,9 @@ python waf_header_stats.py --log-group aws-waf-logs-wsi2026 --region us-east-1 -
 
 > 헷갈리면 **여기만** 본다. 표의 **한 행씩** 아래 순서대로 기계적으로 처리.
 >
-> 🤖 **자동으로 하고 싶으면**: 모니터링 대시보드(`tools/dashboard.py`)의 **「WAF분석」 탭**에
-> `waf_header_stats.py` 출력을 **붙여넣고 [분석]** 하면 → 막을 것 + waf.tf 룰(복붙) + 테스트 명령을
-> 자동으로 뽑아준다. (AI 없이 오프라인 동작) 아래는 그 원리/수동 절차.
+> 🤖 **자동으로 하고 싶으면**: `waf_header_stats.py` 가 출력 하단 **「제안」 섹션**에
+> `terraform.tfvars` 에 넣을 값을 그대로 뽑아준다 — 복붙 → apply → 재확인이 전부.
+> (대시보드 「WAF분석」 탭의 HCL 룰 출력은 구버전 방식 — 지금은 변수 방식이 정답)
 
 ### STEP 0 — 돌리기
 ```powershell
@@ -483,47 +472,18 @@ python waf_header_stats.py --log-group aws-waf-logs-wsi2026 --region us-east-1 -
 
 → **화이트리스트에 없으면 = 공격. STEP 3 으로.**
 
-### STEP 3 — 공격이면 **유형 찾아서 룰 복사** (아래 표에서 그대로)
+### STEP 3 — 공격이면 **변수에 값만 추가** (waf.tf 안 고침)
 
-| 이렇게 생겼으면 | 유형 | waf.tf 에 추가할 룰 (priority 는 안 쓰는 번호로) |
+| 이렇게 생겼으면 | 유형 | `terraform/terraform.tfvars` 에 추가 |
 |---|---|---|
-| `User-Agent`가 **도구/스캐너 이름** (sqlmap, nuclei, nikto, nmap, masscan, dirbuster, wpscan, "attack" 등) | 악성 UA | 기존 `BadUserAgent` regex 에 단어만 추가: `"(sqlmap\|nikto\|nmap\|masscan\|attack\|nuclei\|<새단어>)"` |
-| **처음 보는 헤더**가 그냥 존재 (`X-Junk`, `X-Debug`, `X-Original-URL` …) | 비정상 헤더 | 아래 (A) 복사, `name = "<그 헤더 소문자>"` 만 변경 |
-| 헤더 **값**에 나쁜 게 들어감 (남의 도메인, 내부/메타데이터 IP `169.254.169.254`, SQL `' OR '1'='1`) | 헤더 값 | 아래 (B) 복사, `single_header { name }` 와 `search_string` 변경 |
-| `X-Forwarded-For`에 **내부/루프백 IP** (`127.0.0.1`, `10.x`, `192.168.x`, `172.16~31.x`) | XFF 위조 | 아래 (C) 로 교체 (현재 룰은 127.0.0.1만 잡음) |
+| `User-Agent`가 **도구/스캐너 이름** (sqlmap, nuclei, nikto, nmap, masscan, dirbuster, wpscan, "attack" 등) | 악성 UA | `waf_blocked_user_agents = ["sqlmap", "<새단어>"]` |
+| **처음 보는 헤더**가 그냥 존재 (`X-Junk`, `X-Debug`, `X-Original-URL` …) | 비정상 헤더 | `waf_blocked_headers = ["x-debug"]` (소문자) |
+| 헤더 **값**에 나쁜 게 들어감 (남의 도메인, 내부/메타데이터 IP `169.254.169.254`, SQL `' OR '1'='1`) | 헤더 값 | `waf_blocked_header_values = [{ header = "referer", value = "169.254.169.254" }]` |
+| `X-Forwarded-For`에 **내부/루프백 IP** (`127.0.0.1`, `10.x`, `192.168.x`, `172.16~31.x`, `169.254.x`) | XFF 위조 | `waf_block_private_xff = true` |
+| body 에 공격 토큰 (`$ne`, `sleep(`, `benchmark(` …) | body 패턴 | `waf_blocked_body_patterns = ["$ne"]` |
 
-```hcl
-# (A) 특정 헤더가 "있기만 하면" 차단
-rule {
-  name = "BlockHeader_<X-Debug>"  priority = 6
-  action { block {} }
-  statement { size_constraint_statement {
-    comparison_operator = "GT"  size = 0
-    field_to_match { single_header { name = "x-debug" } }   # ← 소문자
-    text_transformation { priority = 0  type = "NONE" }
-  }}
-  visibility_config { cloudwatch_metrics_enabled = true  metric_name = "x-debug"  sampled_requests_enabled = true }
-}
-
-# (B) 특정 헤더 "값"에 문자열이 들어가면 차단
-rule {
-  name = "BlockValue_<Referer>"  priority = 7
-  action { block {} }
-  statement { byte_match_statement {
-    search_string = "169.254.169.254"  positional_constraint = "CONTAINS"   # ← 막을 문자열
-    field_to_match { single_header { name = "referer" } }                    # ← 헤더
-    text_transformation { priority = 0  type = "LOWERCASE" }
-  }}
-  visibility_config { cloudwatch_metrics_enabled = true  metric_name = "bad-referer"  sampled_requests_enabled = true }
-}
-
-# (C) X-Forwarded-For 위조 (내부/사설 IP) — 기존 SpoofedForwardedFor 의 byte_match 를 이 regex_match 로 교체
-#     statement { regex_match_statement {
-#       regex_string = "(127\.0\.0\.1|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)"
-#       field_to_match { single_header { name = "x-forwarded-for" } }
-#       text_transformation { priority = 0  type = "NONE" }
-#     }}
-```
+> `waf_header_stats.py` 의 **"제안" 섹션**이 위 값을 그대로 뽑아준다. 복붙 후 STEP 4.
+> 확신 없으면 `waf_custom_rule_action = "count"` 로 먼저 관찰.
 
 ### STEP 4 — 적용 & 재확인
 ```powershell
@@ -553,5 +513,5 @@ python waf_header_stats.py --log-group aws-waf-logs-wsi2026 --region us-east-1 -
       정상 헤더/값?  ─예→  통과 (그냥 둠)
             │ 아니오
             ▼
-      유형 찾아 룰 복사 (UA / 헤더존재 / 헤더값 / XFF) → apply → 재확인
+      유형 찾아 변수에 값 추가 (UA / 헤더존재 / 헤더값 / XFF / body) → apply → 재확인
 ```

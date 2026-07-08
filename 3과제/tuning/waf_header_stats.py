@@ -43,25 +43,57 @@ fields `httpRequest.headers.{i}.name`  as header_key,
 """
 
 # ---- 판정 규칙 (스펙 + waf.tf/alb.tf 와 일치) ----
+# 경로가 바뀌면 --api-paths 로 덮어쓸 수 있다 (terraform var.api_prefix/api_paths_override 와 동일하게).
 VALID_EP = {"/v1/user", "/v1/product", "/v1/stress", "/healthcheck"}
-SCANNERS = ("sqlmap", "nikto", "nmap", "masscan", "acunetix", "havij", "attack")
+IMAGES_PREFIX = "/images/"
+SCANNERS = ("sqlmap", "nikto", "nmap", "masscan", "acunetix", "havij", "attack",
+            "nuclei", "wpscan", "dirbuster", "gobuster", "hydra", "zgrab")
+# 정상 트래픽에 항상 존재하는 표준 헤더 — 이 외의 낯선 헤더는 "의심" 후보로 표시.
+NORMAL_HEADERS = {"host", "user-agent", "accept", "accept-encoding", "accept-language",
+                  "content-type", "content-length", "connection", "x-forwarded-for",
+                  "x-forwarded-proto", "x-forwarded-port", "via", "x-amz-cf-id",
+                  "x-origin-verify", "cloudfront-viewer-country", "cache-control", "pragma"}
+PRIVATE_XFF = ("127.", "10.", "192.168.", "169.254.",
+               *tuple(f"172.{i}." for i in range(16, 32)))
 
 
 def verdict(header_key, header_value, endpoint):
     """이 (헤더, 엔드포인트) 조합이 어떻게 처리돼야 하는지."""
     ep = (endpoint or "").split("?")[0]
-    valid = ep in VALID_EP or ep.startswith("/images/")
+    valid = ep in VALID_EP or ep.startswith(IMAGES_PREFIX)
     if not valid:
         return "404"          # 제공 API 외 경로 → 404 (ALB default)
     hk = (header_key or "").lower()
     hv = (header_value or "")
     if hk == "user-agent" and any(s in hv.lower() for s in SCANNERS):
         return "403-UA"       # 악성 User-Agent
-    if hk == "x-forwarded-for" and "127.0.0.1" in hv:
-        return "403-XFF"      # XFF 위조
-    if hk == "x-junk":
-        return "403-HDR"      # 비정상 헤더
+    if hk == "x-forwarded-for" and any(p in hv for p in PRIVATE_XFF):
+        return "403-XFF"      # XFF 위조 (루프백/사설/메타데이터 IP)
+    if hk not in NORMAL_HEADERS:
+        return "SUSPECT"      # 정상 트래픽에 없는 낯선 헤더 → 사람이 판단 후 차단 후보
     return "OK"               # 정상
+
+
+def suggest_tfvars(gaps):
+    """안 막힌 비정상/의심 요청 → terraform 변수 제안 (waf.tf 는 변수만 바꾸면 됨)."""
+    uas, headers, xff = set(), set(), False
+    for (hk, hv, ep, act, st), cnt in gaps:
+        v = verdict(hk, hv, ep)
+        if v == "403-UA":
+            hvl = (hv or "").lower()
+            uas.update(s for s in SCANNERS if s in hvl)
+        elif v == "403-XFF":
+            xff = True
+        elif v == "SUSPECT":
+            headers.add((hk or "").lower())
+    lines = []
+    if uas:
+        lines.append(f'waf_blocked_user_agents   = [{", ".join(repr(u) for u in sorted(uas))}]'.replace("'", '"'))
+    if headers:
+        lines.append(f'waf_blocked_headers       = [{", ".join(repr(h) for h in sorted(headers))}]'.replace("'", '"'))
+    if xff:
+        lines.append('waf_block_private_xff     = true')
+    return lines
 
 
 def run_query(logs, log_group, start_ts, end_ts, index, limit, poll=2.0, timeout=300):
@@ -117,7 +149,18 @@ def main():
     ap.add_argument("--limit", type=int, default=10000, help="인덱스별 쿼리 행수 제한")
     ap.add_argument("--top", type=int, default=100, help="전체 표 상위 N행")
     ap.add_argument("--output", default=None, help="CSV 출력 경로")
+    ap.add_argument("--api-paths", default=None,
+                    help="유효 API 경로 콤마 목록 (기본: /v1/user,/v1/product,/v1/stress,/healthcheck). "
+                         "대회날 경로가 바뀌면 terraform var 와 동일하게 지정.")
+    ap.add_argument("--images-prefix", default=None, help="이미지 경로 prefix (기본 /images/)")
     args = ap.parse_args()
+
+    global IMAGES_PREFIX
+    if args.api_paths:
+        VALID_EP.clear()
+        VALID_EP.update(p.strip() for p in args.api_paths.split(",") if p.strip())
+    if args.images_prefix:
+        IMAGES_PREFIX = args.images_prefix if args.images_prefix.endswith("/") else args.images_prefix + "/"
 
     end_ts = args.end if args.end is not None else int(time.time())
     start_ts = args.start if args.start is not None else end_ts - int(args.hours * 3600)
@@ -166,20 +209,31 @@ def main():
     for a, c in sorted(act_sum.items(), key=lambda x: -x[1]):
         print(f"  {a:<8} {c}")
 
-    # ---- 2) 아직 안 막힌 비정상 요청 (403대상인데 BLOCK 아님) ----
+    # ---- 2) 아직 안 막힌 비정상/의심 요청 (403대상 또는 낯선 헤더인데 BLOCK 아님) ----
     gaps = [((hk, hv, ep, act, st), cnt) for (hk, hv, ep, act, st), cnt in merged
-            if verdict(hk, hv, ep).startswith("403") and (act or "").upper() != "BLOCK"]
-    print("\n=== ⚠ 아직 안 막힌 비정상 요청 (막아야 할 것) ===")
+            if verdict(hk, hv, ep) in ("403-UA", "403-XFF", "SUSPECT")
+            and (act or "").upper() != "BLOCK"]
+    print("\n=== ⚠ 아직 안 막힌 비정상/의심 요청 ===")
     if not gaps:
-        print("  없음 — 403대상이 모두 BLOCK 되고 있음 👍")
+        print("  없음 — 차단 대상이 모두 BLOCK 되고 있음 👍")
     else:
         rows = [[verdict(hk, hv, ep), act or "-", st or "-", cnt, _short(ep, 22), hk, _short(hv, 30)]
                 for (hk, hv, ep, act, st), cnt in gaps]
         print(_table(rows, ["판정", "WAF", "status", "cnt", "endpoint", "header", "value"]))
+        print("  * SUSPECT = 정상 트래픽에 없는 낯선 헤더. 값을 보고 공격이면 차단, 새 정상 스펙이면 무시.")
+
+        # ---- 2b) terraform 변수 제안 (waf.tf 는 안 고쳐도 됨) ----
+        sug = suggest_tfvars(gaps)
+        if sug:
+            print("\n=== 제안: terraform/terraform.tfvars 에 추가 (또는 -var) 후 apply ===")
+            for line in sug:
+                print("  " + line)
+            print("  # 오차단 걱정되면 먼저: waf_custom_rule_action = \"count\" 로 관찰 후 \"block\"")
+            print("  # 적용: cd ..\\terraform ; terraform apply -auto-approve -var \"k8s_provider_ready=true\"")
 
     # ---- 3) 전체 표 ----
     print("\n=== 전체 (상위 %d) ===" % args.top)
-    print("판정 범례: 404=미정의경로(정상404)  403-UA=악성UA  403-XFF=XFF위조  403-HDR=비정상헤더  OK=정상")
+    print("판정 범례: 404=미정의경로(정상404)  403-UA=악성UA  403-XFF=XFF위조  SUSPECT=낯선헤더(판단필요)  OK=정상")
     rows = [[verdict(hk, hv, ep), act or "-", st or "-", cnt, _short(ep, 22), hk, _short(hv, 30)]
             for (hk, hv, ep, act, st), cnt in merged[: args.top]]
     print(_table(rows, ["판정", "WAF", "status", "cnt", "endpoint", "header", "value"]))

@@ -8,16 +8,18 @@ resource "aws_cloudfront_origin_access_control" "s3" {
   signing_protocol                  = "sigv4"
 }
 
-# CloudFront Function: rewrite /images/foo.jpg → /foo.jpg so S3 key matches.
+# CloudFront Function: rewrite <images_prefix>/foo.jpg → /foo.jpg so S3 key matches.
+# prefix 가 바뀌면 var.images_prefix 만 수정 (함수/캐시 동작 모두 자동 반영).
 resource "aws_cloudfront_function" "strip_images_prefix" {
   name    = "${local.name}-strip-images"
   runtime = "cloudfront-js-2.0"
   publish = true
   code    = <<-EOT
+    var PREFIX = '${var.images_prefix}/';
     function handler(event) {
       var req = event.request;
-      if (req.uri.indexOf('/images/') === 0) {
-        req.uri = req.uri.substring(7); // strip "/images"
+      if (req.uri.indexOf(PREFIX) === 0) {
+        req.uri = req.uri.substring(PREFIX.length - 1); // strip prefix, keep leading '/'
       }
       return req;
     }
@@ -71,7 +73,7 @@ resource "aws_cloudfront_distribution" "this" {
 
   # product GET — cache by querystring id for 10s. Same id repeated → hit cache.
   ordered_cache_behavior {
-    path_pattern           = "/v1/product*"
+    path_pattern           = "${var.api_prefix}/product*"
     target_origin_id       = "alb"
     viewer_protocol_policy = "allow-all"
     allowed_methods        = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
@@ -82,9 +84,9 @@ resource "aws_cloudfront_distribution" "this" {
     origin_request_policy_id = data.aws_cloudfront_origin_request_policy.all_viewer.id
   }
 
-  # /images/* → S3
+  # <images_prefix>/* → S3
   ordered_cache_behavior {
-    path_pattern           = "/images/*"
+    path_pattern           = "${var.images_prefix}/*"
     target_origin_id       = "s3-images"
     viewer_protocol_policy = "allow-all"
     allowed_methods        = ["GET", "HEAD"]

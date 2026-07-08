@@ -4,15 +4,20 @@
   각 조합마다 채점 스타일 부하 테스트를 돌려 rubric(성능효율+고가용성+비용)으로 점수화,
   최고 조합을 선언하고 그대로 적용해 둔다.
 
-  각 조합은 config.ps1 의 모든 앱에 동일한 (cpu request, HPA util, min, max) 를 적용한다.
+  두 가지 모드:
+    (기본)      각 조합을 config.ps1 의 모든 앱에 동일하게 적용 — 대략적인 방향 탐색.
+    -App <앱>   그 앱만 patch, 나머지 앱은 현재 설정 유지 — 앱별 정밀 튜닝.
+                점수도 그 앱의 perf 기준(가용성 게이트는 여전히 전체 최소값).
+                → 병목 앱을 loadtest 로 찾은 뒤, 그 앱만 -App 으로 돌리는 것을 권장.
 
   사용법:
-    .\autotune.ps1 <endpoint> [duration]
+    .\autotune.ps1 <endpoint> [-Duration 90s] [-App stress]
 #>
 [CmdletBinding()]
 param(
   [Parameter(Mandatory = $true)][string]$Endpoint,
-  [string]$Duration = '90s'
+  [string]$Duration = '90s',
+  [string]$App = ''
 )
 $ErrorActionPreference = 'Continue'
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -30,6 +35,14 @@ $Results = Join-Path $env:TEMP 'autotune-results.csv'
 
 $APPS = $APIS | ForEach-Object { $_.name }
 
+# -App 지정 시 그 앱만 patch (나머지는 현재 설정 유지). 미지정이면 전체.
+if ($App) {
+  if ($APPS -notcontains $App) { Write-Error "unknown app '$App' — config.ps1 의 앱: $($APPS -join ', ')"; exit 1 }
+  $TUNE_APPS = @($App)
+} else {
+  $TUNE_APPS = $APPS
+}
+
 # --- 후보 그리드: name | cpu | util | min | max (모든 앱에 적용) ---
 $COMBOS = @(
   @{ name = 'baseline';       cpu = '300m'; util = 55; min = 2; max = 10 }
@@ -42,22 +55,27 @@ $COMBOS = @(
 
 function Invoke-PatchAll {
   param($cpu, $util, $min, $max)
-  foreach ($app in $APPS) {
+  foreach ($app in $TUNE_APPS) {
     kubectl -n $NS set resources "deploy/$app" --requests=cpu=$cpu 2>$null | Out-Null
     $patch = @{ spec = @{ minReplicas = $min; maxReplicas = $max; metrics = @(@{ type = 'Resource'; resource = @{ name = 'cpu'; target = @{ type = 'Utilization'; averageUtilization = $util } } }) } } | ConvertTo-Json -Depth 10 -Compress
     kubectl -n $NS patch hpa $app --type=merge -p $patch 2>$null | Out-Null
   }
-  foreach ($app in $APPS) { kubectl -n $NS rollout status "deploy/$app" --timeout=180s 2>$null | Out-Null }
+  foreach ($app in $TUNE_APPS) { kubectl -n $NS rollout status "deploy/$app" --timeout=180s 2>$null | Out-Null }
 }
 
 function Get-TrialScore {
   param($Label)
   $out = Join-Path $env:TEMP "tune-$Label"
-  # score.py score -> "avg mav navg score"
-  (python (Join-Path $Here 'score.py') score $out $SLOS $AVAIL_GATE $COST_PENALTY) -split '\s+'
+  # score.py score -> "avg mav navg score" (-App 모드면 perf 는 그 앱 기준)
+  if ($App) {
+    (python (Join-Path $Here 'score.py') score $out $SLOS $AVAIL_GATE $COST_PENALTY $App) -split '\s+'
+  } else {
+    (python (Join-Path $Here 'score.py') score $out $SLOS $AVAIL_GATE $COST_PENALTY) -split '\s+'
+  }
 }
 
-Write-Host "### autotune: $($COMBOS.Count) combos x $Duration  apps=[$($APPS -join ' ')]  endpoint=$EP"
+$modeDesc = if ($App) { "tuning ONLY [$App] (others untouched)" } else { "tuning ALL [$($APPS -join ' ')] uniformly" }
+Write-Host "### autotune: $($COMBOS.Count) combos x $Duration  $modeDesc  endpoint=$EP"
 foreach ($c in $COMBOS) {
   Write-Host ''
   Write-Host ">>> combo=$($c.name)  cpu=$($c.cpu) util=$($c.util) replicas=$($c.min)-$($c.max)"
@@ -81,8 +99,15 @@ $win = $COMBOS | Where-Object { $_.name -eq $WName } | Select-Object -First 1
 if ($win) {
   Invoke-PatchAll $win.cpu $win.util $win.min $win.max
   Write-Host ''
-  Write-Host '### terraform/k8s_apps.tf 반영값 (모든 앱):'
+  if ($App) {
+    Write-Host "### terraform/k8s_apps.tf 반영값 ($App 만):"
+  } else {
+    Write-Host '### terraform/k8s_apps.tf 반영값 (모든 앱 균일 — 방향 참고용, 실제 반영은 앱별로):'
+  }
   Write-Host ("  requests.cpu = `"{0}`",  HPA averageUtilization = {1},  min={2} max={3}" -f $win.cpu, $win.util, $win.min, $win.max)
+  if (-not $App) {
+    Write-Host '  TIP: 병목 앱만 정밀 튜닝하려면  .\autotune.ps1 <endpoint> -App <앱이름>'
+  }
 }
 Write-Host ''
 Write-Host "Full results: $Results"

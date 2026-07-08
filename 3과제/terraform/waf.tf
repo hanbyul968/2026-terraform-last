@@ -1,10 +1,25 @@
 # WAFv2 attached to CloudFront (scope=CLOUDFRONT, must live in us-east-1).
-# Inspects VIEWER requests at the edge: bad uuid → 403, plus AWS managed rules.
-# Unknown paths still return 404 via the ALB default action.
 #
-# NOTE: the "direct-to-ALB" (origin-verify) check is NOT here — CloudFront WAF
-# runs before CloudFront injects the X-Origin-Verify header, so it can't see it.
-# That check lives on the ALB as a listener rule (see alb.tf) and still 403s.
+# ===== 운영 원칙 (대회날): "관찰 → 차단" =====
+# 1) 기본 상태에서는 AWS 관리형 룰(공격 시그니처 기반, 정상 요청 오탐 거의 없음)만 켜져 있다.
+#    임의 커스텀 차단 룰은 전부 변수(waf_blocked_*)이고 기본값이 비어 있음
+#    → 처음에는 아무 정상 요청도 오차단하지 않는다 (가용성 점수 최우선).
+# 2) 트래픽 시작 후 관찰:
+#      python ..\tuning\waf_header_stats.py --log-group aws-waf-logs-<project> --region us-east-1 --hours 1
+#    → "아직 안 막힌 비정상 요청" + 추가할 tfvars 제안까지 출력해준다.
+# 3) 차단은 변수로만 추가 (waf.tf 수정 불필요). terraform.tfvars 또는 -var 로:
+#      waf_blocked_user_agents   = ["sqlmap", "nikto", "attack"]        # UA에 포함되면 403
+#      waf_blocked_headers       = ["x-junk", "x-debug"]                # 헤더가 존재하면 403
+#      waf_blocked_header_values = [{ header = "referer", value = "evil.com" }]
+#      waf_blocked_body_patterns = ["$ne", "sleep("]                    # body에 포함되면 403
+#      waf_block_private_xff     = true                                 # XFF 위조(사설IP) 403
+#    확신 없으면 waf_custom_rule_action = "count" 로 먼저 넣고 로그 확인 후 "block".
+# 4) 커스텀 룰은 모두 "유효 엔드포인트"(local.waf_block_scope_regex)에서만 동작한다.
+#    미정의 경로(/.env 등)는 커스텀 룰을 건너뛰고 ALB default 404 → 스펙(403/404 구분) 준수.
+#
+# NOTE: "direct-to-ALB"(origin-verify) 검사는 여기 없음 — CloudFront WAF 는
+# CloudFront 가 X-Origin-Verify 헤더를 넣기 전(viewer 단계)에 실행되므로 볼 수 없다.
+# 그 검사는 ALB 리스너 규칙(alb.tf)에 있고 여전히 403 을 반환한다.
 
 # Secret shared between CloudFront (injects header) and the ALB listener rule
 # (verifies it). Requests without it didn't come through CloudFront → 403.
@@ -23,175 +38,285 @@ resource "aws_wafv2_web_acl" "cloudfront" {
     allow {}
   }
 
-  # 악성 User-Agent (sqlmap 등 스캐너, "attack") → 403
-  rule {
-    name     = "BadUserAgent"
-    priority = 3
-    action {
-      block {}
-    }
-    statement {
-      regex_match_statement {
-        regex_string = "(sqlmap|nikto|nmap|masscan|acunetix|havij|attack)"
-        field_to_match {
-          single_header {
-            name = "user-agent"
-          }
+  # ---------- 커스텀 룰 (변수 기반, 기본 비활성) ----------
+  # 각 룰의 action 은 var.waf_custom_rule_action ("block" | "count") 을 따른다.
+
+  # (1) 악성 User-Agent — var.waf_blocked_user_agents 가 비어있지 않으면 생성
+  dynamic "rule" {
+    for_each = length(var.waf_blocked_user_agents) > 0 ? [1] : []
+    content {
+      name     = "BlockedUserAgents"
+      priority = 1
+      action {
+        dynamic "block" {
+          for_each = var.waf_custom_rule_action == "block" ? [1] : []
+          content {}
         }
-        text_transformation {
-          priority = 0
-          type     = "LOWERCASE"
+        dynamic "count" {
+          for_each = var.waf_custom_rule_action == "count" ? [1] : []
+          content {}
         }
       }
-    }
-    visibility_config {
-      cloudwatch_metrics_enabled = true
-      metric_name                = "bad-user-agent"
-      sampled_requests_enabled   = true
+      statement {
+        and_statement {
+          statement {
+            regex_match_statement {
+              regex_string = local.waf_block_scope_regex
+              field_to_match {
+                uri_path {}
+              }
+              text_transformation {
+                priority = 0
+                type     = "NONE"
+              }
+            }
+          }
+          statement {
+            regex_match_statement {
+              regex_string = "(${join("|", [for ua in var.waf_blocked_user_agents : lower(ua)])})"
+              field_to_match {
+                single_header {
+                  name = "user-agent"
+                }
+              }
+              text_transformation {
+                priority = 0
+                type     = "LOWERCASE"
+              }
+            }
+          }
+        }
+      }
+      visibility_config {
+        cloudwatch_metrics_enabled = true
+        metric_name                = "blocked-user-agents"
+        sampled_requests_enabled   = true
+      }
     }
   }
 
-  # X-Forwarded-For 위조(루프백/사설 IP 삽입) → 403
-  rule {
-    name     = "SpoofedForwardedFor"
-    priority = 4
-    action {
-      block {}
-    }
-    statement {
-      byte_match_statement {
-        search_string         = "127.0.0.1"
-        positional_constraint = "CONTAINS"
-        field_to_match {
-          single_header {
-            name = "x-forwarded-for"
-          }
+  # (2) X-Forwarded-For 위조 (루프백/사설/메타데이터 IP) — var.waf_block_private_xff = true 면 생성
+  dynamic "rule" {
+    for_each = var.waf_block_private_xff ? [1] : []
+    content {
+      name     = "SpoofedForwardedFor"
+      priority = 2
+      action {
+        dynamic "block" {
+          for_each = var.waf_custom_rule_action == "block" ? [1] : []
+          content {}
         }
-        text_transformation {
-          priority = 0
-          type     = "NONE"
+        dynamic "count" {
+          for_each = var.waf_custom_rule_action == "count" ? [1] : []
+          content {}
         }
       }
-    }
-    visibility_config {
-      cloudwatch_metrics_enabled = true
-      metric_name                = "spoofed-xff"
-      sampled_requests_enabled   = true
+      statement {
+        and_statement {
+          statement {
+            regex_match_statement {
+              regex_string = local.waf_block_scope_regex
+              field_to_match {
+                uri_path {}
+              }
+              text_transformation {
+                priority = 0
+                type     = "NONE"
+              }
+            }
+          }
+          statement {
+            regex_match_statement {
+              regex_string = "(^|,)\\s*(127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.|169\\.254\\.)"
+              field_to_match {
+                single_header {
+                  name = "x-forwarded-for"
+                }
+              }
+              text_transformation {
+                priority = 0
+                type     = "NONE"
+              }
+            }
+          }
+        }
+      }
+      visibility_config {
+        cloudwatch_metrics_enabled = true
+        metric_name                = "spoofed-xff"
+        sampled_requests_enabled   = true
+      }
     }
   }
 
-  # 비정상 커스텀 헤더(X-Junk) 존재 → 403
-  rule {
-    name     = "OversizedJunkHeader"
-    priority = 5
-    action {
-      block {}
-    }
-    statement {
-      size_constraint_statement {
-        comparison_operator = "GT"
-        size                = 0
-        field_to_match {
-          single_header {
-            name = "x-junk"
-          }
+  # (3) 비정상 헤더 존재 — var.waf_blocked_headers 의 헤더가 "있기만 하면" 차단 (헤더당 룰 1개)
+  dynamic "rule" {
+    for_each = { for i, h in var.waf_blocked_headers : lower(h) => i }
+    content {
+      name     = "BlockedHeader-${replace(rule.key, "/[^a-z0-9-]/", "-")}"
+      priority = 40 + rule.value
+      action {
+        dynamic "block" {
+          for_each = var.waf_custom_rule_action == "block" ? [1] : []
+          content {}
         }
-        text_transformation {
-          priority = 0
-          type     = "NONE"
+        dynamic "count" {
+          for_each = var.waf_custom_rule_action == "count" ? [1] : []
+          content {}
         }
       }
-    }
-    visibility_config {
-      cloudwatch_metrics_enabled = true
-      metric_name                = "junk-header"
-      sampled_requests_enabled   = true
+      statement {
+        and_statement {
+          statement {
+            regex_match_statement {
+              regex_string = local.waf_block_scope_regex
+              field_to_match {
+                uri_path {}
+              }
+              text_transformation {
+                priority = 0
+                type     = "NONE"
+              }
+            }
+          }
+          statement {
+            size_constraint_statement {
+              comparison_operator = "GT"
+              size                = 0
+              field_to_match {
+                single_header {
+                  name = rule.key
+                }
+              }
+              text_transformation {
+                priority = 0
+                type     = "NONE"
+              }
+            }
+          }
+        }
+      }
+      visibility_config {
+        cloudwatch_metrics_enabled = true
+        metric_name                = "blocked-header-${replace(rule.key, "/[^a-z0-9-]/", "-")}"
+        sampled_requests_enabled   = true
+      }
     }
   }
 
-  # 관리형 룰(SQLi/XSS)이 못 잡는 비정상 body 패턴 → 403.
-  # 정상 요청 body 에는 절대 없고 공격에만 나오는 토큰만 검사 → 오탐(정상요청 차단) 방지.
-  rule {
-    name     = "AbnormalBodyPatterns"
-    priority = 6
-    action {
-      block {}
-    }
-    statement {
-      or_statement {
-        statement {
-          byte_match_statement {
-            search_string         = "$ne"
-            positional_constraint = "CONTAINS"
-            field_to_match {
-              body {}
-            }
-            text_transformation {
-              priority = 0
-              type     = "NONE"
+  # (4) 특정 헤더 "값" 에 문자열 포함 — var.waf_blocked_header_values (항목당 룰 1개)
+  dynamic "rule" {
+    for_each = { for i, hv in var.waf_blocked_header_values : i => hv }
+    content {
+      name     = "BlockedHeaderValue-${rule.key}"
+      priority = 50 + tonumber(rule.key)
+      action {
+        dynamic "block" {
+          for_each = var.waf_custom_rule_action == "block" ? [1] : []
+          content {}
+        }
+        dynamic "count" {
+          for_each = var.waf_custom_rule_action == "count" ? [1] : []
+          content {}
+        }
+      }
+      statement {
+        and_statement {
+          statement {
+            regex_match_statement {
+              regex_string = local.waf_block_scope_regex
+              field_to_match {
+                uri_path {}
+              }
+              text_transformation {
+                priority = 0
+                type     = "NONE"
+              }
             }
           }
-        }
-        statement {
-          byte_match_statement {
-            search_string         = "$gt"
-            positional_constraint = "CONTAINS"
-            field_to_match {
-              body {}
-            }
-            text_transformation {
-              priority = 0
-              type     = "NONE"
-            }
-          }
-        }
-        statement {
-          byte_match_statement {
-            search_string         = "$where"
-            positional_constraint = "CONTAINS"
-            field_to_match {
-              body {}
-            }
-            text_transformation {
-              priority = 0
-              type     = "NONE"
-            }
-          }
-        }
-        statement {
-          byte_match_statement {
-            search_string         = "sleep("
-            positional_constraint = "CONTAINS"
-            field_to_match {
-              body {}
-            }
-            text_transformation {
-              priority = 0
-              type     = "LOWERCASE"
-            }
-          }
-        }
-        statement {
-          byte_match_statement {
-            search_string         = "benchmark("
-            positional_constraint = "CONTAINS"
-            field_to_match {
-              body {}
-            }
-            text_transformation {
-              priority = 0
-              type     = "LOWERCASE"
+          statement {
+            byte_match_statement {
+              search_string         = lower(rule.value.value)
+              positional_constraint = "CONTAINS"
+              field_to_match {
+                single_header {
+                  name = lower(rule.value.header)
+                }
+              }
+              text_transformation {
+                priority = 0
+                type     = "LOWERCASE"
+              }
             }
           }
         }
       }
-    }
-    visibility_config {
-      cloudwatch_metrics_enabled = true
-      metric_name                = "abnormal-body"
-      sampled_requests_enabled   = true
+      visibility_config {
+        cloudwatch_metrics_enabled = true
+        metric_name                = "blocked-header-value-${rule.key}"
+        sampled_requests_enabled   = true
+      }
     }
   }
+
+  # (5) 비정상 body 패턴 — var.waf_blocked_body_patterns (패턴당 룰 1개).
+  # 정상 요청 body 에 절대 없는 토큰만 넣을 것 (오탐 = 가용성 점수 하락).
+  dynamic "rule" {
+    for_each = { for i, p in var.waf_blocked_body_patterns : i => p }
+    content {
+      name     = "BlockedBodyPattern-${rule.key}"
+      priority = 60 + tonumber(rule.key)
+      action {
+        dynamic "block" {
+          for_each = var.waf_custom_rule_action == "block" ? [1] : []
+          content {}
+        }
+        dynamic "count" {
+          for_each = var.waf_custom_rule_action == "count" ? [1] : []
+          content {}
+        }
+      }
+      statement {
+        and_statement {
+          statement {
+            regex_match_statement {
+              regex_string = local.waf_block_scope_regex
+              field_to_match {
+                uri_path {}
+              }
+              text_transformation {
+                priority = 0
+                type     = "NONE"
+              }
+            }
+          }
+          statement {
+            byte_match_statement {
+              search_string         = lower(rule.value)
+              positional_constraint = "CONTAINS"
+              field_to_match {
+                body {}
+              }
+              text_transformation {
+                priority = 0
+                type     = "LOWERCASE"
+              }
+            }
+          }
+        }
+      }
+      visibility_config {
+        cloudwatch_metrics_enabled = true
+        metric_name                = "blocked-body-${rule.key}"
+        sampled_requests_enabled   = true
+      }
+    }
+  }
+
+  # ---------- AWS 관리형 룰 (항상 켜짐, 시그니처 기반이라 정상 요청 안전) ----------
+  # scope_down = 유효 API 경로(local.api_path_regex)만 → 미정의 경로(/.env, /v1/users 등)는
+  # 관리형 룰을 건너뛰고 ALB default 로 가서 404 (403 아님, 스펙 준수).
+  # 경로가 바뀌면 var.api_prefix 또는 var.api_paths_override 만 수정.
 
   rule {
     name     = "AWSManagedRulesCommonRuleSet"
@@ -210,48 +335,15 @@ resource "aws_wafv2_web_acl" "cloudfront" {
             allow {}
           }
         }
-        # 유효 엔드포인트에만 관리형 룰 적용 → 미정의 경로(/.env, /v1/users 등)는
-        # 관리형 룰을 건너뛰고 ALB default 로 가서 404 (403 아님, 스펙 준수).
         scope_down_statement {
-          or_statement {
-            statement {
-              byte_match_statement {
-                search_string         = "/v1/user"
-                positional_constraint = "EXACTLY"
-                field_to_match {
-                  uri_path {}
-                }
-                text_transformation {
-                  priority = 0
-                  type     = "NONE"
-                }
-              }
+          regex_match_statement {
+            regex_string = local.api_path_regex
+            field_to_match {
+              uri_path {}
             }
-            statement {
-              byte_match_statement {
-                search_string         = "/v1/product"
-                positional_constraint = "EXACTLY"
-                field_to_match {
-                  uri_path {}
-                }
-                text_transformation {
-                  priority = 0
-                  type     = "NONE"
-                }
-              }
-            }
-            statement {
-              byte_match_statement {
-                search_string         = "/v1/stress"
-                positional_constraint = "EXACTLY"
-                field_to_match {
-                  uri_path {}
-                }
-                text_transformation {
-                  priority = 0
-                  type     = "NONE"
-                }
-              }
+            text_transformation {
+              priority = 0
+              type     = "NONE"
             }
           }
         }
@@ -275,45 +367,14 @@ resource "aws_wafv2_web_acl" "cloudfront" {
         name        = "AWSManagedRulesKnownBadInputsRuleSet"
         vendor_name = "AWS"
         scope_down_statement {
-          or_statement {
-            statement {
-              byte_match_statement {
-                search_string         = "/v1/user"
-                positional_constraint = "EXACTLY"
-                field_to_match {
-                  uri_path {}
-                }
-                text_transformation {
-                  priority = 0
-                  type     = "NONE"
-                }
-              }
+          regex_match_statement {
+            regex_string = local.api_path_regex
+            field_to_match {
+              uri_path {}
             }
-            statement {
-              byte_match_statement {
-                search_string         = "/v1/product"
-                positional_constraint = "EXACTLY"
-                field_to_match {
-                  uri_path {}
-                }
-                text_transformation {
-                  priority = 0
-                  type     = "NONE"
-                }
-              }
-            }
-            statement {
-              byte_match_statement {
-                search_string         = "/v1/stress"
-                positional_constraint = "EXACTLY"
-                field_to_match {
-                  uri_path {}
-                }
-                text_transformation {
-                  priority = 0
-                  type     = "NONE"
-                }
-              }
+            text_transformation {
+              priority = 0
+              type     = "NONE"
             }
           }
         }
@@ -337,45 +398,14 @@ resource "aws_wafv2_web_acl" "cloudfront" {
         name        = "AWSManagedRulesSQLiRuleSet"
         vendor_name = "AWS"
         scope_down_statement {
-          or_statement {
-            statement {
-              byte_match_statement {
-                search_string         = "/v1/user"
-                positional_constraint = "EXACTLY"
-                field_to_match {
-                  uri_path {}
-                }
-                text_transformation {
-                  priority = 0
-                  type     = "NONE"
-                }
-              }
+          regex_match_statement {
+            regex_string = local.api_path_regex
+            field_to_match {
+              uri_path {}
             }
-            statement {
-              byte_match_statement {
-                search_string         = "/v1/product"
-                positional_constraint = "EXACTLY"
-                field_to_match {
-                  uri_path {}
-                }
-                text_transformation {
-                  priority = 0
-                  type     = "NONE"
-                }
-              }
-            }
-            statement {
-              byte_match_statement {
-                search_string         = "/v1/stress"
-                positional_constraint = "EXACTLY"
-                field_to_match {
-                  uri_path {}
-                }
-                text_transformation {
-                  priority = 0
-                  type     = "NONE"
-                }
-              }
+            text_transformation {
+              priority = 0
+              type     = "NONE"
             }
           }
         }
@@ -398,7 +428,7 @@ resource "aws_wafv2_web_acl" "cloudfront" {
 
 # ----- WAF 로깅 (CloudFront scope → 반드시 us-east-1) -----
 # 로그그룹 이름은 반드시 "aws-waf-logs-" 로 시작해야 한다 (WAF 요구사항).
-# 모니터링: dashboard.py --waf-log-group aws-waf-logs-<project> --waf-region us-east-1
+# 관찰: python ..\tuning\waf_header_stats.py --log-group aws-waf-logs-<project> --region us-east-1 --hours 1
 resource "aws_cloudwatch_log_group" "waf" {
   provider          = aws.us_east_1
   name              = "aws-waf-logs-${local.name}"

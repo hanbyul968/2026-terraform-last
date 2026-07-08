@@ -43,7 +43,7 @@ resource "kubernetes_deployment" "user" {
           name              = "user"
           image             = "${local.ecr_url["user"]}:${local.app_image_tags["user"]}"
           image_pull_policy = "Always"
-          port { container_port = 8080 }
+          port { container_port = var.container_port }
           env_from {
             secret_ref { name = kubernetes_secret.db.metadata[0].name }
           }
@@ -57,16 +57,16 @@ resource "kubernetes_deployment" "user" {
           }
           readiness_probe {
             http_get {
-              path = "/healthcheck"
-              port = 8080
+              path = var.healthcheck_path
+              port = var.container_port
             }
             period_seconds    = 5
             failure_threshold = 3
           }
           liveness_probe {
             http_get {
-              path = "/healthcheck"
-              port = 8080
+              path = var.healthcheck_path
+              port = var.container_port
             }
             period_seconds    = 10
             failure_threshold = 3
@@ -88,7 +88,7 @@ resource "kubernetes_service" "user" {
     selector = { app = "user" }
     port {
       port        = 80
-      target_port = 8080
+      target_port = var.container_port
       node_port   = 30080
     }
     type = "NodePort"
@@ -189,7 +189,7 @@ resource "kubernetes_deployment" "product" {
           name              = "product"
           image             = "${local.ecr_url["product"]}:${local.app_image_tags["product"]}"
           image_pull_policy = "Always"
-          port { container_port = 8080 }
+          port { container_port = var.container_port }
           env_from {
             secret_ref { name = kubernetes_secret.db.metadata[0].name }
           }
@@ -203,16 +203,16 @@ resource "kubernetes_deployment" "product" {
           }
           readiness_probe {
             http_get {
-              path = "/healthcheck"
-              port = 8080
+              path = var.healthcheck_path
+              port = var.container_port
             }
             period_seconds    = 5
             failure_threshold = 3
           }
           liveness_probe {
             http_get {
-              path = "/healthcheck"
-              port = 8080
+              path = var.healthcheck_path
+              port = var.container_port
             }
             period_seconds    = 10
             failure_threshold = 3
@@ -234,7 +234,7 @@ resource "kubernetes_service" "product" {
     selector = { app = "product" }
     port {
       port        = 80
-      target_port = 8080
+      target_port = var.container_port
       node_port   = 30081
     }
     type = "NodePort"
@@ -319,7 +319,7 @@ resource "kubernetes_deployment" "stress" {
           name              = "stress"
           image             = "${local.ecr_url["stress"]}:${local.app_image_tags["stress"]}"
           image_pull_policy = "Always"
-          port { container_port = 8080 }
+          port { container_port = var.container_port }
           resources {
             # robust default — NOT app-tuned. Re-derive per app with
             # tuning/autotune.sh on competition day (app behavior varies).
@@ -328,15 +328,15 @@ resource "kubernetes_deployment" "stress" {
           }
           readiness_probe {
             http_get {
-              path = "/healthcheck"
-              port = 8080
+              path = var.healthcheck_path
+              port = var.container_port
             }
             period_seconds = 5
           }
           liveness_probe {
             http_get {
-              path = "/healthcheck"
-              port = 8080
+              path = var.healthcheck_path
+              port = var.container_port
             }
             period_seconds = 10
           }
@@ -357,7 +357,7 @@ resource "kubernetes_service" "stress" {
     selector = { app = "stress" }
     port {
       port        = 80
-      target_port = 8080
+      target_port = var.container_port
       node_port   = 30082
     }
     type = "NodePort"

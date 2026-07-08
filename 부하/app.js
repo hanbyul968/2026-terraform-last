@@ -318,8 +318,15 @@ async function runWorker(id) {
   var endpoint = document.getElementById('endpoint').value.replace(/\/$/, '');
   var interval = parseInt(document.getElementById('interval').value);
   var stressLen = parseInt(document.getElementById('stressLength').value);
+  var stressOnly = document.getElementById('stressOnly').checked;
 
   while (running) {
+    // stress 집중: /v1/stress 만 돌린다(단, 브라우저는 6연결 제한이라 노드 스케일엔 🚀 서버 고부하 권장).
+    if (stressOnly) {
+      await testStress(endpoint, stressLen);
+      if (interval > 0) { await new Promise(function(r) { setTimeout(r, interval); }); }
+      continue;
+    }
     var pick = Math.random();
     if (pick < 0.20) {
       await testUser(endpoint);

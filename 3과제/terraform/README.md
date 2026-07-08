@@ -1,477 +1,248 @@
-# wsi-2026-task3 — Infrastructure
+# 2026 전국기능경기대회 클라우드컴퓨팅 3과제 — Terraform 인프라
 
-2026 전국기능경기대회 클라우드컴퓨팅 3과제 (System Operation) 인프라.
+System Operation 과제(3시간, 트래픽은 시작 1시간 뒤 주입) 전체 인프라를 `terraform apply` 로 구축한다.
+**실행 환경: Windows PowerShell + Docker Desktop, 리전 `ap-northeast-2`.**
 
-## 구성
+---
+
+## 0. 대회날 타임라인 (이 순서대로만 하면 됨)
+
+| 시각 | 할 일 | 명령 |
+|---|---|---|
+| 0:00 | 자격증명 + 배포 시작 | `aws configure` → 아래 [2. 배포](#2-배포-2단계) |
+| ~0:20 | 새 앱 바이너리 반영 | [3. 바이너리 교체](#3-대회-당일--앱바이너리-교체) |
+| ~0:30 | 스모크 테스트 + 엔드포인트 제출 | [4. 검증](#4-스모크-테스트) → `terraform output endpoint` |
+| ~0:40 | 부하도구 준비 | `..\tuning\setup.ps1` → `loadtest.ps1` baseline |
+| 1:00~ | 트래픽 시작 — 모니터링 | 대시보드 + `waf_header_stats.py` 로 관찰 |
+| 수시 | 새 공격 패턴 차단 / 성능 튜닝 | [5. WAF 운영](#5-waf-운영--안전-기본값--관찰-추가) / `..\tuning\autotune.ps1 -App <앱>` |
+| 종료 | 테스트 부하 중지 확인 | (연습 계정이면 `terraform destroy`) |
+
+---
+
+## 1. 아키텍처
+
+```
+인터넷 → CloudFront(단일 엔드포인트, WAFv2) ─┬─ /images/* → S3 (OAC, 캐싱)
+                                             └─ 기타      → ALB → EKS Pod (user/product/stress)
+                                                             └ 미정의 경로 → 404 fixed-response
+RDS MySQL 8.0 Multi-AZ (db.t3.micro) ← RDS Proxy ← Pod
+```
 
 | 계층 | 리소스 | 비고 |
 |------|--------|------|
-| 네트워크 | VPC + 2-AZ public subnet (a/b) | NAT 없음, 단일 RT, IGW만 |
-| 컨테이너 | EKS 1.35 + EC2 t3.medium 2~4대 node group | Fargate/Lambda 금지 준수 |
-| 오토스케일 | Karpenter 1.13 (노드) + HPA (파드) | 부하 시 t3.medium 추가 프로비저닝 |
-| 레지스트리 | ECR × 3 (user/product/stress) | terraform apply 시 docker build로 자동 push |
-| DB | RDS MySQL 8.0 db.t3.micro Multi-AZ gp3 | identifier `apdev-rds-instance` |
-| 스토리지 | S3 (private, CloudFront OAC) | 이미지 버킷 |
-| 엔드포인트 | CloudFront → ALB + S3 | 단일 엔드포인트 |
-| 부하분산 | 네이티브 ALB + AWS LB Controller 3.4 (TargetGroupBinding) | pod IP 타겟 등록 |
-| 보안 | WAFv2 (Common/KnownBadInputs/SQLi + 변수 기반 커스텀 룰) | "관찰 → 차단" 운영, 비정상 요청 403 |
+| 네트워크 | VPC + 2-AZ public subnet | NAT 없음(비용), IGW만 |
+| 컨테이너 | EKS 1.35 + t3.medium 노드그룹 | Fargate/Lambda 금지 준수 |
+| 오토스케일 | Karpenter(노드) + HPA(파드) | 부하 시만 확장, idle 시 통합 |
+| 레지스트리 | ECR ×3 | apply 안에서 docker build+push 자동 |
+| DB | RDS MySQL 8.0 Multi-AZ gp3 | identifier `apdev-rds-instance` |
+| 엔드포인트 | CloudFront → ALB + S3 | 단일화, product GET 캐싱 |
+| 보안 | WAFv2 (관리형 3종 + 변수 기반 커스텀 룰) | 비정상 403 / 미정의 404 |
 
-> **실행 환경: Windows PowerShell (`ap-northeast-2`)** 기준. Docker Desktop + Terraform + AWS CLI + kubectl이 필요합니다.
+### 채점 대응 요약 (40점)
 
-## 효율성 설계 (채점기준 반영)
+* **가용성 12점**: 2-AZ 노드 + RDS Multi-AZ + pod topology spread + HPA. **최우선 — 어떤 튜닝도 avail% 를 깨면 안 됨.**
+* **성능 12점 (≤0.2s)**: product GET CloudFront 캐싱(id 쿼리 기준 10s) + 앱 내 캐시, user.email 인덱스(db-init 자동), `/images/*` S3 직캐싱.
+* **비용 12점**: NAT 제거, t3.medium 최소 대수 + Karpenter consolidation.
+* **비정상 4점**: WAF가 유효 경로의 비정상 요청 403, ALB default 가 미정의 경로 404. → [5. WAF 운영](#5-waf-운영--안전-기본값--관찰-추가)
 
-채점 12점 = **비용 ratio** + 12점 = **성능 (≤0.2s 비율)** + 12점 = **가용성** + 4점 = **비정상 요청 처리**.
+---
 
-### 비용 최적화 (12점)
-* NAT Gateway 제거 → 월 $32+ 절감
-* t3.medium 노드 2~4대 HPA + Karpenter (필요 시만 확장, idle 시 consolidation)
-* 단일 NAT/Private subnet 제거로 단순화
-* ECR 라이프사이클 10개
+## 2. 배포 (2단계)
 
-### 성능 효율성 (12점, 0.2s 이하)
-* **product GET 캐싱**: 앱 `sync.Map` (10s TTL) + CloudFront 캐시 (querystring `id` 기준)
-  * 같은 id 반복 요청 → DB hit 안 함 (사실상 0.001s 응답)
-* **user.email 인덱스**: 스펙에 없는 인덱스를 db-init Job이 자동 추가
-* **HPA**: CPU 55~60% 기준 자동 확장
-* **CloudFront `/images/*`**: S3 직접 캐싱 (앱 우회)
+사전: `winget install Hashicorp.Terraform Amazon.AWSCLI Docker.DockerDesktop Kubernetes.kubectl`
+→ 새 창 열기 → Docker Desktop **실행 상태** 확인(`docker version` 에 Server 표시) → `aws configure`.
 
-### 가용성 (12점)
-* EKS node 2-AZ
-* RDS Multi-AZ
-* topology spread constraint로 pod 분산
-
-### 비정상 요청 (4점) — "안전 기본값 ON + 관찰로 추가" 운영
-* 기본: 관리형 룰 + **검증된 오탐-0 커스텀 패턴**(스캐너 UA·x-junk·인젝션 body·XFF 위조)이
-  처음부터 차단 — 처리율은 전 기간 누적 %라 늦게 켜면 영구 감점이기 때문
-* 커스텀 차단은 전부 **변수**(`waf_blocked_*`) — 새 패턴은 값만 추가해 apply, 오탐 의심 시 `[]`/`false` 로 즉시 해제
-* 정의 안 된 path → ALB fixed-response 404 (커스텀 룰도 유효 경로에서만 동작해 404 유지)
-* 자세한 절차: 아래 [WAF 운영](#waf-운영--안전-기본값--관찰-추가) 섹션
-
-## 환경 준비 — 설치 (Windows PowerShell)
-
-### 1. 필수 도구 설치 (관리자 권한 PowerShell)
+kubernetes/helm provider 는 EKS 가 있어야 초기화되므로 2단계로 apply 한다:
 
 ```powershell
-winget install --id Hashicorp.Terraform -e
-winget install --id Amazon.AWSCLI -e
-winget install --id Docker.DockerDesktop -e
-winget install --id Kubernetes.kubectl -e
-```
-
-> 설치 후 **PowerShell 창을 새로 열어야** PATH가 반영됩니다.
-> Docker Desktop은 설치 후 **앱을 실행**해 고래 아이콘이 "running" 상태가 되어야 합니다.
-
-### 2. 설치 확인
-
-```powershell
-terraform -version
-aws --version
-docker version          # Server 항목까지 나와야 함(데몬 실행 중)
-kubectl version --client
-```
-
-`docker version`에 Server가 안 나오면 Docker Desktop이 안 떠 있는 것 → 실행 후 재시도.
-
-### 3. AWS 자격증명 설정
-
-```powershell
-aws configure
-# AWS Access Key ID / Secret / region(ap-northeast-2) / output(json) 입력
-aws sts get-caller-identity     # 계정 확인
-```
-
-> 명명 프로파일을 쓰면 apply 시 `-var aws_profile=<이름>`을 붙입니다.
-
-### 4. 저장소 클론
-
-```powershell
-git clone https://github.com/hnmly/2026-0621-jaemu-task3.git
-cd 2026-0621-jaemu-task3\terraform
-```
-
-## 배포 (Windows PowerShell)
-
-kubernetes/helm provider는 EKS 클러스터가 존재해야 초기화되므로, **EKS를 먼저 만든 뒤 전체 apply** 하는 2단계로 진행합니다.
-
-```powershell
-cd C:\Users\competitor\2026-0621-jaemu-task3\terraform
-
+cd C:\Users\competitor\2026-terraform\3과제\terraform
 terraform init
 
-# 1단계: 네트워크 + EKS 클러스터 + 노드그룹 먼저 (~15분)
+# 1단계: VPC~EKS 노드그룹까지 (~15분; 의존성으로 네트워크 전부 포함)
 terraform apply -auto-approve "-target=aws_eks_node_group.main"
 
-# 2단계: kubeconfig 갱신
+# 2단계: kubeconfig + 나머지 전체 (앱 빌드·push, ALB, CloudFront, WAF, DB 시드까지 자동)
 aws eks update-kubeconfig --name wsi2026-cluster --region ap-northeast-2
-
-# 3단계: 나머지 전체 (앱/ALB/CloudFront/WAF 등)
 terraform apply -auto-approve -var "k8s_provider_ready=true"
 
-terraform output endpoint
-# http://dXXXXX.cloudfront.net    ← 채점 플랫폼에 입력
+terraform output endpoint    # http://dXXXX.cloudfront.net ← 채점 플랫폼에 프로토콜+주소만 입력 (경로 X)
 ```
 
-> `-target=aws_eks_node_group.main` 하나면 VPC·서브넷·라우트·IGW·EKS 클러스터까지 의존성으로 함께 생성됩니다 (노드그룹이 그것들에 `depends_on` 되어 있음). 따라서 노드가 뜰 때 인터넷 라우트가 반드시 준비되어 있어 `NodeCreationFailure` 가 발생하지 않습니다.
+* `null_resource.build_push` 가 apply 안에서 ECR 로그인 + docker build + push 를 수행 (Docker Desktop 필수).
+* db-init Job 이 테이블 생성 + `load_user.dump` 적재 (user 테이블이 비어있을 때만 → 재실행 안전).
+* 명명 프로파일 사용 시 매 apply 에 `-var aws_profile=<이름>` 추가.
 
-`null_resource.build_push`가 `terraform apply` 안에서 ECR 로그인 + `docker build` + `docker push`를 자동 수행합니다. 바이너리(`application/binary/{user,product,stress}`) hash가 바뀌면 자동 재빌드됩니다.
+---
 
-> **Windows PowerShell 환경**: `build.tf`의 local-exec는 `powershell -NoProfile -Command`로 동작하고, ECR 로그인은 `docker login --username AWS --password (aws ecr get-login-password ...)` 형태를 사용합니다. NodePool / TargetGroupBinding 은 `kubectl_manifest`로 적용되어 별도 kubectl/셸 작업이 필요 없습니다.
+## 3. 대회 당일 — 앱(바이너리) 교체
 
-## 대회 당일 — 앱(바이너리)이 바뀌었을 때 적용
-
-대회 중 **새 앱 바이너리**가 제공되면 아래 순서로 반영합니다. 배포에 실제로 쓰이는 건 소스(`.go`)가 아니라 **`application/binary/{user,product,stress}`** 입니다 (`build.tf`가 이 바이너리만 ECR 이미지로 빌드·push).
-
-### 1. 바이너리 교체 (파일명 고정: `user`, `product`, `stress`)
+배포에 쓰이는 것은 소스가 아니라 **`application/binary/{user,product,stress}`** (파일명 고정).
 
 ```powershell
-# 예: jaemoohong 저장소에서 받는 경우
-git clone --depth 1 https://github.com/jaemoohong/user.git C:\temp\userrepo
-Copy-Item C:\temp\userrepo\user    .\application\binary\user    -Force
-Copy-Item C:\temp\userrepo\product .\application\binary\product -Force
-Copy-Item C:\temp\userrepo\stress  .\application\binary\stress  -Force
+# 1) 받은 바이너리 덮어쓰기 (chmod 불필요 — Dockerfile 이 COPY --chmod=0755)
+Copy-Item C:\받은경로\user    ..\application\binary\user    -Force
+Copy-Item C:\받은경로\product ..\application\binary\product -Force
+Copy-Item C:\받은경로\stress  ..\application\binary\stress  -Force
 
-# 또는 파일로 직접 받은 경우:
-Copy-Item C:\path\to\new\user    .\application\binary\user -Force
-```
+# 2) 반드시 "새 태그"로 apply → 빌드+push+롤링 재배포가 한 번에
+terraform apply -auto-approve -var "k8s_provider_ready=true" -var app_image_tag="v$([int](Get-Date -UFormat %s))"
 
-> 실행권한(`chmod +x`)은 **불필요**합니다 — Dockerfile이 `COPY --chmod=0755`로 이미지 안에서 권한을 부여합니다 (Windows에서도 OK).
-
-교체 확인:
-```powershell
-(Get-FileHash .\application\binary\user -Algorithm SHA256).Hash
-```
-
-### 2. 새 태그로 apply (반드시 태그 변경)
-
-이미지 태그를 **새 값으로** 바꿔 apply 해야 ECR push + Deployment 롤링 업데이트가 같이 일어납니다.
-
-```powershell
-cd 2026-0621-jaemu-task3\terraform
-terraform apply -auto-approve -var app_image_tag="v$([int](Get-Date -UFormat %s))"
-```
-
-* 동작 흐름: 바이너리 hash 변경 → `null_resource.build_push` 재실행(빌드+push) → Deployment 이미지 태그 변경 → user/product/stress 파드 롤링 재배포.
-* ⚠️ **Docker Desktop 실행 중**이어야 합니다.
-
-### 3. 롤아웃 확인
-
-```powershell
-aws eks update-kubeconfig --name wsi2026e-cluster --region ap-northeast-2
+# 3) 롤아웃 확인
 kubectl -n app rollout status deploy/user
 kubectl -n app rollout status deploy/product
 kubectl -n app rollout status deploy/stress
-kubectl -n app get pods -o wide
 ```
 
-> 같은 태그(`latest`)로 빌드만 다시 한 경우엔 매니페스트가 동일해 자동 롤아웃이 안 됩니다.
-> 강제 롤아웃: `kubectl -n app rollout restart deploy/user deploy/product deploy/stress`
+> 같은 태그로 다시 빌드만 하면 롤아웃이 안 일어남 → `kubectl -n app rollout restart deploy/user deploy/product deploy/stress`
 
-### 4. 동작 검증 (교체 후 빠른 스모크 테스트)
+---
+
+## 4. 스모크 테스트
 
 ```powershell
 $EP = (terraform output -raw endpoint)
-Invoke-RestMethod "$EP/healthcheck"                                # {"ok":true}
-Invoke-RestMethod "$EP/v1/product?id=dbdump1&requestid=1&uuid=1"   # 200 or 404
+curl.exe -s -o NUL -w "%{http_code}`n" "$EP/healthcheck"                                              # 200
+curl.exe -s -o NUL -w "%{http_code}`n" -X POST -H "Content-Type: application/json" `
+  -d '{"requestid":"1","uuid":"u1","username":"smoke1","email":"smoke1@example.org"}' "$EP/v1/user"    # 201
+curl.exe -s -o NUL -w "%{http_code}`n" "$EP/v1/user?email=smoke1@example.org&requestid=1&uuid=u1"      # 200
+curl.exe -s -o NUL -w "%{http_code}`n" "$EP/v1/none"                                                   # 404
+curl.exe -s -o NUL -w "%{http_code}`n" -A "sqlmap/1.7" "$EP/v1/user?email=x@x.org&requestid=1&uuid=1"  # 403 (WAF)
+curl.exe -s -o NUL -w "%{http_code}`n" -H "X-Junk: 1" "$EP/v1/user?email=x@x.org&requestid=1&uuid=1"   # 403 (WAF)
+curl.exe -s -o NUL -w "%{http_code}`n" "$EP/.env"                                                      # 404 (403 아님!)
 ```
 
-## 검증된 동작
+정상요청 200/201 · 비정상 403 · 미정의 404 — 셋 다 맞아야 정상.
 
-```
-GET  /healthcheck                       → 200 {"ok":true}
-POST /v1/user        {requestid,...}    → 201
-GET  /v1/user?email=...&requestid=...   → 200 / 404
-POST /v1/product     {id,name,price}    → 201
-GET  /v1/product?id=...                 → 200 (2nd call cached, X-Cache: Hit)
-PUT  /v1/product     multipart(id,image) → 200 (S3 upload)
-GET  /images/foo.jpg                    → 200 (CloudFront → S3, URI rewrite)
-POST /v1/stress      {length:N}         → 201
-GET  /v1/none                           → 404
-GET  /random                            → 404
-```
+---
 
-## 데이터 로드
+## 5. WAF 운영 — 안전 기본값 + 관찰 추가
 
-✅ **`terraform apply`가 자동으로 적재합니다.** `db-init` Job이 S3에서 시드 덤프를 받아 테이블 생성 후 적재합니다. **user 테이블이 비어 있을 때만** 적재하므로 Job 재시도·재apply에도 PK 중복이 안 납니다.
+> **원칙**: 오탐 0이 검증된 패턴은 **처음부터 차단**(처리율은 전 기간 누적 % → 늦게 켜면 영구 감점),
+> **새 패턴만** 로그 관찰로 추가한다. 차단 룰은 전부 변수라 `waf.tf` 는 손댈 필요 없다.
 
-적재 확인:
-```powershell
-aws eks update-kubeconfig --name wsi2026e-cluster --region ap-northeast-2
-kubectl -n app logs job/db-init        # "seed load done" 또는 "skipping seed"
-```
+### 기본으로 켜져 있는 것 (variables.tf 기본값)
 
-## WAF 운영 — 안전 기본값 + 관찰 추가
+| 변수 | 기본값 | 막는 것 |
+|---|---|---|
+| `waf_blocked_user_agents` | sqlmap, nikto, nmap, masscan, acunetix, havij, nuclei, wpscan, dirbuster, gobuster, attack | 스캐너/공격도구 UA |
+| `waf_blocked_headers` | `["x-junk"]` | 쓰레기 헤더가 존재하는 요청 |
+| `waf_blocked_body_patterns` | `$ne` `$gt` `$where` `sleep(` `benchmark(` | 인젝션 body 토큰 |
+| `waf_block_private_xff` | `true` | XFF 에 루프백/사설/169.254 IP (위조) |
+| AWS 관리형 룰 3종 | 항상 ON | SQLi/XSS/KnownBadInputs (유효 경로만 scope) |
 
-> 원칙: **오탐 0이 검증된 패턴은 처음부터 막고**(처리율은 누적 %라 늦으면 영구 감점),
-> **새 패턴만 관찰으로 추가**한다. 차단은 전부 변수라 `waf.tf` 는 수정할 필요 없고,
-> 오탐이 의심되면 해당 변수를 `[]`/`false` 로 바꿔 apply 하면 즉시 해제된다.
->
-> 기본 ON (variables.tf 기본값): 스캐너 UA 11종 · `x-junk` 헤더 · 인젝션 body 토큰 5종 · XFF 위조.
-> 전부 정상 트래픽(hey/Go/curl/브라우저, 표준 헤더, JSON)에 절대 안 나오는 것만.
+* 전부 정상 트래픽(hey/Go/curl/브라우저 UA, 표준 헤더, 평범한 JSON)에 **절대 안 나오는 것만** 골라놨다.
+* 커스텀 룰은 **유효 엔드포인트에서만** 동작 → `/.env` 같은 미정의 경로는 여전히 404 (스펙 준수).
+* **오탐 의심 시**(avail% 하락): 해당 변수만 `[]` / `false` 로 바꿔 apply → 즉시 해제.
 
-### 1. 관찰 (트래픽 시작 후 — "새" 공격 패턴 찾기)
+### 대회날 루프: 관찰 → 추가 → 확인
 
 ```powershell
+# 1) 관찰 — "아직 안 막힌 비정상/의심" + tfvars 제안까지 자동 출력
 cd ..\tuning
 python waf_header_stats.py --log-group aws-waf-logs-wsi2026 --region us-east-1 --hours 1
 ```
 
-출력 맨 위 **"아직 안 막힌 비정상/의심 요청"** 과 그 아래 **"제안: terraform.tfvars"** 를 본다.
-스크립트가 추가할 변수 값까지 뽑아준다.
-
-### 2. 차단 (변수만 추가하고 apply)
-
-`terraform/terraform.tfvars` 파일을 만들거나 열어서 (없으면 새로):
-
 ```hcl
-# ⚠ 리스트 변수는 기본값을 "덮어쓴다" — 새 패턴을 추가할 땐 기본값까지 전부 나열할 것.
+# 2) terraform/terraform.tfvars 에 제안 복붙 (⚠ 리스트는 기본값을 덮어쓰므로 기본값+새것 전부 나열)
 waf_blocked_user_agents   = ["sqlmap", "nikto", "nmap", "masscan", "acunetix", "havij",
-                             "nuclei", "wpscan", "dirbuster", "gobuster", "attack",
-                             "<새 스캐너>"]                               # UA 에 포함되면 403
-waf_blocked_headers       = ["x-junk", "<새 쓰레기 헤더>"]                # 헤더가 존재하면 403
-waf_blocked_header_values = [{ header = "referer", value = "evil.com" }] # 헤더 값에 포함되면 403
-waf_blocked_body_patterns = ["$ne", "$gt", "$where", "sleep(", "benchmark(",
-                             "<새 토큰>"]                                # body 에 포함되면 403
+                             "nuclei", "wpscan", "dirbuster", "gobuster", "attack", "<새 스캐너>"]
+waf_blocked_headers       = ["x-junk", "<새 쓰레기 헤더>"]                # 소문자
+waf_blocked_header_values = [{ header = "referer", value = "evil.com" }] # 헤더 값 매칭
+waf_blocked_body_patterns = ["$ne", "$gt", "$where", "sleep(", "benchmark(", "<새 토큰>"]
 ```
 
 ```powershell
-terraform apply -auto-approve -var "k8s_provider_ready=true"
+# 3) 적용 + 확인 (403 나와야 함, /.env 는 여전히 404, loadtest avail% 유지)
+cd ..\terraform ; terraform apply -auto-approve -var "k8s_provider_ready=true"
+curl.exe -s -o NUL -w "%{http_code}`n" -H "X-새헤더: 1" "$EP/v1/user?email=x@x.org&requestid=1&uuid=1"
 ```
 
-* 오차단이 걱정되면 `waf_custom_rule_action = "count"` 로 먼저 넣고 로그로 확인한 뒤 `"block"` 으로.
-* 커스텀 룰은 **유효 엔드포인트에서만** 동작 → 미정의 경로(`/.env` 등)는 여전히 404 (스펙 준수).
-* 룰 이름/개수는 변수 리스트에서 자동 생성되므로 추가/삭제 모두 변수 수정만으로 끝.
+* 판단 기준: **경로가 유효한가**부터 본다. 미정의 경로(/.env, /admin, /v1/users)는 막는 게 아니라 404 가 정답.
+* 확신 없는 패턴은 `waf_custom_rule_action = "count"` 로 넣고 로그 확인 후 `"block"` 복귀.
+  (count 는 **기본 패턴까지 전부** 관찰 모드가 되므로 확인 즉시 되돌릴 것)
 
-### 3. 확인
+---
 
-```powershell
-$EP = (terraform output -raw endpoint)
-curl.exe -s -o NUL -w "%{http_code}`n" -H "X-Junk: 1" "$EP/v1/user?email=x@x.org&requestid=1&uuid=1"  # 403
-curl.exe -s -o NUL -w "%{http_code}`n" "$EP/.env"                                                     # 404 (여전히)
-python ..\tuning\waf_header_stats.py --log-group aws-waf-logs-wsi2026 --region us-east-1 --hours 1     # 빈칸 될 때까지
-```
+## 6. 스펙 변경 대응 — 전부 변수 하나로
 
-> 마지막으로 대시보드/loadtest 의 `avail%` 가 안 떨어졌는지 확인 (정상 오차단 없음).
+경로·포트·헬스체크가 변수로 통합돼 있어 **연쇄 수정이 없다**. `-var` 또는 `terraform.tfvars` 로:
 
-## 문제 변경 대응 (당일 ±30% 변경 대비)
-
-> **핵심: 경로·포트·헬스체크는 전부 변수다.** `terraform apply -var ...` 또는 `terraform.tfvars` 로 바꾸면
-> ALB·WAF·CloudFront·k8s(probe/Service) 에 **한 번에** 반영된다 (연쇄 수정 불필요).
-
-| 스펙 변경 | 변수 | 반영되는 곳 |
+| 스펙 변경 | 변수 | 자동 반영되는 곳 |
 |---|---|---|
-| API prefix 변경 (`/v1` → `/v2`) | `api_prefix` | ALB 리스너 경로, WAF scope-down, CloudFront product 캐시 |
-| 경로가 앱 이름과 불일치 | `api_paths_override = ["/v2/member", ...]` | WAF scope-down + ALB deny_direct (403/404 판정 기준) |
-| 헬스체크 경로 변경 | `healthcheck_path` | ALB TG 헬스체크·리스너 + k8s probe 6곳 |
-| 컨테이너 포트 변경 (8080 → 다른 값) | `container_port` | Deployment·probe·Service·ALB TG·SG 전부 |
-| 이미지 경로 변경 (`/images` → 다른 값) | `images_prefix` | CloudFront 캐시 동작 + URI rewrite 함수 |
+| API prefix (`/v1`→`/v2`) | `api_prefix` | ALB 리스너·deny_direct, WAF scope, CloudFront product 캐시 |
+| 경로가 앱 이름과 불일치 | `api_paths_override = ["/v2/member", ...]` | 위와 동일 (403/404 판정 기준 포함) |
+| 헬스체크 경로 | `healthcheck_path` | ALB TG·리스너 + k8s probe 6곳 |
+| 컨테이너 포트 (8080 고정이지만 만약) | `container_port` | Deployment·probe·Service·TG·SG |
+| 이미지 경로 (`/images`) | `images_prefix` | CloudFront 캐시 + URI rewrite 함수 |
+| 리전/노드타입/EKS버전/노드수 | `region`+`azs` / `node_instance_type` / `eks_version` / `node_*_size` | |
+| 이름 충돌 시 새 배포 | `project` | 모든 리소스 이름 |
 
-### DB 관련
+변수로 안 되는 것 (직접 수정):
 
-| 문제지 변경 | 고칠 곳 | 비고 |
-|------------|---------|------|
-| **RDS identifier 변경** | `rds.tf` `identifier` + `tags.Name` | 덤프는 영향 없음 |
-| **스키마(DB)명 변경** (`dev` → 다른) | ① `variables.tf` `db_name` ② `load_user.dump` 첫 줄 `USE` | ⚠️ 둘 다 바꿔야 함 |
-| **DB 사용자/비번 변경** | `variables.tf` `db_username` | Secret 자동 반영 |
-| **테이블 스키마 변경** | `k8s_base.tf` db-init Job의 `CREATE TABLE` | 인덱스 추가 등 |
-| **시드 덤프 교체** | `load_user.dump` 덮어쓰기 | S3 통해 자동 적재 |
-| **인스턴스 클래스 변경** | `rds.tf` `instance_class`/`allocated_storage` | |
-| **Multi-AZ 변경** | `rds.tf` `multi_az` | |
+| 변경 | 고칠 곳 |
+|---|---|
+| RDS identifier | `rds.tf` `identifier` |
+| 스키마명 (`dev`) | `variables.tf` `db_name` **+ `load_user.dump` 첫 줄 `USE`** (둘 다!) |
+| DB 유저 | `variables.tf` `db_username` |
+| 테이블 스키마 | `k8s_base.tf` db-init Job 의 `CREATE TABLE` |
+| 새 환경변수 요구 | `k8s_base.tf` ConfigMap/Secret (env_from 으로 자동 주입됨) |
+| S3 버킷명 지정 | `s3.tf` |
 
-### 앱 / 엔드포인트 관련
+> ⚠ terraform 변수를 바꿔도 **부하 도구(`tuning/config.ps1`, `부하/app.js`)의 URL·body 는 별도로** 새 스펙에 맞춰야 한다.
 
-| 문제지 변경 | 고칠 곳 | 비고 |
-|------------|---------|------|
-| **새 앱 바이너리** | `application/binary/` 덮어쓰기 + apply with 새 태그 | "대회 당일" 섹션 참고 |
-| **컨테이너 포트 변경** | `variables.tf` `container_port` | Deployment·probe·Service·TG·SG 자동 반영 |
-| **새 환경변수 요구** | `k8s_base.tf` ConfigMap/Secret → `k8s_apps.tf` env | |
-| **이미지 경로 변경** | `variables.tf` `images_prefix` | CloudFront 캐시+rewrite 자동 반영 |
-| **API 경로 변경** | `variables.tf` `api_prefix` 또는 `api_paths_override` | ALB·WAF 자동 반영 |
-| **S3 버킷 이름 지정** | `s3.tf` `aws_s3_bucket.images.bucket` | |
-| **비정상 요청 응답코드 변경** | `waf.tf` (403) / `alb.tf` default (404) | |
+---
 
-### 앱 입력/출력(스펙)이 바뀌었을 때
+## 7. 성능/비용 튜닝
 
-대회 중 새 앱 바이너리가 오면 **요청 형식(입력)이나 응답(출력)이 바뀔 수 있습니다.** 아래를 점검·수정합니다.
-
-**1) 요청 경로/파라미터가 바뀐 경우** (예: `/v1/user` → `/v2/user`, `email` → `mail`)
-- **변수 하나로 끝**: prefix 만 바뀌면 `-var api_prefix=/v2`, 경로 자체가 다르면
-  `api_paths_override = ["/v2/member", ...]`. ALB 리스너·deny_direct(403/404 판정)·WAF scope-down·
-  CloudFront product 캐시가 전부 이 변수에서 계산되므로 **연쇄 수정이 없다**.
-- `부하/app.js` / `tuning/config.ps1`: 부하 도구의 URL·파라미터는 별도로 새 스펙으로 변경.
-
-**2) 요청 body 필드가 바뀐 경우** (예: `length` → `size`)
-- 앱이 알아서 처리하므로 인프라 수정은 대부분 불필요.
-- 단 `부하/app.js` 의 POST body(`JSON.stringify({...})`)를 새 필드명으로 맞춰야 부하 테스트가 성공.
-- db-init 시드가 새 컬럼을 요구하면 `k8s_base.tf` 의 `CREATE TABLE` 도 변경.
-
-**3) 응답 코드가 바뀐 경우** (예: POST 성공이 201 → 200)
-- 인프라 수정 불필요. `부하/app.js` 의 성공 판정(`status >= 200 && status < 300`)은 이미 2xx 전체를 성공으로 보므로 대부분 그대로 동작.
-- 특정 코드로 판정해야 하면 `부하/app.js` `sendRequest` 의 성공 조건 수정.
-
-**4) 새 환경변수를 앱이 요구하는 경우**
-- `k8s_base.tf`: ConfigMap(`s3-config`) 또는 Secret(`db-credentials`)에 키 추가.
-- `k8s_apps.tf`: 해당 Deployment 의 `env_from` 로 이미 주입되므로, 같은 Secret/ConfigMap 에 넣으면 자동 반영. 새 소스면 `env_from` 블록 추가.
-
-**5) 포트가 바뀐 경우** (8080 → 다른 값)
-- `-var container_port=<새포트>` 하나로 Deployment·probe·Service·ALB TG·SG 전부 반영.
-
-**6) 이미지 저장/다운로드 경로가 바뀐 경우**
-- `-var images_prefix=/newpath` 하나로 CloudFront path pattern + URI-rewrite 함수 반영.
-- `부하/app.js`: `testImage` 의 다운로드 경로, `uploadProductImage` 의 업로드 필드는 별도 변경.
-
-> 변경 후에는 반드시 `terraform apply -auto-approve -var "k8s_provider_ready=true"` 로 반영하고,
-> `부하` 도구로 스모크 테스트하여 user/product/stress/이미지/WAF 가 정상인지 확인합니다.
-
-### 인프라 / 리전 관련
-
-| 문제지 변경 | 고칠 곳 | 비고 |
-|------------|---------|------|
-| **리전 변경** | `variables.tf` `region` + `azs` | |
-| **노드 인스턴스 타입 변경** | `variables.tf` `node_instance_type` + `karpenter.tf` | |
-| **EKS 버전 지정** | `variables.tf` `eks_version` | |
-| **노드 수 / 오토스케일** | `variables.tf` `node_*_size` + `k8s_apps.tf` HPA | |
-| **이름 충돌(409) / 새 배포** | `variables.tf` `project` 변경 | 모든 리소스 새 이름 |
-
-> **변경 시 자주 놓치는 연쇄 의존**:
-> * 스키마명(`dev`) 변경 → **덤프의 `USE` 문**도 같이
-> * 포트/경로 변경 → terraform 은 변수(`container_port`/`api_prefix` 등) 하나면 되지만,
->   **부하 도구(`부하/app.js`, `tuning/config.ps1`)는 별도로** 새 스펙에 맞춰야 함
-
-## 트러블슈팅
-
-### 1. `AlreadyExists` 409 (apply 시 이름 충돌)
-
-이전 배포 리소스가 AWS에 남아있는데 현재 state엔 없을 때 발생. state는 git에 안 올라가므로 **다른 PC/세션에서 apply했던 흔적**이 원인.
+측정·자동 튜닝은 [`../tuning/README.md`](../tuning/README.md) 참고. 요약:
 
 ```powershell
-# state가 있는 쪽에서 먼저 destroy
-terraform destroy -auto-approve -var "k8s_provider_ready=true"
-# 또는 project명 변경으로 우회
-# variables.tf의 project를 "wsi2026x" 등으로 변경 후 apply
+cd ..\tuning
+.\loadtest.ps1 $EP 180s baseline      # 병목 앱 찾기 (perf% 낮은 앱)
+.\autotune.ps1 $EP -App stress        # 그 앱만 정밀 스윕 → 우승값 그대로 반영 가능
 ```
 
-### 2. `NodeCreationFailure` (노드가 클러스터에 조인 실패)
+우승값은 `k8s_apps.tf` 의 해당 앱 `requests.cpu` / HPA `average_utilization`·`min_replicas` 에 박고 apply (kubectl patch 는 재배포 시 사라짐). **avail% < 99 면 비용보다 무조건 용량부터.**
 
-```
-NodeGroup ... NodeCreationFailure: Instances failed to join the kubernetes cluster
-```
+---
 
-노드가 EC2 API / EKS 엔드포인트에 접근 못 해서 발생. 노드 부팅 로그(`aws ec2 get-console-output --instance-id i-xxx`)에 `EC2/DescribeInstances retrying` 가 반복되면 **인터넷 라우트 없음**이 원인.
+## 8. 트러블슈팅
 
-원인 대부분은 **state 오염**: route table association이 실제 서브넷이 아닌 옛 배포 서브넷을 가리킴. 확인:
+| 증상 | 처방 |
+|---|---|
+| `AlreadyExists` 409 | 옛 리소스 잔재. state 있는 쪽에서 destroy, 안 되면 `project` 변경 + state 삭제 후 재apply |
+| `NodeCreationFailure` | state 오염으로 라우트 association 이 옛 서브넷을 가리킴. `terraform state rm 'aws_route_table_association.public[0]' ...` → 재apply → 노드그룹 삭제 후 재생성. 깨끗한 state(새 계정)에선 발생 안 함 |
+| Service 생성 전부 거부 (`mservice.elbv2.k8s.aws` webhook) | `kubectl delete mutatingwebhookconfiguration aws-load-balancer-webhook` (validating 도) → 재apply |
+| 애드온/helm 이 FAILED 로 낌 | `aws eks delete-addon --addon-name metrics-server ...` / `helm uninstall karpenter -n kube-system` → 재apply |
+| `Unauthorized` 일시 오류 | 액세스 전파 타이밍 → 재apply 로 해소 |
+| `error during connect ... docker daemon` | Docker Desktop 미실행 |
+| destroy 가 `connectex: No connection` | `-var "k8s_provider_ready=true"` 누락. 클러스터가 이미 없으면: `terraform state list | Select-String "kubernetes_|helm_|kubectl_" | ForEach-Object { terraform state rm $_.ToString().Trim() }` 후 destroy |
+| 파드가 ALB 타겟에 안 붙음 | `kubectl -n kube-system get deploy aws-load-balancer-controller` Ready 확인 (TargetGroupBinding 이 pod IP 등록) |
 
-```powershell
-# 노드 서브넷에 0.0.0.0/0 → IGW 라우트가 있는지 확인
-aws ec2 describe-route-tables --region ap-northeast-2 --filters "Name=association.subnet-id,Values=<노드-서브넷ID>" --query "RouteTables[0].Routes[]" --output table
-```
-
-라우트가 없으면(association이 딴 서브넷을 가리킴):
-
-```powershell
-# 잘못된 association 제거 후 재생성
-terraform state rm 'aws_route_table_association.public[0]' 'aws_route_table_association.public[1]'
-terraform apply -auto-approve "-target=aws_route_table_association.public"
-# 실패한 노드그룹 삭제 후 재생성
-aws eks delete-nodegroup --cluster-name wsi2026-cluster --nodegroup-name wsi2026-ng --region ap-northeast-2
-terraform state rm aws_eks_node_group.main
-terraform apply -auto-approve "-target=aws_eks_node_group.main"
-```
-
-> 코드에는 노드그룹이 route association + IGW 생성 후에 뜨도록 `depends_on`이 걸려 있어, **깨끗한 state(새 계정/새 PC)에서는 이 문제가 발생하지 않습니다.** 위 절차는 state가 오염됐을 때만 필요.
-
-### 3. Service 생성이 전부 막힘 (웹훅 문제)
-
-```
-AdmissionRequestDenied: failed calling webhook "mservice.elbv2.k8s.aws"
-```
-
-AWS LB Controller의 Service 변형 웹훅이 Ready 전에 fail-closed → 모든 Service 생성 차단. 코드에서 이미 `enableServiceMutatorWebhook=false`로 비활성화했지만, 이미 깨진 웹훅이 남아있으면:
-
-```powershell
-aws eks update-kubeconfig --name wsi2026-cluster --region ap-northeast-2
-kubectl delete mutatingwebhookconfiguration aws-load-balancer-webhook --ignore-not-found
-kubectl delete validatingwebhookconfiguration aws-load-balancer-webhook --ignore-not-found
-terraform apply -auto-approve -var "k8s_provider_ready=true"
-```
-
-### 4. 애드온/Helm이 실패 상태로 끼어 재적용이 막힐 때
-
-```powershell
-# metrics-server 애드온이 CREATE_FAILED 로 남아 재생성 거부 시
-aws eks delete-addon --cluster-name wsi2026-cluster --addon-name metrics-server --region ap-northeast-2
-# karpenter helm 이 failed 상태일 때
-helm uninstall karpenter -n kube-system
-# 이후
-terraform apply -auto-approve -var "k8s_provider_ready=true"
-```
-
-### 5. `Unauthorized` 등 일시적 인증 오류
-
-클러스터 초기화/액세스 전파 타이밍 문제 → `terraform apply` 재실행 시 대개 해소.
-
-### 6. 이름 충돌이 안 풀릴 때 — 프로젝트명 변경 (비상 탈출)
-
-```powershell
-Remove-Item terraform.tfstate, terraform.tfstate.backup -ErrorAction SilentlyContinue
-# variables.tf 열어서 project = "wsi2026" → "wsi2026x" 변경
-terraform init
-terraform apply -auto-approve -var "k8s_provider_ready=true"
-```
-
-⚠️ 옛 `wsi2026e-*` 리소스는 **그대로 남아 비용 발생** → 채점 전 콘솔/CLI로 삭제.
-
-### Windows에서 흔한 함정
-
-| 증상 | 원인 / 해결 |
-|------|-------------|
-| `error during connect ... docker daemon` | Docker Desktop 미실행 → 실행 후 `docker version`에 Server 확인 |
-| `terraform init` 후 lock 파일 에러 | 이전 `.terraform` 폴더 삭제: `Remove-Item .terraform -Recurse -Force` |
-| 줄바꿈(CRLF) 때문에 스크립트 깨짐 | `application/binary/*`는 바이너리라 무관 |
-| state 충돌 | 한 환경에서만 작업하거나 S3 backend 사용 |
-
-### 컨트롤러 정상 동작 확인
-
-```powershell
-kubectl -n kube-system get deploy aws-load-balancer-controller
-kubectl -n kube-system get pods -l app.kubernetes.io/name=aws-load-balancer-controller
-# 파드 Ready 여야 TargetGroupBinding이 pod IP를 타겟그룹에 등록함
-```
-
-## 정리
-
-destroy 할 때도 **`-var "k8s_provider_ready=true"`** 를 붙여야 합니다. (안 붙이면 kubernetes/helm provider 가 `https://localhost` 를 가리켜 `connectex: No connection` 에러 발생)
+### 정리 (연습 계정 필수)
 
 ```powershell
 terraform destroy -auto-approve -var "k8s_provider_ready=true"
 ```
 
-> 이미 클러스터가 지워져 연결이 안 되는데 k8s 리소스가 state 에 남아 destroy 가 막히면:
-> ```powershell
-> # k8s/helm/kubectl 리소스를 state 에서 제거 후 나머지 destroy
-> terraform state list | Select-String "kubernetes_|helm_|kubectl_" | ForEach-Object { terraform state rm $_.ToString().Trim() }
-> terraform destroy -auto-approve -var "k8s_provider_ready=true"
-> ```
+---
 
-## 파일 구조
+## 9. 파일 구조
 
 ```
 terraform/
 ├── versions.tf / providers.tf / variables.tf / locals.tf / outputs.tf
+│                                # variables: 경로·포트·WAF 차단 패턴 전부 여기서 제어
 ├── vpc.tf                       # VPC + 2-AZ public subnet + IGW + S3 VPCe
-├── ecr.tf                       # 3 repos + lifecycle
-├── build.tf                     # null_resource: PowerShell(기본) 또는 bash로 docker build + ECR push
-├── rds.tf                       # MySQL 8.0 Multi-AZ
-├── rds_proxy.tf                 # RDS Proxy 커넥션 풀링
-├── s3.tf                        # private bucket + CloudFront OAC
-├── seed.tf                      # 시드 덤프 S3 업로드 + IRSA
-├── eks.tf                       # cluster(1.35) + node group + addons
-├── karpenter.tf                 # Karpenter 1.13 (NodePool/EC2NodeClass)
-├── iam.tf + policies/           # IRSA roles + ALB controller IAM policy(v3.4.0)
-├── lb_controller.tf             # AWS LB Controller 3.4 (helm) + TargetGroupBinding
-├── alb.tf                       # 네이티브 ALB + target group + listener rule (default 404)
+├── ecr.tf / build.tf            # ECR 3개 + apply 내 docker build/push (PowerShell)
+├── rds.tf / rds_proxy.tf        # MySQL 8.0 Multi-AZ + 커넥션 풀링
+├── s3.tf / seed.tf              # 이미지 버킷(OAC) + 시드 덤프 업로드
+├── eks.tf / karpenter.tf        # 클러스터 1.35 + 노드그룹 + Karpenter 1.13
+├── iam.tf + policies/           # IRSA + ALB controller 정책
+├── lb_controller.tf             # AWS LB Controller (TargetGroupBinding 용)
+├── alb.tf                       # ALB + TG + 리스너 (유효경로 forward / 미정의 404 / 직접접근 403)
 ├── k8s_base.tf                  # namespace + secret + db-init Job
-├── k8s_apps.tf                  # user/product/stress Deploy+Svc+HPA
-├── waf.tf                       # WAFv2 web ACL
-├── cloudfront.tf                # CloudFront + URI rewrite function
-└── README.md
+├── k8s_apps.tf                  # user/product/stress Deploy+Svc+HPA  ← 튜닝값 반영처
+├── waf.tf                       # WAFv2 (관리형 + 변수 기반 커스텀 룰)  ← 수정할 일 없음
+└── cloudfront.tf                # 단일 엔드포인트 + 캐싱 + /images rewrite
 ```

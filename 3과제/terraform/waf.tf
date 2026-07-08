@@ -1,19 +1,21 @@
 # WAFv2 attached to CloudFront (scope=CLOUDFRONT, must live in us-east-1).
 #
-# ===== 운영 원칙 (대회날): "관찰 → 차단" =====
-# 1) 기본 상태에서는 AWS 관리형 룰(공격 시그니처 기반, 정상 요청 오탐 거의 없음)만 켜져 있다.
-#    임의 커스텀 차단 룰은 전부 변수(waf_blocked_*)이고 기본값이 비어 있음
-#    → 처음에는 아무 정상 요청도 오차단하지 않는다 (가용성 점수 최우선).
-# 2) 트래픽 시작 후 관찰:
+# ===== 운영 원칙 (대회날): "안전 기본값 ON + 관찰로 추가" =====
+# 1) 기본 상태 = AWS 관리형 룰 + 검증된 오탐-0 커스텀 패턴(스캐너 UA, x-junk, 인젝션 body,
+#    XFF 위조)이 처음부터 켜져 있다. 처리율은 전 기간 누적 %라 늦게 켜면 영구 감점이기 때문.
+#    기본 패턴은 정상 트래픽(hey/Go/curl/브라우저, 표준 헤더, JSON)과 절대 겹치지 않는 것만.
+#    오탐 의심 시 해당 변수만 [] / false 로 바꿔 apply 하면 즉시 해제.
+# 2) 트래픽 시작 후 "새" 공격 패턴 관찰:
 #      python ..\tuning\waf_header_stats.py --log-group aws-waf-logs-<project> --region us-east-1 --hours 1
 #    → "아직 안 막힌 비정상 요청" + 추가할 tfvars 제안까지 출력해준다.
-# 3) 차단은 변수로만 추가 (waf.tf 수정 불필요). terraform.tfvars 또는 -var 로:
-#      waf_blocked_user_agents   = ["sqlmap", "nikto", "attack"]        # UA에 포함되면 403
-#      waf_blocked_headers       = ["x-junk", "x-debug"]                # 헤더가 존재하면 403
+# 3) 추가 차단은 변수로만 (waf.tf 수정 불필요). terraform.tfvars 또는 -var 로:
+#      waf_blocked_user_agents   = [...기본값..., "<새 스캐너>"]         # UA에 포함되면 403
+#      waf_blocked_headers       = ["x-junk", "<새 쓰레기 헤더>"]        # 헤더가 존재하면 403
 #      waf_blocked_header_values = [{ header = "referer", value = "evil.com" }]
-#      waf_blocked_body_patterns = ["$ne", "sleep("]                    # body에 포함되면 403
-#      waf_block_private_xff     = true                                 # XFF 위조(사설IP) 403
-#    확신 없으면 waf_custom_rule_action = "count" 로 먼저 넣고 로그 확인 후 "block".
+#      waf_blocked_body_patterns = [...기본값..., "<새 토큰>"]           # body에 포함되면 403
+#    ⚠ 리스트 변수를 덮어쓰면 기본값이 사라지므로, tfvars 에 쓸 때는 기본값 + 새 패턴 전체를 나열.
+#    확신 없으면 waf_custom_rule_action = "count" 로 먼저 넣고 로그 확인 후 "block" 복귀
+#    (count 는 기본 패턴까지 전부 관찰 모드가 되므로 확인 후 반드시 되돌릴 것).
 # 4) 커스텀 룰은 모두 "유효 엔드포인트"(local.waf_block_scope_regex)에서만 동작한다.
 #    미정의 경로(/.env 등)는 커스텀 룰을 건너뛰고 ALB default 404 → 스펙(403/404 구분) 준수.
 #

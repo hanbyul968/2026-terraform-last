@@ -119,16 +119,20 @@ variable "waf_custom_rule_action" {
   }
 }
 
+# 아래 기본값들은 연습 트래픽으로 검증된 "오탐 0" 패턴 — 정상 트래픽(hey/Go/curl/브라우저,
+# 표준 헤더, JSON body)에는 절대 안 나온다. 처리율은 전 기간 누적 %이므로 처음부터 켠다.
+# 대회날 오탐이 의심되면 해당 변수만 [] / false 로 바꿔 apply (즉시 해제).
+
 variable "waf_blocked_user_agents" {
   type        = list(string)
-  default     = []
-  description = "User-Agent 에 이 문자열이 포함되면 403 (대소문자 무시). 예: [\"sqlmap\",\"nikto\",\"attack\"]"
+  default     = ["sqlmap", "nikto", "nmap", "masscan", "acunetix", "havij", "nuclei", "wpscan", "dirbuster", "gobuster", "attack"]
+  description = "User-Agent 에 이 문자열이 포함되면 403 (대소문자 무시). 스캐너/공격도구 이름 — 정상 UA(hey/Go/curl/Mozilla)와 겹치지 않음."
 }
 
 variable "waf_blocked_headers" {
   type        = list(string)
-  default     = []
-  description = "이 헤더가 존재하기만 하면 403. 소문자로 입력. 예: [\"x-junk\",\"x-debug\"]"
+  default     = ["x-junk"]
+  description = "이 헤더가 존재하기만 하면 403. 소문자로 입력. 대회날 새 쓰레기 헤더 발견 시 추가. 예: [\"x-junk\",\"x-debug\"]"
 }
 
 variable "waf_blocked_header_values" {
@@ -142,14 +146,14 @@ variable "waf_blocked_header_values" {
 
 variable "waf_blocked_body_patterns" {
   type        = list(string)
-  default     = []
-  description = "요청 body 에 이 문자열이 포함되면 403 (대소문자 무시). 정상 body 에 절대 없는 토큰만. 예: [\"$ne\",\"sleep(\"]"
+  default     = ["$ne", "$gt", "$where", "sleep(", "benchmark("]
+  description = "요청 body 에 이 문자열이 포함되면 403 (대소문자 무시). NoSQL/SQL 인젝션 토큰 — 정상 JSON body 에 절대 없음."
 }
 
 variable "waf_block_private_xff" {
   type        = bool
-  default     = false
-  description = "true 면 X-Forwarded-For 에 루프백/사설/메타데이터 IP(127. 10. 192.168. 172.16-31. 169.254.)가 들어간 요청을 403."
+  default     = true
+  description = "X-Forwarded-For 에 루프백/사설/메타데이터 IP(127. 10. 192.168. 172.16-31. 169.254.)가 들어간 요청을 403. 채점 트래픽은 공인 IP 직결이라 안전."
 }
 
 variable "is_windows" {

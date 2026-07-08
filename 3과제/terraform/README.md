@@ -40,11 +40,12 @@
 * RDS Multi-AZ
 * topology spread constraint로 pod 분산
 
-### 비정상 요청 (4점) — "관찰 → 차단" 운영
-* 기본: WAFv2 AWS Managed Rules(시그니처 기반, 오탐 없음)만 켜짐 → **정상 요청 오차단 위험 0**
-* 커스텀 차단은 전부 **변수**(`waf_blocked_*`) — 대회날 트래픽을 보고 값만 추가해 apply
+### 비정상 요청 (4점) — "안전 기본값 ON + 관찰로 추가" 운영
+* 기본: 관리형 룰 + **검증된 오탐-0 커스텀 패턴**(스캐너 UA·x-junk·인젝션 body·XFF 위조)이
+  처음부터 차단 — 처리율은 전 기간 누적 %라 늦게 켜면 영구 감점이기 때문
+* 커스텀 차단은 전부 **변수**(`waf_blocked_*`) — 새 패턴은 값만 추가해 apply, 오탐 의심 시 `[]`/`false` 로 즉시 해제
 * 정의 안 된 path → ALB fixed-response 404 (커스텀 룰도 유효 경로에서만 동작해 404 유지)
-* 자세한 절차: 아래 [WAF 운영](#waf-운영--관찰--차단) 섹션
+* 자세한 절차: 아래 [WAF 운영](#waf-운영--안전-기본값--관찰-추가) 섹션
 
 ## 환경 준비 — 설치 (Windows PowerShell)
 
@@ -198,12 +199,16 @@ aws eks update-kubeconfig --name wsi2026e-cluster --region ap-northeast-2
 kubectl -n app logs job/db-init        # "seed load done" 또는 "skipping seed"
 ```
 
-## WAF 운영 — 관찰 → 차단
+## WAF 운영 — 안전 기본값 + 관찰 추가
 
-> 원칙: **처음부터 다 막지 않는다.** 기본 상태는 관리형 룰만 켜져 있어 정상 요청을 절대 안 막는다.
-> 트래픽이 시작되면 로그를 보고, 비정상 패턴만 **변수로** 추가한다. `waf.tf` 는 수정할 필요 없다.
+> 원칙: **오탐 0이 검증된 패턴은 처음부터 막고**(처리율은 누적 %라 늦으면 영구 감점),
+> **새 패턴만 관찰으로 추가**한다. 차단은 전부 변수라 `waf.tf` 는 수정할 필요 없고,
+> 오탐이 의심되면 해당 변수를 `[]`/`false` 로 바꿔 apply 하면 즉시 해제된다.
+>
+> 기본 ON (variables.tf 기본값): 스캐너 UA 11종 · `x-junk` 헤더 · 인젝션 body 토큰 5종 · XFF 위조.
+> 전부 정상 트래픽(hey/Go/curl/브라우저, 표준 헤더, JSON)에 절대 안 나오는 것만.
 
-### 1. 관찰 (트래픽 시작 후)
+### 1. 관찰 (트래픽 시작 후 — "새" 공격 패턴 찾기)
 
 ```powershell
 cd ..\tuning
@@ -218,12 +223,14 @@ python waf_header_stats.py --log-group aws-waf-logs-wsi2026 --region us-east-1 -
 `terraform/terraform.tfvars` 파일을 만들거나 열어서 (없으면 새로):
 
 ```hcl
-# 예: 관찰 결과에 맞춰 필요한 것만
-waf_blocked_user_agents   = ["sqlmap", "nikto", "attack"]                # UA 에 포함되면 403
-waf_blocked_headers       = ["x-junk", "x-debug"]                        # 헤더가 존재하면 403
+# ⚠ 리스트 변수는 기본값을 "덮어쓴다" — 새 패턴을 추가할 땐 기본값까지 전부 나열할 것.
+waf_blocked_user_agents   = ["sqlmap", "nikto", "nmap", "masscan", "acunetix", "havij",
+                             "nuclei", "wpscan", "dirbuster", "gobuster", "attack",
+                             "<새 스캐너>"]                               # UA 에 포함되면 403
+waf_blocked_headers       = ["x-junk", "<새 쓰레기 헤더>"]                # 헤더가 존재하면 403
 waf_blocked_header_values = [{ header = "referer", value = "evil.com" }] # 헤더 값에 포함되면 403
-waf_blocked_body_patterns = ["$ne", "sleep("]                            # body 에 포함되면 403
-waf_block_private_xff     = true                                         # XFF 위조(사설 IP) 403
+waf_blocked_body_patterns = ["$ne", "$gt", "$where", "sleep(", "benchmark(",
+                             "<새 토큰>"]                                # body 에 포함되면 403
 ```
 
 ```powershell

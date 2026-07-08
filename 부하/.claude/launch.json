@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "부하",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["server.py"],
+      "port": 9000,
+      "autoPort": true
+    }
+  ]
+}

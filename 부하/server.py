@@ -88,8 +88,16 @@ def _rec_count(stats, key, status, ok_status):
             s['success'] += 1
 
 
-def _worker(ep, interval, stresslen, stats, stop):
+def _worker(ep, interval, stresslen, stats, stop, stress_only=False):
     while not stop.is_set():
+        # stress_only: 노드 스케일용 — /v1/stress 만 집중 발사(가장 CPU 를 태우는 API).
+        if stress_only:
+            body = json.dumps({'requestid': str(int(time.time()*1000)), 'uuid': str(uuidlib.uuid4()), 'length': stresslen})
+            st, ms = _fire('POST', f"{ep}/v1/stress", body)
+            _rec_perf(stats, 'stress', st, ms, 1000)
+            if interval > 0:
+                time.sleep(interval / 1000.0)
+            continue
         pick = random.random()
         if pick < 0.25:
             rnd = random.randint(1, 1000)
@@ -129,11 +137,12 @@ def start_load(cfg):
     interval = int(cfg.get('interval', 0) or 0)
     slen = int(cfg.get('stressLength', 256))
     dur = int(cfg.get('duration', 60))
+    stress_only = bool(cfg.get('stressOnly', False))
     stats = _blank_stats()
     stop = threading.Event()
     threads = []
     for _ in range(conc):
-        t = threading.Thread(target=_worker, args=(ep, interval, slen, stats, stop), daemon=True)
+        t = threading.Thread(target=_worker, args=(ep, interval, slen, stats, stop, stress_only), daemon=True)
         t.start()
         threads.append(t)
     timer = threading.Timer(dur, stop_load)
@@ -272,9 +281,10 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
 
 if __name__ == '__main__':
     os.chdir(os.path.dirname(os.path.abspath(__file__)) or '.')
-    server = http.server.ThreadingHTTPServer(('', PORT), ProxyHandler)
+    port = int(os.environ.get('PORT', PORT))  # 기본 9000, 프리뷰/도구가 PORT 지정 시 그 값 사용
+    server = http.server.ThreadingHTTPServer(('', port), ProxyHandler)
     print(f'=== Load Test Proxy Server (threaded) ===')
-    print(f'http://localhost:{PORT}')
+    print(f'http://localhost:{port}')
     print(f'Press Ctrl+C to stop')
     try:
         server.serve_forever()

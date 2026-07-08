@@ -403,12 +403,13 @@ function startServerLoad() {
     concurrency: parseInt(document.getElementById('concurrency').value),
     duration: parseInt(document.getElementById('duration').value),
     interval: parseInt(document.getElementById('interval').value) || 0,
-    stressLength: parseInt(document.getElementById('stressLength').value)
+    stressLength: parseInt(document.getElementById('stressLength').value),
+    stressOnly: document.getElementById('stressOnly').checked
   };
   document.getElementById('btnBlast').disabled = true;
   document.getElementById('btnBlastStop').disabled = false;
   document.getElementById('blastStatus').textContent = '\uC2DC\uC791 \uC911...';
-  log('\uD83D\uDE80 \uC11C\uBC84 \uACE0\uBD80\uD558 \uC2DC\uC791 (\uC6CC\uCEE4 ' + cfg.concurrency + '): ' + endpoint);
+  log('\uD83D\uDE80 \uC11C\uBC84 \uACE0\uBD80\uD558 \uC2DC\uC791 (\uC6CC\uCEE4 ' + cfg.concurrency + (cfg.stressOnly ? ', stress \uC9D1\uC911' : '') + '): ' + endpoint);
   fetch('/load/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) })
     .then(function(r) { return r.json(); })
     .then(function(d) { log('\uC11C\uBC84 \uC6CC\uCEE4 ' + (d.workers || cfg.concurrency) + '\uAC1C \uAC00\uB3D9 \u2014 \uBE0C\uB77C\uC6B0\uC800 \uC5F0\uACB0 \uC81C\uD55C \uC6B0\uD68C'); })

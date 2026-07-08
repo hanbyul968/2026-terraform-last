@@ -83,8 +83,14 @@ h1 { text-align: center; margin-bottom: 10px; color: #00d4ff; font-size: 1.8em; 
 <input type="number" id="interval" value="0" min="0" max="5000" />
 </div>
 <div class="form-group">
-<label>Stress length</label>
-<input type="number" id="stressLength" value="256" min="1" max="1024" />
+<label>Stress length (클수록 CPU↑)</label>
+<input type="number" id="stressLength" value="256" min="1" max="16384" />
+</div>
+</div>
+<div class="form-row">
+<div class="form-group">
+<label><input type="checkbox" id="stressOnly" /> stress 집중 (노드 스케일용)</label>
+<span style="font-size:11px;color:#888">체크 시 서버 고부하가 <code>/v1/stress</code>만 집중 발사 → stress CPU 폭증 → HPA·Karpenter 스케일아웃</span>
 </div>
 </div>
 <div class="btn-group">

@@ -226,8 +226,9 @@ resource "kubectl_manifest" "karpenter_nodepool" {
       }
       limits = { cpu = "16" }
       disruption = {
+        # 부하 빠지면 30s 만에 저활용 노드 회수 → 평균 노드 수(비용 ratio) 감소.
         consolidationPolicy = "WhenEmptyOrUnderutilized"
-        consolidateAfter    = "60s"
+        consolidateAfter    = "30s"
       }
     }
   })

@@ -227,15 +227,25 @@ function wafxClassify(r){ // 반환: null(정상/404) 또는 {type, header, valu
   if(!WAFX_NORMHDR[hl]&&(val.length>=24||/(.)\1{7,}/.test(val)))return {type:'HDR',header:hl,value:val,why:'비정상 헤더(과도/쓰레기 값)'};
   return null;
 }
-function wafxRule(f,prio){var nm,hcl;
+// waf.tf 는 변수 기반 — 룰 HCL 이 아니라 terraform.tfvars 에 넣을 "값"을 제안한다.
+// ⚠ 리스트 변수는 기본값을 덮어쓰므로, 항상 기본값+새것 전체를 나열해서 출력.
+var WAFX_DEF_UA=['sqlmap','nikto','nmap','masscan','acunetix','havij','nuclei','wpscan','dirbuster','gobuster','attack'];
+var WAFX_DEF_HDR=['x-junk'];
+function wafxTfvars(list){return '['+list.map(function(x){return '"'+x+'"'}).join(', ')+']';}
+function wafxRule(f){
   if(f.type==='UA'){var tok=(f.value||'').toLowerCase().replace(/[^a-z0-9].*$/,'')||'badtool';
-    return {title:'악성 UA: '+esc(f.value),note:'기존 BadUserAgent 룰의 regex_string 에 단어 추가:',hcl:'regex_string = "(sqlmap|nikto|nmap|masscan|attack|nuclei|'+tok+')"'};}
-  if(f.type==='XFF'){return {title:'XFF 위조: '+esc(f.value),note:'기존 SpoofedForwardedFor 의 statement 를 이 regex 로 교체(내부/사설 IP 전부):',
-    hcl:'statement { regex_match_statement {\n  regex_string = "(127\\\\.0\\\\.0\\\\.1|10\\\\.|192\\\\.168\\\\.|172\\\\.(1[6-9]|2[0-9]|3[01])\\\\.)"\n  field_to_match { single_header { name = "x-forwarded-for" } }\n  text_transformation { priority = 0  type = "NONE" }\n}}'};}
+    var ua=WAFX_DEF_UA.slice();if(ua.indexOf(tok)<0)ua.push(tok);
+    return {title:'악성 UA: '+esc(f.value),
+      note:(WAFX_DEF_UA.indexOf(tok)>=0?'이미 기본값에 포함 — tfvars 로 덮어쓴 적 없다면 이미 차단 중. 아니면 아래로 복원:':'terraform/terraform.tfvars 에 (기본값+새 단어 전체):'),
+      hcl:'waf_blocked_user_agents = '+wafxTfvars(ua)};}
+  if(f.type==='XFF'){return {title:'XFF 위조: '+esc(f.value),
+      note:'기본값이 이미 true — tfvars 에서 false 로 껐다면 다시 켜기:',
+      hcl:'waf_block_private_xff = true'};}
   // HDR: 헤더 존재 시 차단
-  var safe=f.header.replace(/[^a-z0-9-]/g,'');
-  return {title:'비정상 헤더: '+esc(f.header),note:'그 헤더가 있으면 차단 (waf.tf 의 aws_wafv2_web_acl.cloudfront 안에 rule 추가):',
-    hcl:'rule {\n  name = "BlockHeader_'+safe+'"  priority = '+prio+'\n  action { block {} }\n  statement { size_constraint_statement {\n    comparison_operator = "GT"  size = 0\n    field_to_match { single_header { name = "'+f.header+'" } }\n    text_transformation { priority = 0  type = "NONE" }\n  }}\n  visibility_config { cloudwatch_metrics_enabled = true  metric_name = "'+safe+'"  sampled_requests_enabled = true }\n}'};}
+  var hd=WAFX_DEF_HDR.slice();if(hd.indexOf(f.header)<0)hd.push(f.header);
+  return {title:'비정상 헤더: '+esc(f.header),
+    note:(WAFX_DEF_HDR.indexOf(f.header)>=0?'이미 기본값에 포함 — 덮어쓴 적 없다면 이미 차단 중.':'terraform/terraform.tfvars 에 (기본값+새 헤더 전체, 소문자):'),
+    hcl:'waf_blocked_headers = '+wafxTfvars(hd)};}
 function wafxTest(f,ep){ep=ep||'http://<endpoint>';var q='/v1/user?email=x@x.org&requestid=1&uuid=7c5a3c6a-758f-4bc5-9bdf-3e573a0ad729';
   if(f.type==='UA')return 'curl -s -o /dev/null -w "%{http_code}\\n" -H "User-Agent: '+f.value+'" "'+ep+q+'"   # 403';
   if(f.type==='XFF')return 'curl -s -o /dev/null -w "%{http_code}\\n" -H "X-Forwarded-For: 10.0.0.1" "'+ep+q+'"   # 403';
@@ -251,20 +261,19 @@ function wafxRun(){var text=document.getElementById('wafx_in').value;var ep=docu
     if(blocked[f.header+'|'+(f.type==='UA'?(f.value||'').toLowerCase():'')])return;  // 이미 막히는 중
     var key=f.type+'|'+f.header+'|'+(f.type==='HDR'?'':f.value);if(seen[key])return;seen[key]=1;finds.push(f);});
   if(!finds.length){document.getElementById('wafx_out').innerHTML='<div class="tip good"><h3>막을 게 없습니다 👍</h3><div class=why>유효 경로로 들어온 비정상 요청 중 안 막힌 게 없어요. (없는 경로는 404가 정답이라 무시)</div></div>';return;}
-  var prio=6;
-  var out='<div class="tip warn"><h3>막아야 할 것 '+finds.length+'개</h3><div class=why>아래를 waf.tf에 반영하고 apply → 다시 분석.</div></div>';
-  finds.forEach(function(f){var ru=wafxRule(f,prio++);
+  var out='<div class="tip warn"><h3>막아야 할 것 '+finds.length+'개</h3><div class=why>아래 변수 값을 terraform/terraform.tfvars 에 넣고 apply → 다시 분석. (waf.tf 는 안 고쳐도 됨)</div></div>';
+  finds.forEach(function(f){var ru=wafxRule(f);
     out+='<div class=card style="margin-bottom:12px"><div class=lbl>'+esc(f.why)+'</div>'
       +'<div style="font-size:12.5px;margin-bottom:7px">'+ru.title+'</div>'
-      +'<div class=mut style="font-size:12px;margin-bottom:4px">① 룰 — '+ru.note+'</div>'
+      +'<div class=mut style="font-size:12px;margin-bottom:4px">① 변수 — '+ru.note+'</div>'
       +'<pre style="margin:0 0 9px;background:#f6f7f9;border:1px solid var(--line);border-radius:8px;padding:9px 11px;font-size:11.5px;white-space:pre-wrap;color:#1a1d23;overflow-x:auto">'+esc(ru.hcl)+'</pre>'
       +'<div class=mut style="font-size:12px;margin-bottom:4px">② 적용 후 테스트 (403 떠야 함)</div>'
       +'<pre style="margin:0;background:#f6f7f9;border:1px solid var(--line);border-radius:8px;padding:9px 11px;font-size:11.5px;white-space:pre-wrap;color:#1a1d23;overflow-x:auto">'+esc(wafxTest(f,ep))+'</pre></div>';});
-  out+='<div class="tip dim"><h3>적용 순서</h3><div class=why>1) 위 룰들을 terraform/waf.tf 에 추가 (priority는 안 쓰는 번호)\n2) cd terraform && terraform apply -auto-approve -var is_windows=true\n3) 위 curl 로 403 확인, 없는 경로는 404 확인\n4) waf_header_stats.py 다시 돌려 붙여넣고 「막을 게 없습니다」 나올 때까지 반복\n5) 대시보드 avail% 100% 유지(정상 오차단 없는지)</div></div>';
+  out+='<div class="tip dim"><h3>적용 순서</h3><div class=why>1) 위 변수 줄들을 terraform/terraform.tfvars 에 추가·병합 (같은 변수는 한 줄로 합치기)\n2) cd terraform && terraform apply -auto-approve -var "k8s_provider_ready=true"\n3) 위 curl 로 403 확인, 없는 경로(/.env)는 404 확인\n4) waf_header_stats.py 다시 돌려 붙여넣고 「막을 게 없습니다」 나올 때까지 반복\n5) 대시보드 avail% 100% 유지(정상 오차단 없는지) — 오차단이면 그 변수만 되돌려 apply\n※ 확신 없으면 waf_custom_rule_action = "count" 로 먼저 관찰 (확인 후 반드시 "block" 복귀)</div></div>';
   document.getElementById('wafx_out').innerHTML=out;}
 function vWafAnalyze(){
   return '<div class=card><h2>WAF분석 — 공격 로그 붙여넣고 막을 것 받기</h2>'
-   +'<div class=mut style="font-size:12px;margin-bottom:9px">CloudShell에서 <code>python3 waf_header_stats.py --log-group aws-waf-logs-&lt;project&gt; --region us-east-1 --hours 1</code> 돌린 <b>"전체" 표 출력</b>(또는 .csv)을 통째로 붙여넣고 [분석].</div>'
+   +'<div class=mut style="font-size:12px;margin-bottom:9px"><code>python waf_header_stats.py --log-group aws-waf-logs-&lt;project&gt; --region us-east-1 --hours 1</code> 의 <b>"전체" 표 출력</b>(또는 .csv)을 통째로 붙여넣고 [분석]. (그 스크립트의 「제안」 섹션도 같은 답을 줌 — 이 탭은 오프라인/시각화용)</div>'
    +'<div style="margin-bottom:8px">엔드포인트(테스트 명령용): <input id=wafx_ep type=text placeholder="http://xxxx.cloudfront.net" style="width:320px;background:var(--card2);color:var(--txt);border:1px solid var(--line);border-radius:7px;padding:6px 9px"></div>'
    +'<textarea id=wafx_in placeholder="여기에 waf_header_stats.py 출력 붙여넣기..." style="width:100%;height:200px;background:#f6f7f9;color:#1a1d23;border:1px solid var(--line);border-radius:8px;padding:10px;font-size:12px;font-family:monospace"></textarea>'
    +'<button onclick="wafxRun()" style="margin-top:10px">분석</button>'

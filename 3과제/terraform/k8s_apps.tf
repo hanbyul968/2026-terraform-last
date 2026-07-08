@@ -110,16 +110,18 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "user" {
     }
     behavior {
       scale_up {
-        stabilization_window_seconds = 0
+        # 30s 완충: 순간 스파이크로는 안 늘리고, 부하가 "지속"될 때만 확장.
+        # (0 이면 CPU 튀자마자 파드 2배 → 노드 폭증의 주범이었음)
+        stabilization_window_seconds = 30
         select_policy                = "Max"
         policy {
           type           = "Percent"
-          value          = 100
+          value          = 50 # 15초마다 최대 +50% (기존 100% = 2배씩)
           period_seconds = 15
         }
         policy {
           type           = "Pods"
-          value          = 4
+          value          = 2 # 15초마다 최대 +2개 (기존 4)
           period_seconds = 15
         }
       }
@@ -138,8 +140,10 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "user" {
       resource {
         name = "cpu"
         target {
+          # 60%: CPU가 더 차야 확장 → 파드/노드 덜 늘어남 (55는 과민했음).
+          # 꼬리지연 생기면 그 앱만 낮추기 — advise.py/autotune 이 판정해줌.
           type                = "Utilization"
-          average_utilization = 55
+          average_utilization = 60
         }
       }
     }
@@ -256,16 +260,18 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "product" {
     }
     behavior {
       scale_up {
-        stabilization_window_seconds = 0
+        # 30s 완충: 순간 스파이크로는 안 늘리고, 부하가 "지속"될 때만 확장.
+        # (0 이면 CPU 튀자마자 파드 2배 → 노드 폭증의 주범이었음)
+        stabilization_window_seconds = 30
         select_policy                = "Max"
         policy {
           type           = "Percent"
-          value          = 100
+          value          = 50 # 15초마다 최대 +50% (기존 100% = 2배씩)
           period_seconds = 15
         }
         policy {
           type           = "Pods"
-          value          = 4
+          value          = 2 # 15초마다 최대 +2개 (기존 4)
           period_seconds = 15
         }
       }
@@ -284,8 +290,10 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "product" {
       resource {
         name = "cpu"
         target {
+          # 60%: CPU가 더 차야 확장 → 파드/노드 덜 늘어남 (55는 과민했음).
+          # 꼬리지연 생기면 그 앱만 낮추기 — advise.py/autotune 이 판정해줌.
           type                = "Utilization"
-          average_utilization = 55
+          average_utilization = 60
         }
       }
     }
@@ -379,16 +387,18 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "stress" {
     }
     behavior {
       scale_up {
-        stabilization_window_seconds = 0
+        # 30s 완충: 순간 스파이크로는 안 늘리고, 부하가 "지속"될 때만 확장.
+        # (0 이면 CPU 튀자마자 파드 2배 → 노드 폭증의 주범이었음)
+        stabilization_window_seconds = 30
         select_policy                = "Max"
         policy {
           type           = "Percent"
-          value          = 100
+          value          = 50 # 15초마다 최대 +50% (기존 100% = 2배씩)
           period_seconds = 15
         }
         policy {
           type           = "Pods"
-          value          = 4
+          value          = 2 # 15초마다 최대 +2개 (기존 4)
           period_seconds = 15
         }
       }
@@ -407,8 +417,10 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "stress" {
       resource {
         name = "cpu"
         target {
+          # 60%: CPU가 더 차야 확장 → 파드/노드 덜 늘어남 (55는 과민했음).
+          # 꼬리지연 생기면 그 앱만 낮추기 — advise.py/autotune 이 판정해줌.
           type                = "Utilization"
-          average_utilization = 55
+          average_utilization = 60
         }
       }
     }

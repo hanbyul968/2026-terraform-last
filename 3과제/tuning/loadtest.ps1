@@ -77,3 +77,6 @@ if ($sampler) { Stop-Job $sampler -ErrorAction SilentlyContinue; Remove-Job $sam
 
 # --- 채점 (SLO 는 config.ps1 의 $SLOS) ---
 python (Join-Path $Here 'score.py') report $OUT $Label $SLOS
+
+# --- 권장값 + 복붙 명령 (측정 → 앱별 늘려/줄여/유지 판정) ---
+python (Join-Path $Here 'advise.py') $OUT --slos $SLOS --ns $NS

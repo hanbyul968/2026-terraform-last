@@ -13,11 +13,12 @@
 |---|---|
 | `config.ps1`    | **대회날 여기만 수정** — 엔드포인트 API 목록·SLO·부하파라미터·시드 |
 | `setup.ps1`     | 부트스트랩 (hey.exe·kubectl.exe 설치 + kubeconfig) |
-| `loadtest.ps1`  | 1회 부하 + 채점식 측정 (가용성/perf/노드수) |
-| `autotune.ps1`  | 조합 그리드 자동 스윕 → 채점 → 우승자 적용 |
+| `loadtest.ps1`  | 1회 부하 + 채점식 측정 (가용성/perf/노드수) + **끝에 advise.py 자동 호출** |
+| `advise.py`     | **측정 → 앱별 늘려/줄여/유지 판정 + 복붙 명령**(kubectl/terraform) 출력 |
+| `autotune.ps1`  | 조합 그리드 자동 스윕 → 채점 → 우승자 적용 (`-App <앱>` 앱별 정밀) |
 | `autotune-hc.ps1`| 힐클라이밍 정밀탐색 (노드 드레인으로 노이즈↓) |
 | `score.py`      | hey CSV 채점기 (위 스크립트들이 공용으로 호출) |
-| `waf_header_stats.py`| WAF 로그 분석 (boto3, 크로스플랫폼) |
+| `waf_header_stats.py`| WAF 로그 분석 + terraform.tfvars 제안 (boto3, 크로스플랫폼) |
 
 > 기존 `*.sh`(CloudShell/bash 판)도 참조용으로 남아 있지만, Windows 에서는 위 `*.ps1` 을 쓴다.
 
@@ -114,6 +115,40 @@ nodes      min=2 max=6 avg=3.40  (cost proxy avg/2 = 1.70)
 - `perf%`↑ = 성능점수↑, `nodes avg`↓ = 비용점수↑ (트레이드오프).
 - 산출물: `%TEMP%\tune-<label>\{<api>.csv, nodes.csv}`.
 
+## advise.py — "딱 정해주는" 권장값 + 복붙 명령
+
+`loadtest.ps1` 이 **끝에서 자동 호출**한다. 측정(perf/avail/p95)과 라이브 클러스터 상태
+(cpu request·HPA util/min·현재 CPU%)를 합쳐 **앱마다 [늘려/줄여/유지]를 판정**하고,
+그대로 칠 수 있는 명령을 뽑아준다. 따로 돌리려면:
+
+```powershell
+python advise.py <label>            # 예: python advise.py baseline
+python advise.py <결과폴더경로>      # %TEMP%\tune-<label> 이 아닌 경우
+```
+
+출력 예:
+
+```
+[stress]  판정: 늘려 ↑   (perf 90.0% / p95 1.810s > SLO 1.0s (꼬리지연))
+  현재: cpu=500m util=55% min=2 max=10 파드=2
+  권장: cpu=700m util=45% min=2 max=10
+  즉시 적용 (임시 - 재배포 시 사라짐):
+    kubectl -n app set resources deploy/stress --requests=cpu=700m
+    kubectl -n app patch hpa stress --type=merge -p '{...}'
+    kubectl -n app rollout status deploy/stress
+...
+  영구 반영 → terraform/k8s_apps.tf 해당 앱 수정 후:
+  stress  : requests.cpu = "700m"   average_utilization = 45   min_replicas = 2
+```
+
+**판정 우선순위 (채점 순서와 동일)**
+1. `avail < 99%` → **늘려**(게이트 최우선): cpu×1.5, min+1, util−5 — 비용보다 먼저
+2. `perf < 95%` 또는 `p95 > SLO` → **늘려**(꼬리지연): cpu×1.4, util−10
+3. `perf ≥ 99.5%` + 현재CPU ≪ 목표 → **줄여**(과투자→비용↓): cpu×0.75, util+10, min−1
+4. 그 외 → **유지**
+
+> 즉시 적용(kubectl)은 **임시** — 좋으면 반드시 `k8s_apps.tf` 에 박아 apply(아래). 한 번에 한 앱만.
+
 ## autotune.ps1 — 그리드 자동 스윕
 
 ```powershell
@@ -209,7 +244,7 @@ spec {
   metric {
     resource {
       name = "cpu"
-      target { type = "Utilization", average_utilization = 55 }  # ← 이 숫자 낮출수록 빨리 스케일아웃
+      target { type = "Utilization", average_utilization = 60 }  # ← 낮출수록 빨리 스케일아웃(성능↑/노드↑), 높일수록 느긋(비용↓)
     }
   }
 }
@@ -242,13 +277,33 @@ cd ..\terraform ; terraform apply -auto-approve
 **처방별 구체 예시 (전 → 후)**
 | 상황 | 무엇을 | 전 → 후 |
 |---|---|---|
-| stress perf% 낮음(꼬리지연) | stress `cpu` | `300m → 900m` |
-| stress 스케일이 느림 | stress HPA `util` / `min` | `55 → 45` / `2 → 3` |
+| stress perf% 낮음(꼬리지연) | stress `cpu` | `500m → 700~900m` |
+| stress 스케일이 느림 | stress HPA `util` / `min` | `60 → 45` / `2 → 3` |
 | avail < 99% | 해당 앱 `min_replicas` | `2 → 3~4` |
-| perf 100%인데 노드 과다 | user/product `cpu`/`util` | `300m → 200m` / `55 → 65` |
+| perf 100%인데 노드 과다 | user/product `cpu`/`util` | `200m → 150m` / `60 → 70` |
 | 폭주에 천장 막힘 | `max_replicas` | `10 → 12` |
 
 > 한 번에 하나씩만 바꾸고 → `loadtest`로 재측정 → 효과 확인. 여러 개 동시에 바꾸면 뭐가 효과인지 모름.
+
+### 노드가 너무 쉽게 늘어날 때 (비용 ratio↑)
+
+노드 증가의 진짜 원인은 대개 **HPA가 파드를 과도하게 늘리는 것**이다(파드↑ → 노드↑).
+`k8s_apps.tf` 의 HPA 는 이미 **덜 과민하게** 조정돼 있다(기본값):
+
+| 손잡이 | 값 | 효과 |
+|---|---|---|
+| `average_utilization` | **60** (과거 55) | CPU 더 차야 확장 → 파드·노드 덜 늘어남 |
+| `scale_up.stabilization_window_seconds` | **30** (과거 0) | 순간 스파이크 무시, 지속될 때만 확장 |
+| `scale_up` policy | **+50% / +2 pods** per 15s (과거 100%/4) | 한 번에 폭증 안 함 |
+| Karpenter `consolidateAfter` (`karpenter.tf`) | **30s** (과거 60) | 부하 빠지면 빨리 노드 회수 |
+
+**그래도 노드가 많으면** (advise.py 가 「줄여 ↓」 로 판정하는 앱):
+1. 과투자 앱의 `requests.cpu`↓ → 노드당 파드 밀도↑ → 노드 수↓ (가장 효과적)
+2. 그 앱 HPA `average_utilization`↑ (60 → 70) → 더 느긋하게 확장
+3. `min_replicas` 가 3+ 면 2로 → 유휴 파드 감소
+
+> ⚠️ 단 **avail% 99% 는 절대 사수**. 노드를 줄이려다 가용성 깨지면 12점이 날아간다.
+> `requests.cpu` 를 실사용량보다 너무 낮추면 부하 시 파드가 터지니, advise.py 권장값(실측 기반)을 따를 것.
 
 ### autotune 우승값을 그대로 쓰면 안 되는 이유 (기본 모드)
 기본 모드는 **모든 앱에 똑같은 cpu/util**을 적용해 비교한다. 그래서 우승값(예: `300m 균일`)을
@@ -284,7 +339,7 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "stress" {
   spec {
     min_replicas = 3        # ← 시작부터 여유
     max_replicas = 10
-    metric { resource { target { average_utilization = 55 } } }  # ← 낮출수록 빨리 스케일
+    metric { resource { target { average_utilization = 60 } } }  # ← 낮출수록 빨리 스케일
   }
 }
 ```

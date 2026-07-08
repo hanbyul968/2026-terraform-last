@@ -3,12 +3,14 @@
 단일 파일 웹 대시보드(표준 라이브러리만, 설치 불필요). EKS 클러스터/앱/WAF 상태를
 한 화면에서 보고, 4xx/5xx 오류의 **원인과 해결법**까지 자동 진단해 보여줍니다.
 
-## 보여주는 것
+## 보여주는 것 (탭)
 - **개요**: 통과(allow)/차단(block) 합계, 2xx·4xx·5xx 합계, Pod ready/총개수, 노드 수, 앱별 요약 카드, **진단(원인·해결)**
 - **앱별(user/product/stress)**: SLO 충족률·성공률·p50/p95/p99, 2xx/4xx/5xx 카운트, 경로별·에러경로, **최근 2xx / 최근 4xx / 최근 5xx 요청** 분리 표
 - **Pod**: Pod별 상태/재시작/CPU·MEM/노드/오류사유(CrashLoop·OOM 등)
 - **노드**: 노드 수·타입(karpenter/base)·Ready·CPU/MEM 사용률, HPA 현황
 - **WAF**: 차단(403) 룰/IP/URI/메서드 + 최근 차단 (allow와 분리)
+- **WAF분석**: `waf_header_stats.py` 출력을 붙여넣으면 → **아직 안 막힌 공격 + terraform.tfvars 변수값(복붙) + 테스트 curl** 을 뽑아줌 (오프라인 동작)
+- **계산**: 라이브 측정으로 앱별 **늘려/줄여/유지** 자동 판정 + `kubectl`/`k8s_apps.tf` 반영값 (CLI 판 = `tuning/advise.py`)
 - **진단**: Pod 크래시 원인, 5xx/4xx/성능 저하 원인 + 구체적 해결 명령
 
 ## 요구사항
@@ -123,7 +125,8 @@ python3 monitor.py --namespace app                 # 브라우저: http://127.0.
 --since 15m                     조회 기간 (5m/15m/30m/1h)
 --once / --watch <초>           터미널 1회 / 주기 갱신 (CloudShell)
 --port 8080 --host 127.0.0.1    웹서버 (로컬 PC)
---waf-log-group / --waf-region  WAF 로그그룹/리전 (기본 aws-waf-logs-wsi2026 / ap-northeast-2)
+--waf-log-group / --waf-region  WAF 로그그룹/리전 (기본 aws-waf-logs-wsi2026 / us-east-1)
+                                ※ WAF 는 CloudFront scope → 로그는 반드시 us-east-1
 ```
 ## 전제 (데이터가 비어 보일 때)
 1. **WAF 탭**: terraform `waf.tf` 에 **WAF 로깅이 설정돼야** 데이터가 찹니다.

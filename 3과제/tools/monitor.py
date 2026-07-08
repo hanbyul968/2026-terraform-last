@@ -273,22 +273,39 @@ def _g(e, *k):
     return x if x not in ({}, None) else "?"
 
 
+# waf.tf 의 커스텀 룰 이름 → 한글. 변수 기반이라 동적 이름은 prefix 로 매칭한다.
 RULE_KO = {
     "RequireOriginVerify": "직접 접근 차단 — CloudFront 우회(origin-verify 헤더 없음)",
-    "BadUserAgent": "악성 User-Agent (sqlmap/스캐너/attack)",
-    "SpoofedForwardedFor": "X-Forwarded-For 위조(루프백/사설 IP)",
-    "OversizedJunkHeader": "비정상 헤더(X-Junk)",
+    "BlockedUserAgents": "악성 User-Agent (스캐너/공격도구)",
+    "SpoofedForwardedFor": "X-Forwarded-For 위조(루프백/사설/메타데이터 IP)",
     "AWSManagedRulesCommonRuleSet": "비정상 입력(공통 규칙: 잘못된 헤더/경로/페이로드)",
     "AWSManagedRulesKnownBadInputsRuleSet": "알려진 악성 입력 패턴",
     "AWSManagedRulesSQLiRuleSet": "SQL 인젝션 의심",
 }
+# 동적 생성 룰(변수 리스트로 개수가 바뀜)은 이름 prefix 로 판별.
+RULE_KO_PREFIX = [
+    ("BlockedHeaderValue-", "비정상 헤더 값(차단 목록 일치)"),
+    ("BlockedHeader-", "비정상 헤더 존재(차단 목록)"),
+    ("BlockedBodyPattern-", "비정상 body 패턴(인젝션 토큰)"),
+]
+
+
+def _rule_ko(rid):
+    if rid in RULE_KO:
+        return RULE_KO[rid]
+    for pfx, ko in RULE_KO_PREFIX:
+        if rid.startswith(pfx):
+            # BlockedHeader-x-junk → "비정상 헤더 존재(차단 목록): x-junk"
+            tail = rid[len(pfx):]
+            return ko + ((": " + tail) if tail and not tail.isdigit() else "")
+    return rid
 
 
 def _waf_reason(e):
     """차단 사유를 사람이 읽을 한글로."""
     trid = e.get("terminatingRuleId", "") or ""
     if trid and trid != "Default_Action":
-        return RULE_KO.get(trid, trid)
+        return _rule_ko(trid)
     # 매니지드 룰 그룹이 막은 경우: 그룹명(한글) + 실제 매칭된 세부 룰 id
     for g in e.get("ruleGroupList") or []:
         tr = g.get("terminatingRule") or {}

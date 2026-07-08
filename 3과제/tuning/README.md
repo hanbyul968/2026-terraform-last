@@ -7,13 +7,18 @@
 > 고쳐 `autotune.ps1`로 그 자리에서 최적값을 다시 찾는 게 이 도구의 목적이다.
 > terraform 의 기본값은 "앱 안 타는 견고한 출발점"일 뿐, 정답이 아니다.
 
+> **`부하/`(루트) 와 뭐가 다른가**: `부하/`는 **수동 GUI** — 브라우저에서 부하 주고 점수를 눈으로 본다.
+> `tuning/`은 **자동 CLI 체인** — `autotune`이 조합을 스윕하고 `advise`가 앱별 값을 판정한다.
+> `loadtest.ps1`은 직접 치는 도구가 아니라 **그 자동화의 측정 엔진**(autotune이 내부 호출, advise가 CSV 소비)이다.
+> → "그냥 점수만 볼래" = `부하/`,  "자동으로 최적값 찾을래" = `tuning/`.
+
 ## 구성 파일
 
 | 파일 | 역할 |
 |---|---|
 | `config.ps1`    | **대회날 여기만 수정** — `$ENDPOINT`(한 번만) + API 목록·SLO·부하파라미터·시드 |
 | `setup.ps1`     | 부트스트랩 (hey.exe·kubectl.exe 설치 + kubeconfig) |
-| `loadtest.ps1`  | 1회 부하 + 채점식 측정 (가용성/perf/노드수) + **끝에 advise.py 자동 호출** |
+| `loadtest.ps1`  | 측정 엔진 — 1회 부하 + 채점식 측정(가용성/perf/노드수) + 끝에 advise 자동 호출. autotune이 내부 호출 |
 | `advise.py`     | **측정 → 앱별 늘려/줄여/유지 판정 + 복붙 명령**(kubectl/terraform) 출력 |
 | `autotune.ps1`  | 조합 그리드 자동 스윕 → 채점 → 우승자 적용 (`-App <앱>` 앱별 정밀) |
 | `autotune-hc.ps1`| 힐클라이밍 정밀탐색 (노드 드레인으로 노이즈↓) |

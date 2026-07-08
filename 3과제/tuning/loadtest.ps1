@@ -9,9 +9,9 @@
 #>
 [CmdletBinding()]
 param(
-  [Parameter(Mandatory = $true)][string]$Endpoint,
   [string]$Duration = '180s',
-  [string]$Label = 'run'
+  [string]$Label = 'run',
+  [string]$Url = ''   # 비우면 config.ps1 의 $ENDPOINT 사용 (-Url 로 이 실행만 override)
 )
 $ErrorActionPreference = 'Continue'
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -21,7 +21,11 @@ $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $bin = Join-Path $env:USERPROFILE 'bin'
 if ($env:Path -notlike "*$bin*") { $env:Path = "$bin;$env:Path" }
 
-$EP = $Endpoint.TrimEnd('/')
+if (-not $Url) { $Url = $ENDPOINT }
+if (-not $Url -or $Url -like '*REPLACE-ME*') {
+  Write-Error 'endpoint 미설정 — config.ps1 의 $ENDPOINT 를 채우거나 -Url http://... 로 전달'; exit 1
+}
+$EP = $Url.TrimEnd('/')
 $OUT = Join-Path $env:TEMP "tune-$Label"
 New-Item -ItemType Directory -Force -Path $OUT | Out-Null
 

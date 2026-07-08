@@ -1,8 +1,11 @@
 # ===== 대회날 여기만 수정 (PowerShell 판) =====
 # 부하/채점 대상 정의. loadtest.ps1 / autotune.ps1 / autotune-hc.ps1 이 이 파일을 dot-source 한다:
 #     . .\config.ps1
-#
-# bash 판(config.env)과 동일한 내용을 PowerShell 객체로 표현했다.
+
+# 엔드포인트 — 대회날 여기 한 번만 붙여넣으면 loadtest/autotune/autotune-hc 전부 이 값을 쓴다.
+# (스크립트에 -Url 로 넘기면 그 값이 우선)
+
+if (-not $ENDPOINT) { $ENDPOINT = 'http://REPLACE-ME.cloudfront.net' }
 
 # 공통 식별자(앱이 요구하면). 안 쓰면 비워둬도 됨.
 if (-not $UUID) { $UUID = '7c5a3c6a-758f-4bc5-9bdf-3e573a0ad729' }

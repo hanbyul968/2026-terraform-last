@@ -11,7 +11,7 @@
 
 | 파일 | 역할 |
 |---|---|
-| `config.ps1`    | **대회날 여기만 수정** — 엔드포인트 API 목록·SLO·부하파라미터·시드 |
+| `config.ps1`    | **대회날 여기만 수정** — `$ENDPOINT`(한 번만) + API 목록·SLO·부하파라미터·시드 |
 | `setup.ps1`     | 부트스트랩 (hey.exe·kubectl.exe 설치 + kubeconfig) |
 | `loadtest.ps1`  | 1회 부하 + 채점식 측정 (가용성/perf/노드수) + **끝에 advise.py 자동 호출** |
 | `advise.py`     | **측정 → 앱별 늘려/줄여/유지 판정 + 복붙 명령**(kubectl/terraform) 출력 |
@@ -41,15 +41,15 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 # 2) 클러스터 보이는지 확인
 kubectl -n app get pods
 
-# 3) 엔드포인트 확인 (terraform output 또는 CloudFront 콘솔)
-#    예: http://dj1k92w9552mb.cloudfront.net
+# 3) 엔드포인트를 config.ps1 에 한 번만 붙여넣기 (terraform output 또는 CloudFront 콘솔)
+#    config.ps1 상단:  $ENDPOINT = 'http://dxxxx.cloudfront.net'
+#    → 이후 모든 스크립트가 이 값을 쓴다 (매번 주소 안 쳐도 됨).
 
-# 4) baseline 측정
-.\loadtest.ps1 http://<endpoint> 180s baseline
-
-# 5) 최적값 자동 탐색
-.\autotune.ps1 http://<endpoint> 90s
+# 4) baseline 측정  →  5) 최적값 자동 탐색  (엔드포인트 생략!)
+.\loadtest.ps1 180s baseline
+.\autotune.ps1 -App stress
 ```
+> 특정 실행만 다른 엔드포인트로 하려면 `-Url http://...` 를 붙이면 그 값이 우선한다.
 
 ### hey 설치 실패 시 (loadtest가 전부 `NO DATA`)
 `setup.ps1`은 hey.exe 를 공식 S3 미러에서 받는데, 미러가 **403(AccessDenied)** 를 내면
@@ -98,7 +98,7 @@ $NS           = 'app'  # k8s 네임스페이스
 ## loadtest.ps1
 
 ```powershell
-.\loadtest.ps1 <endpoint> [duration] [label]
+.\loadtest.ps1 [duration] [label] [-Url http://...]   # 엔드포인트는 config.ps1 $ENDPOINT
 ```
 config의 모든 API에 동시에 부하 → 출력:
 
@@ -150,9 +150,10 @@ python advise.py <결과폴더경로>      # %TEMP%\tune-<label> 이 아닌 경�
 ## autotune.ps1 — 그리드 자동 스윕
 
 ```powershell
-.\autotune.ps1 <endpoint> [-Duration 90s]            # 모든 앱 균일 (방향 탐색)
-.\autotune.ps1 <endpoint> -App stress                # 그 앱만 튜닝 (앱별 정밀) ★권장
+.\autotune.ps1 [-Duration 90s]      # 모든 앱 균일 (방향 탐색)
+.\autotune.ps1 -App stress          # 그 앱만 튜닝 (앱별 정밀) ★권장
 ```
+> 엔드포인트는 config.ps1 의 `$ENDPOINT`. 다른 주소면 `-Url http://...` 추가.
 - **기본 모드**: config의 모든 앱에 **균일한 (cpu·util·min·max)** 조합을 차례로 적용(live `kubectl patch`, terraform 재apply 없음). 대략적인 방향 탐색용.
 - **`-App <앱>` 모드**: **그 앱만** patch 하고 나머지는 현재 설정 유지. 점수도 그 앱의 perf 기준
   (가용성 게이트는 여전히 전체 앱 최소값 — 다른 앱을 죽이는 조합은 탈락).
@@ -165,7 +166,7 @@ python advise.py <결과폴더경로>      # %TEMP%\tune-<label> 이 아닌 경�
 ## autotune-hc.ps1 — 힐클라이밍 정밀탐색
 
 ```powershell
-.\autotune-hc.ps1 <endpoint> [duration] [start_cpu] [start_util] [max_moves]
+.\autotune-hc.ps1 [duration] [start_cpu] [start_util] [max_moves] [-Url http://...]
 ```
 - 시작점에서 cpu(±100m)·util(±5)을 흔들어 점수 개선 방향으로 이동(first-improvement).
 - 매 trial 전 **노드를 baseline까지 드레인**(Karpenter consolidation 대기) → 비용 측정 노이즈↓.
@@ -178,8 +179,8 @@ python advise.py <결과폴더경로>      # %TEMP%\tune-<label> 이 아닌 경�
 1. **PowerShell** 열기 → `git clone` → `cd tuning` (자격증명은 미리 `aws configure`).
 2. `.\setup.ps1 -Cluster <cluster> -Region <region>`.
 3. 받은 앱·채점기준표 보고 **`config.ps1`의 $APIS/$SEEDS/SLO 수정**.
-4. `.\loadtest.ps1 <ep> 180s baseline`로 현재 상태 확인.
-5. `.\autotune.ps1 <ep> 90s`로 최적 조합 선정 → 필요하면 `autotune-hc.ps1`로 정밀화.
+4. `.\loadtest.ps1 180s baseline`로 현재 상태 확인 (엔드포인트는 config.ps1 $ENDPOINT).
+5. `.\autotune.ps1 -App <병목앱>`로 최적 조합 선정 → 필요하면 `autotune-hc.ps1`로 정밀화.
 6. 출력된 값으로 `terraform/k8s_apps.tf` 수정 후 `terraform apply` (영구 반영).
 
 > 부하는 Karpenter 노드를 띄워 **비용 발생**. 끝나면 consolidation(~30s) 확인,
@@ -262,7 +263,7 @@ stress   2686   100.0%  71.7%   0.594  1.907  2.274  2.974
 - user/product엔 **과함** → 노드 늘어 비용↑
 - stress엔 **부족** → 성능 그대로
 
-→ 해결책은 **`-App` 모드**: 병목 앱만 골라 `.\autotune.ps1 <ep> -App stress` 로 돌리면
+→ 해결책은 **`-App` 모드**: 병목 앱만 골라 `.\autotune.ps1 -App stress` 로 돌리면
 그 앱만 patch/채점하므로 우승값을 **그 앱에 그대로 반영**해도 된다.
 예) user/product `cpu=200m` 유지, stress 만 `-App` 으로 `750~900m` 탐색.
 

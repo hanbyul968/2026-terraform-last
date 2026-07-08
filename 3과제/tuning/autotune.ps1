@@ -11,13 +11,14 @@
                 → 병목 앱을 loadtest 로 찾은 뒤, 그 앱만 -App 으로 돌리는 것을 권장.
 
   사용법:
-    .\autotune.ps1 <endpoint> [-Duration 90s] [-App stress]
+    .\autotune.ps1 [-Duration 90s] [-App stress] [-Url http://...]
+    (Url 생략 시 config.ps1 의 $ENDPOINT 사용)
 #>
 [CmdletBinding()]
 param(
-  [Parameter(Mandatory = $true)][string]$Endpoint,
   [string]$Duration = '90s',
-  [string]$App = ''
+  [string]$App = '',
+  [string]$Url = ''   # 비우면 config.ps1 의 $ENDPOINT 사용 (-Url 로 이 실행만 override)
 )
 $ErrorActionPreference = 'Continue'
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -25,7 +26,11 @@ $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 $bin = Join-Path $env:USERPROFILE 'bin'
 if ($env:Path -notlike "*$bin*") { $env:Path = "$bin;$env:Path" }
-$EP = $Endpoint.TrimEnd('/')
+if (-not $Url) { $Url = $ENDPOINT }
+if (-not $Url -or $Url -like '*REPLACE-ME*') {
+  Write-Error 'endpoint 미설정 — config.ps1 의 $ENDPOINT 를 채우거나 -Url http://... 로 전달'; exit 1
+}
+$EP = $Url.TrimEnd('/')
 
 if (-not (Get-Command hey -ErrorAction SilentlyContinue) -or -not (Get-Command kubectl -ErrorAction SilentlyContinue)) {
   Write-Error 'hey/kubectl 없음 — .\setup.ps1 먼저'; exit 1
@@ -81,7 +86,7 @@ foreach ($c in $COMBOS) {
   Write-Host ">>> combo=$($c.name)  cpu=$($c.cpu) util=$($c.util) replicas=$($c.min)-$($c.max)"
   Invoke-PatchAll $c.cpu $c.util $c.min $c.max
   Start-Sleep -Seconds 45   # HPA/Karpenter 가 baseline 으로 돌아가도록
-  & (Join-Path $Here 'loadtest.ps1') $EP $Duration $c.name *> $null
+  & (Join-Path $Here 'loadtest.ps1') -Url $EP -Duration $Duration -Label $c.name *> $null
   $r = Get-TrialScore $c.name
   $ap, $ma, $na, $sc = $r[0], $r[1], $r[2], $r[3]
   Write-Host ("    perf_avg={0} avail_min={1} nodes_avg={2} SCORE={3}" -f $ap, $ma, $na, $sc)

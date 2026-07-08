@@ -9,11 +9,11 @@
 #>
 [CmdletBinding()]
 param(
-  [Parameter(Mandatory = $true)][string]$Endpoint,
   [string]$Duration = '120s',
   [int]$Cpu = 300,
-  [int]$Util = 55,
-  [int]$MaxMoves = 4
+  [int]$Util = 60,
+  [int]$MaxMoves = 4,
+  [string]$Url = ''   # 비우면 config.ps1 의 $ENDPOINT 사용 (-Url 로 이 실행만 override)
 )
 $ErrorActionPreference = 'Continue'
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -21,7 +21,11 @@ $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 $bin = Join-Path $env:USERPROFILE 'bin'
 if ($env:Path -notlike "*$bin*") { $env:Path = "$bin;$env:Path" }
-$EP = $Endpoint.TrimEnd('/')
+if (-not $Url) { $Url = $ENDPOINT }
+if (-not $Url -or $Url -like '*REPLACE-ME*') {
+  Write-Error 'endpoint 미설정 — config.ps1 의 $ENDPOINT 를 채우거나 -Url http://... 로 전달'; exit 1
+}
+$EP = $Url.TrimEnd('/')
 
 if (-not (Get-Command hey -ErrorAction SilentlyContinue) -or -not (Get-Command kubectl -ErrorAction SilentlyContinue)) {
   Write-Error 'hey/kubectl 없음 — .\setup.ps1 먼저'; exit 1
@@ -61,7 +65,7 @@ function Measure-State {
   $label = "hc$($script:Trial)_${cpu}_${util}"
   Set-State $cpu $util
   Invoke-Drain
-  & (Join-Path $Here 'loadtest.ps1') $EP $Duration $label *> $null
+  & (Join-Path $Here 'loadtest.ps1') -Url $EP -Duration $Duration -Label $label *> $null
   $out = Join-Path $env:TEMP "tune-$label"
   $r = (python (Join-Path $Here 'score.py') score $out $SLOS $AVAIL_GATE $COST_PENALTY) -split '\s+'
   $ap, $ma, $na, $sc = $r[0], $r[1], $r[2], $r[3]

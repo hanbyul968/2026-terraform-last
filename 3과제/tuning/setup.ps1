@@ -49,5 +49,6 @@ if (Get-Command hey -ErrorAction SilentlyContinue) { Write-Host 'hey: ok' }
 python --version
 Write-Host ''
 Write-Host 'sanity:  kubectl -n app get pods'
-Write-Host 'run:     .\loadtest.ps1 <endpoint> 180s baseline'
-Write-Host 'tune:    .\autotune.ps1 <endpoint> 90s'
+Write-Host '먼저:    config.ps1 의 $ENDPOINT 에 엔드포인트 한 번 붙여넣기'
+Write-Host 'run:     .\loadtest.ps1 180s baseline'
+Write-Host 'tune:    .\autotune.ps1 -App stress'

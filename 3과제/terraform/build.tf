@@ -55,6 +55,11 @@ resource "null_resource" "build_push" {
     stress_bin  = local.app_bins["stress"]
     dockerfile  = local.dockerfile_hash
     tags        = join(",", values(local.app_image_tags))
+    # 매 apply 마다 재실행 → ECR 이 비어있거나(외부 삭제/repo 재생성) state 와
+    # 어긋나도 항상 이미지를 다시 push 하여 ImagePullBackOff 를 원천 차단.
+    # docker 레이어 캐시로 재실행은 빠르고, 이미지 태그는 hash 기반이라
+    # 앱이 안 바뀌면 파드 롤링도 발생하지 않음(불필요한 재배포 없음).
+    always = timestamp()
   }
 
   depends_on = [aws_ecr_repository.this]

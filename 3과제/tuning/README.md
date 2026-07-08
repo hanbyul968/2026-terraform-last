@@ -495,7 +495,7 @@ python waf_header_stats.py --log-group aws-waf-logs-wsi2026 --region us-east-1 -
 >
 > 🤖 **자동으로 하고 싶으면**: `waf_header_stats.py` 가 출력 하단 **「제안」 섹션**에
 > `terraform.tfvars` 에 넣을 값을 그대로 뽑아준다 — 복붙 → apply → 재확인이 전부.
-> (대시보드 「WAF분석」 탭의 HCL 룰 출력은 구버전 방식 — 지금은 변수 방식이 정답)
+> (대시보드 `tools/dashboard.py` 「WAF분석」 탭에 이 출력을 붙여넣어도 같은 tfvars 값을 준다)
 
 ### STEP 0 — 돌리기
 ```powershell

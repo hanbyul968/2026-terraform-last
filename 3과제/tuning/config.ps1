@@ -1,4 +1,4 @@
-# ===== 대회날 여기만 수정 (PowerShell 판) =====
+﻿# ===== 대회날 여기만 수정 (PowerShell 판) =====
 # 부하/채점 대상 정의. loadtest.ps1 / autotune.ps1 / autotune-hc.ps1 이 이 파일을 dot-source 한다:
 #     . .\config.ps1
 

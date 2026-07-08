@@ -1,4 +1,4 @@
-<#
+﻿<#
   config 기반 자동 튜너 (autotune.sh 의 PowerShell 판).
   라이브 클러스터를 patch 하며 조합을 스윕하고(빠름, terraform 재적용 없음),
   각 조합마다 채점 스타일 부하 테스트를 돌려 rubric(성능효율+고가용성+비용)으로 점수화,

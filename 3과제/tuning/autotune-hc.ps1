@@ -1,4 +1,4 @@
-<#
+﻿<#
   config 기반 hill-climbing 정밀 튜너 (autotune-hc.sh 의 PowerShell 판).
   한 점에서 시작해 두 knob(cpu request, HPA util)을 모든 앱에 균일 적용하며 개선한다.
   autotune.ps1 보다 깨끗한 측정: 각 시도 전에 노드를 baseline 으로 drain(Karpenter 통합 대기)하고 더 길게 부하.

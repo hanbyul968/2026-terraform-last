@@ -1,4 +1,4 @@
-<#
+﻿<#
   채점기 스타일 부하 테스트 (loadtest.sh 의 PowerShell 판). config.ps1 을 dot-source 한다.
   API 목록/SLO/부하 모양은 config.ps1 에서 읽으므로 대회 앱이 바뀌어도 config 만 고치면 된다.
 

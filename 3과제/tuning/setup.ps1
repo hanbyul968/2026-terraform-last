@@ -1,4 +1,4 @@
-<#
+﻿<#
   Windows PowerShell 부트스트랩 (cloudshell-setup.sh 의 대응판).
   hey.exe + kubectl.exe 를 %USERPROFILE%\bin 에 설치하고 PATH 에 등록, kubeconfig 를 쓴다.
   전제: aws CLI, python 은 이미 설치돼 있어야 한다 (aws --version, python --version).

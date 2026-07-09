@@ -1,0 +1,94 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluent-bit-config
+  namespace: logging
+data:
+  fluent-bit.conf: |
+    [SERVICE]
+        Flush        1
+        Log_Level    info
+        Parsers_File parsers.conf
+        Daemon       off
+
+    [INPUT]
+        Name              tail
+        Path              /var/log/containers/book-*_skills_*.log
+        Tag               book
+        Refresh_Interval  5
+        Read_from_Head    true
+        Parser            docker
+
+    [FILTER]
+        Name         parser
+        Match        book
+        Key_Name     log
+        Parser       accesslog
+        Reserve_Data On
+
+    [FILTER]
+        Name              rewrite_tag
+        Match             book
+        Rule              remote_addr ^10\.0\.10\. book.az-a false
+        Rule              remote_addr ^10\.0\.11\. book.az-b false
+
+    [OUTPUT]
+        Name              cloudwatch_logs
+        Match             book.az-a
+        region            ap-northeast-2
+        log_group_name    /eks/book-svc/access
+        log_stream_name   /book-svc/ap-northeast-2a
+        auto_create_group true
+
+    [OUTPUT]
+        Name              cloudwatch_logs
+        Match             book.az-b
+        region            ap-northeast-2
+        log_group_name    /eks/book-svc/access
+        log_stream_name   /book-svc/ap-northeast-2b
+        auto_create_group true
+
+  parsers.conf: |
+    [PARSER]
+        Name        docker
+        Format      json
+        Time_Key    time
+        Time_Format %Y-%m-%dT%H:%M:%S.%L
+
+    [PARSER]
+        Name        accesslog
+        Format      regex
+        Regex       ^.*remote_addr=(?<remote_addr>[^:\s]+).*$
+
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: aws-for-fluent-bit
+  namespace: logging
+spec:
+  selector:
+    matchLabels:
+      app: fluent-bit
+  template:
+    metadata:
+      labels:
+        app: fluent-bit
+    spec:
+      serviceAccountName: fluent-bit-sa
+      containers:
+        - name: fluent-bit
+          image: PLACEHOLDER_ACCOUNT_ID.dkr.ecr.ap-northeast-2.amazonaws.com/aws-for-fluent-bit:latest
+          volumeMounts:
+            - name: varlog
+              mountPath: /var/log
+            - name: config
+              mountPath: /fluent-bit/etc/
+      terminationGracePeriodSeconds: 10
+      volumes:
+        - name: varlog
+          hostPath:
+            path: /var/log
+        - name: config
+          configMap:
+            name: fluent-bit-config

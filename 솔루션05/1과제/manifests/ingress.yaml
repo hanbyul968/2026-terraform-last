@@ -1,0 +1,23 @@
+apiVersion: elbv2.k8s.aws/v1beta1
+kind: TargetGroupBinding
+metadata:
+  name: book-tgb
+  namespace: skills
+spec:
+  serviceRef:
+    name: book-svc
+    port: 80
+  targetGroupARN: PLACEHOLDER_BOOK_TG
+  targetType: ip
+---
+apiVersion: elbv2.k8s.aws/v1beta1
+kind: TargetGroupBinding
+metadata:
+  name: grafana-tgb
+  namespace: monitoring
+spec:
+  serviceRef:
+    name: grafana-svc
+    port: 80
+  targetGroupARN: PLACEHOLDER_GRAFANA_TG
+  targetType: ip

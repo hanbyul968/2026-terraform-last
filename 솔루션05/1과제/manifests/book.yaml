@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: book
+  namespace: skills
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: book
+  template:
+    metadata:
+      labels:
+        app: book
+    spec:
+      serviceAccountName: book-sa
+      nodeSelector:
+        role: app
+      containers:
+        - name: book
+          image: PLACEHOLDER_ACCOUNT_ID.dkr.ecr.ap-northeast-2.amazonaws.com/book:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: AWS_REGION
+              value: ap-northeast-2
+            - name: TABLE_NAME
+              value: books
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: book-svc
+  namespace: skills
+spec:
+  selector:
+    app: book
+  ports:
+    - port: 80
+      targetPort: 8080
+      protocol: TCP

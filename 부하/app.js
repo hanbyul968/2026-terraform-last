@@ -57,24 +57,38 @@ async function sendRequest(api, url, opts) {
   }
 }
 
+// 데이터 접두사/개수 (덤프에 맞게 UI 에서 설정). 앱이 바뀌어도 값만 바꾸면 됨.
+function dataPrefix() {
+  var v = document.getElementById('dataPrefix');
+  return (v && v.value.trim()) || 'testuser';
+}
+function dataCount() {
+  var v = document.getElementById('dataCount');
+  var n = v ? parseInt(v.value) : 1000;
+  return (n && n > 0) ? n : 1000;
+}
+function randId() {
+  return dataPrefix() + (Math.floor(Math.random() * dataCount()) + 1);
+}
+
 async function testUser(endpoint) {
-  var rnd = Math.floor(Math.random() * 1000) + 1;
+  var id = randId();
   var rid = Date.now().toString();
   var uuid = crypto.randomUUID();
-  var url = endpoint + '/v1/user?email=dbdump' + rnd + '%40example.org&requestid=' + rid + '&uuid=' + uuid;
+  var url = endpoint + '/v1/user?email=' + encodeURIComponent(id + '@example.org') + '&requestid=' + rid + '&uuid=' + uuid;
   return sendRequest('user', url, { method: 'GET' });
 }
 
 async function testProduct(endpoint) {
-  var rnd = Math.floor(Math.random() * 1000) + 1;
+  var id = randId();
   var rid = Date.now().toString();
   var uuid = crypto.randomUUID();
-  // POST로 product 생성
+  // POST로 product 생성 (덤프 접두사와 동일 id 로 생성 → 이후 GET/이미지도 일관)
   var url = endpoint + '/v1/product';
   return sendRequest('product', url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ requestid: rid, uuid: uuid, id: 'loadtest' + rnd, name: 'test' + rnd, price: 1000 })
+    body: JSON.stringify({ requestid: rid, uuid: uuid, id: id, name: id, price: 1000 })
   });
 }
 
@@ -89,8 +103,7 @@ function b64ToBytes(b64) {
 }
 
 async function uploadProductImage(endpoint) {
-  var rnd = Math.floor(Math.random() * 1000) + 1;
-  var id = 'loadtest' + rnd;
+  var id = randId();
   var rid = Date.now().toString();
   var uuid = crypto.randomUUID();
 
@@ -411,7 +424,9 @@ function startServerLoad() {
     duration: parseInt(document.getElementById('duration').value),
     interval: parseInt(document.getElementById('interval').value) || 0,
     stressLength: parseInt(document.getElementById('stressLength').value),
-    stressOnly: document.getElementById('stressOnly').checked
+    stressOnly: document.getElementById('stressOnly').checked,
+    dataPrefix: dataPrefix(),
+    dataCount: dataCount()
   };
   document.getElementById('btnBlast').disabled = true;
   document.getElementById('btnBlastStop').disabled = false;

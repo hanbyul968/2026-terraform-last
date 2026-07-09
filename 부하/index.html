@@ -89,6 +89,16 @@ h1 { text-align: center; margin-bottom: 10px; color: #00d4ff; font-size: 1.8em; 
 </div>
 <div class="form-row">
 <div class="form-group">
+<label>데이터 접두사 (덤프에 맞게)</label>
+<input type="text" id="dataPrefix" value="testuser" placeholder="testuser 또는 dbdump" />
+</div>
+<div class="form-group">
+<label>데이터 개수 (1~N)</label>
+<input type="number" id="dataCount" value="1000" min="1" max="1000000" />
+</div>
+</div>
+<div class="form-row">
+<div class="form-group">
 <label><input type="checkbox" id="stressOnly" /> stress 집중 (노드 스케일용)</label>
 <span style="font-size:11px;color:#888">체크 시 서버 고부하가 <code>/v1/stress</code>만 집중 발사 → stress CPU 폭증 → HPA·Karpenter 스케일아웃</span>
 </div>

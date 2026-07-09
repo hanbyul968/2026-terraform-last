@@ -88,7 +88,7 @@ def _rec_count(stats, key, status, ok_status):
             s['success'] += 1
 
 
-def _worker(ep, interval, stresslen, stats, stop, stress_only=False):
+def _worker(ep, interval, stresslen, stats, stop, stress_only=False, prefix='testuser', count=1000):
     while not stop.is_set():
         # stress_only: 노드 스케일용 — /v1/stress 만 집중 발사(가장 CPU 를 태우는 API).
         if stress_only:
@@ -100,15 +100,15 @@ def _worker(ep, interval, stresslen, stats, stop, stress_only=False):
             continue
         pick = random.random()
         if pick < 0.25:
-            rnd = random.randint(1, 1000)
+            rnd = random.randint(1, count)
             u = str(uuidlib.uuid4())
-            url = f"{ep}/v1/user?email=dbdump{rnd}%40example.org&requestid={int(time.time()*1000)}&uuid={u}"
+            url = f"{ep}/v1/user?email={prefix}{rnd}%40example.org&requestid={int(time.time()*1000)}&uuid={u}"
             st, ms = _fire('GET', url)
             _rec_perf(stats, 'user', st, ms, 200)
         elif pick < 0.45:
-            rnd = random.randint(1, 1000)
+            rnd = random.randint(1, count)
             body = json.dumps({'requestid': str(int(time.time()*1000)), 'uuid': str(uuidlib.uuid4()),
-                               'id': f'loadtest{rnd}', 'name': f'test{rnd}', 'price': 1000})
+                               'id': f'{prefix}{rnd}', 'name': f'{prefix}{rnd}', 'price': 1000})
             st, ms = _fire('POST', f"{ep}/v1/product", body)
             _rec_perf(stats, 'product', st, ms, 200)
         elif pick < 0.60:
@@ -138,11 +138,13 @@ def start_load(cfg):
     slen = int(cfg.get('stressLength', 256))
     dur = int(cfg.get('duration', 60))
     stress_only = bool(cfg.get('stressOnly', False))
+    prefix = (cfg.get('dataPrefix') or 'testuser').strip()
+    count = max(1, int(cfg.get('dataCount', 1000)))
     stats = _blank_stats()
     stop = threading.Event()
     threads = []
     for _ in range(conc):
-        t = threading.Thread(target=_worker, args=(ep, interval, slen, stats, stop, stress_only), daemon=True)
+        t = threading.Thread(target=_worker, args=(ep, interval, slen, stats, stop, stress_only, prefix, count), daemon=True)
         t.start()
         threads.append(t)
     timer = threading.Timer(dur, stop_load)

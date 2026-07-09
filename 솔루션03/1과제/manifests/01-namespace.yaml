@@ -1,0 +1,10 @@
+# 네임스페이스 2개
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: wsc2026
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability

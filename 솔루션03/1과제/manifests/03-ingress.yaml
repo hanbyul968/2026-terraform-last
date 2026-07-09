@@ -1,0 +1,39 @@
+# ALB Ingress (과제 12)  -> internet-facing ALB 'wsc2026-app-alb'
+# 치환: <HUB_SUBNET_A>,<HUB_SUBNET_B> = hub(public) 서브넷 ID
+#       <ALB_SG> = wsc2026-app-alb-sg 보안그룹 ID (CloudFront prefix list 만 허용)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: wsc2026-book-ingress
+  namespace: wsc2026
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/load-balancer-name: wsc2026-app-alb
+    alb.ingress.kubernetes.io/subnets: "<HUB_SUBNET_A>,<HUB_SUBNET_B>"
+    alb.ingress.kubernetes.io/security-groups: "<ALB_SG>"
+    alb.ingress.kubernetes.io/manage-backend-security-group-rules: "true"
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}]'
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+    alb.ingress.kubernetes.io/healthcheck-port: "8080"
+    # 잘못된 경로 -> 403 고정 응답
+    alb.ingress.kubernetes.io/actions.deny-403: >
+      {"type":"fixed-response","fixedResponseConfig":
+      {"contentType":"application/json","statusCode":"403","messageBody":"Forbidden"}}
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          - path: /v1/book        # 실제 경로 -> book 서비스
+            pathType: Prefix
+            backend:
+              service:
+                name: wsc2026-book-svc
+                port: { number: 8080 }
+          - path: /                # 그 외 -> 403
+            pathType: Prefix
+            backend:
+              service:
+                name: deny-403
+                port: { name: use-annotation }

@@ -1,0 +1,46 @@
+# aws-for-fluent-bit helm values (과제 11 - 로그)
+#   helm install fluent-bit eks/aws-for-fluent-bit -n observability -f fluentbit-values.yaml
+serviceAccount:
+  create: false
+  name: fluent-bit           # Pod Identity 로 wsc2026-fluentbit-role 연결
+
+tolerations:
+  - operator: Exists         # 모든 노드(application 포함)에서 수집
+
+cloudWatchLogs:
+  enabled: true
+  region: ap-northeast-2
+  logGroupName: /wsc2026/app/log
+  logStreamPrefix: "app-"
+  autoCreateGroup: false
+
+extraParsers: |
+  [PARSER]
+      Name         book_json
+      Format       regex
+      Regex        ^[A-Z]+\s+(?<payload>\{.*\})$
+  [PARSER]
+      Name         book_fields
+      Format       json
+
+extraFilters: |
+  [FILTER]
+      Name         parser
+      Match        *
+      Key_Name     log
+      Parser       book_json
+      Reserve_Data On
+  [FILTER]
+      Name         parser
+      Match        *
+      Key_Name     payload
+      Parser       book_fields
+      Reserve_Data On
+  [FILTER]
+      Name         grep
+      Match        *
+      Regex        path \/.*
+  [FILTER]
+      Name         grep
+      Match        *
+      Exclude      path /health

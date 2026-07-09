@@ -65,14 +65,28 @@ hey.exe 가 **9바이트 등 수백 B 이하면 깨진 것**(다운로드 403/�
 Get-Item "$env:USERPROFILE\bin\hey.exe" | Select-Object Length   # 수 MB=정상, 수백 B=깨짐
 ```
 
-**복구 방법 1 — Go 로 빌드 (가장 확실, Go 설치돼 있을 때):**
+**복구 방법 1 — Go 로 빌드 (가장 확실):**
+
+먼저 Go 가 없으면 설치:
+```powershell
+# 방법 A) winget (권장)
+winget install --id GoLang.Go -e
+# → 설치 후 반드시 PowerShell 새 창 열기 (PATH 반영)
+go version    # go version go1.xx ... 나오면 성공
+
+# 방법 B) winget 이 없거나 실패하면 공식 MSI 직접 설치
+# https://go.dev/dl/ 에서 "go1.xx.x.windows-amd64.msi" 받아 실행 후 새 창
+```
+
+Go 설치 후 hey 빌드:
 ```powershell
 New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\bin" | Out-Null
 $env:GOBIN = "$env:USERPROFILE\bin"
 go install github.com/rakyll/hey@latest
 hey -h    # usage 나오면 성공
 ```
-> Go 없으면: `winget install --id GoLang.Go -e` 후 새 PowerShell 창에서 위 실행.
+> `go install` 은 `%USERPROFILE%\go\bin` 또는 `$env:GOBIN` 에 설치됨. 위처럼 GOBIN 을
+> `%USERPROFILE%\bin` 으로 지정하면 setup.ps1 이 PATH 에 등록한 곳과 일치.
 
 **복구 방법 2 — S3 미러 직접 다운로드 (403 나면 실패, 반드시 크기 확인):**
 ```powershell

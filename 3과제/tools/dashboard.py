@@ -271,6 +271,58 @@ function wafxRun(){var text=document.getElementById('wafx_in').value;var ep=docu
       +'<pre style="margin:0;background:#f6f7f9;border:1px solid var(--line);border-radius:8px;padding:9px 11px;font-size:11.5px;white-space:pre-wrap;color:#1a1d23;overflow-x:auto">'+esc(wafxTest(f,ep))+'</pre></div>';});
   out+='<div class="tip dim"><h3>적용 순서</h3><div class=why>1) 위 변수 줄들을 terraform/terraform.tfvars 에 추가·병합 (같은 변수는 한 줄로 합치기)\n2) cd terraform && terraform apply -auto-approve -var "k8s_provider_ready=true"\n3) 위 curl 로 403 확인, 없는 경로(/.env)는 404 확인\n4) waf_header_stats.py 다시 돌려 붙여넣고 「막을 게 없습니다」 나올 때까지 반복\n5) 대시보드 avail% 100% 유지(정상 오차단 없는지) — 오차단이면 그 변수만 되돌려 apply\n※ 확신 없으면 waf_custom_rule_action = "count" 로 먼저 관찰 (확인 후 반드시 "block" 복귀)</div></div>';
   document.getElementById('wafx_out').innerHTML=out;}
+// ---- 튜닝적용 탭: autotune 출력 붙여넣기 → 적용 명령(kubectl + k8s_apps.tf) ----
+// autotune.ps1 마지막 출력 예:
+//   ### terraform/k8s_apps.tf 반영값 (stress 만):
+//     requests.cpu = "300m",  HPA averageUtilization = 45,  min=3 max=12
+function tuneParse(text){
+  var f={};
+  var cpu=text.match(/requests\.cpu\s*=\s*"?(\d+)m"?/i);       if(cpu)f.cpu=cpu[1]+'m';
+  var util=text.match(/averageUtilization\s*=\s*(\d+)/i);      if(util)f.util=+util[1];
+  var mn=text.match(/min\s*=\s*(\d+)/i);                        if(mn)f.min=+mn[1];
+  var mx=text.match(/max\s*=\s*(\d+)/i);                        if(mx)f.max=+mx[1];
+  // 대상 앱: "반영값 (stress 만)" / "(모든 앱..." 파싱
+  var scope=text.match(/반영값\s*\(([^)]*)\)/);
+  var apps=(D&&D.apps?D.apps.map(function(a){return a.app}):['user','product','stress']);
+  if(scope){
+    if(/모든\s*앱|all/i.test(scope[1])) f.apps=apps;
+    else { var w=scope[1].trim().split(/[\s,]+/)[0]; f.apps=apps.indexOf(w)>=0?[w]:[w]; }
+  }
+  return f;
+}
+function tuneCmds(f){
+  if(!f.cpu&&!f.util&&!f.min){return '<div class="tip warn"><h3>값을 못 읽었어요</h3><div class=why>autotune.ps1 의 마지막 "반영값" 줄(예: <code>requests.cpu = "300m", HPA averageUtilization = 45, min=3 max=12</code>)을 통째로 붙여넣어 주세요.</div></div>';}
+  var apps=f.apps&&f.apps.length?f.apps:['<앱>'];
+  var mn=f.min||2, mx=f.max||10, util=f.util||60, cpu=f.cpu||'?m';
+  var out='<div class="tip good"><h3>적용 대상: '+apps.join(', ')+'</h3><div class=why>cpu='+cpu+' · util='+util+'% · min='+mn+' · max='+mx+'</div></div>';
+  apps.forEach(function(n){
+    var patch=JSON.stringify({spec:{minReplicas:mn,maxReplicas:mx,metrics:[{type:"Resource",resource:{name:"cpu",target:{type:"Utilization",averageUtilization:util}}}]}});
+    var imm='kubectl -n app set resources deploy/'+n+' --requests=cpu='+cpu+'\n'
+      +'kubectl -n app patch hpa '+n+' --type=merge -p \''+patch+'\'\n'
+      +'kubectl -n app rollout status deploy/'+n;
+    var tf='# terraform/k8s_apps.tf — '+n+'\n'
+      +'resources { requests = { cpu = "'+cpu+'", memory = "128Mi" } }   # kubernetes_deployment.'+n+'\n'
+      +'min_replicas = '+mn+'\nmax_replicas = '+mx+'\naverage_utilization = '+util+'   # HPA.'+n;
+    out+='<div class=card style="margin-bottom:12px"><div class=lbl>'+n+'</div>'
+      +'<div class=mut style="font-size:12px;margin:6px 0 4px">① 즉시 적용 (임시 — 재배포 시 사라짐)</div>'
+      +'<pre style="margin:0 0 9px;background:#f6f7f9;border:1px solid var(--line);border-radius:8px;padding:9px 11px;font-size:11.5px;white-space:pre-wrap;color:#1a1d23;overflow-x:auto">'+esc(imm)+'</pre>'
+      +'<div class=mut style="font-size:12px;margin-bottom:4px">② 영구 반영 (k8s_apps.tf 수정 후 apply)</div>'
+      +'<pre style="margin:0;background:#f6f7f9;border:1px solid var(--line);border-radius:8px;padding:9px 11px;font-size:11.5px;white-space:pre-wrap;color:#1a1d23;overflow-x:auto">'+esc(tf)+'</pre></div>';
+  });
+  out+='<div class="tip dim"><h3>순서</h3><div class=why>① kubectl 로 즉시 적용해 효과 확인 (loadtest 재측정) → 좋으면 ② k8s_apps.tf 에 박고 <code>terraform apply -auto-approve -var "k8s_provider_ready=true"</code>.\n한 번에 한 앱만. avail% 99% 는 사수.</div></div>';
+  return out;
+}
+function tuneRun(){
+  var f=tuneParse(document.getElementById('tune_in').value);
+  document.getElementById('tune_out').innerHTML=tuneCmds(f);
+}
+function vTuneApply(){
+  return '<div class=card><h2>튜닝적용 — autotune 결과 붙여넣고 적용 명령 받기</h2>'
+   +'<div class=mut style="font-size:12px;margin-bottom:9px"><code>.\\autotune.ps1 -App stress</code> 등의 <b>마지막 "반영값" 출력</b>을 붙여넣고 [명령 생성]. kubectl(즉시)·k8s_apps.tf(영구) 명령을 뽑아준다. (라이브 자동판정은 「계산」 탭)</div>'
+   +'<textarea id=tune_in placeholder=\'예)  requests.cpu = "300m",  HPA averageUtilization = 45,  min=3 max=12   (반영값 (stress 만) 줄까지 같이 붙여넣으면 앱도 자동 인식)\' style="width:100%;height:130px;background:#f6f7f9;color:#1a1d23;border:1px solid var(--line);border-radius:8px;padding:10px;font-size:12px;font-family:monospace"></textarea>'
+   +'<button onclick="tuneRun()" style="margin-top:10px">명령 생성</button>'
+   +'<div id=tune_out style="margin-top:15px"></div></div>';}
+
 function vWafAnalyze(){
   return '<div class=card><h2>WAF분석 — 공격 로그 붙여넣고 막을 것 받기</h2>'
    +'<div class=mut style="font-size:12px;margin-bottom:9px"><code>python waf_header_stats.py --log-group aws-waf-logs-&lt;project&gt; --region us-east-1 --hours 1</code> 의 <b>"전체" 표 출력</b>(또는 .csv)을 통째로 붙여넣고 [분석]. (그 스크립트의 「제안」 섹션도 같은 답을 줌 — 이 탭은 오프라인/시각화용)</div>'
@@ -279,11 +331,12 @@ function vWafAnalyze(){
    +'<button onclick="wafxRun()" style="margin-top:10px">분석</button>'
    +'<div id=wafx_out style="margin-top:15px"></div></div>';}
 
-function tabs(){var t=[['overview','개요']].concat(D.apps.map(function(a){return [a.app,a.app]})).concat([['pods','Pod'],['nodes','노드'],['waf','WAF'],['wafx','WAF분석'],['calc','계산'],['diag','진단']]);
+function tabs(){var t=[['overview','개요']].concat(D.apps.map(function(a){return [a.app,a.app]})).concat([['pods','Pod'],['nodes','노드'],['waf','WAF'],['wafx','WAF분석'],['calc','계산'],['tune','튜닝적용'],['diag','진단']]);
  document.getElementById('tabs').innerHTML=t.map(function(x){return '<div class="tab'+(x[0]===TAB?' on':'')+'" onclick="setTab(\''+x[0]+'\')">'+x[1]+'</div>'}).join('')}
 function render(){if(!D)return;var v=document.getElementById('view');
- // WAF분석 탭은 한 번 만들면 유지 (자동 갱신이 붙여넣은 내용을 지우지 않게)
+ // 붙여넣기 탭(WAF분석/튜닝적용)은 한 번 만들면 유지 (자동 갱신이 입력을 안 지우게)
  if(TAB==='wafx'){if(!document.getElementById('wafx_in'))v.innerHTML=vWafAnalyze();return;}
+ if(TAB==='tune'){if(!document.getElementById('tune_in'))v.innerHTML=vTuneApply();return;}
  // 자동 갱신 시 열어둔 상세 패널을 유지 (새 항목은 위에 쌓이고, 보던 건 그대로 열림)
  var ok={};document.querySelectorAll('details.det[open]').forEach(function(d){ok[d.dataset.k]=1});
  if(TAB==='overview')v.innerHTML=vOverview();else if(TAB==='pods')v.innerHTML=vPods();else if(TAB==='nodes')v.innerHTML=vNodes();

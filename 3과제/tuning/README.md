@@ -81,9 +81,13 @@ go version    # go version go1.xx ... 나오면 성공
 Go 설치 후 hey 빌드:
 ```powershell
 New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\bin" | Out-Null
+# 깨진 hey.exe 가 있으면 go install 이 덮어쓰기를 거부하므로 먼저 삭제
+Remove-Item "$env:USERPROFILE\bin\hey.exe" -Force -ErrorAction SilentlyContinue
 $env:GOBIN = "$env:USERPROFILE\bin"
 go install github.com/rakyll/hey@latest
-hey -h    # usage 나오면 성공
+(Get-Item "$env:USERPROFILE\bin\hey.exe").Length   # 수 MB(약 12MB) 면 성공
+# hey -h 가 안 되면 새 PowerShell 창을 열거나 전체경로 실행:
+& "$env:USERPROFILE\bin\hey.exe" -h
 ```
 > `go install` 은 `%USERPROFILE%\go\bin` 또는 `$env:GOBIN` 에 설치됨. 위처럼 GOBIN 을
 > `%USERPROFILE%\bin` 으로 지정하면 setup.ps1 이 PATH 에 등록한 곳과 일치.

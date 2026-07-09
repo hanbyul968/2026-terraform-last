@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dashboard-demo",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["3과제/tools/dashboard.py", "--demo", "--port", "8899"],
+      "port": 8899
+    }
+  ]
+}

@@ -353,6 +353,56 @@ load();setAuto();
 </script></body></html>"""
 
 
+DEMO = False
+
+
+def demo_data():
+    """클러스터 없이 레이아웃/탭을 보기 위한 샘플 스냅샷 (build_data 와 같은 형태)."""
+    import time as _t
+    from datetime import datetime as _dt, timezone as _tz
+
+    def app_row(name, slo, total, ok, slo_rate, p50, p95, p99, cpu):
+        c2 = ok
+        c4 = total - ok
+        return {"app": name, "total": total, "hc": 120, "c2": c2, "c4": c4, "c5": 0,
+                "ok_rate": round(100.0 * ok / total, 1), "err_rate": round(100.0 * c4 / total, 1),
+                "status": {200: ok, 404: c4}, "slo_ms": slo, "slo_rate": slo_rate,
+                "p50": p50, "p95": p95, "p99": p99, "max": p99 + 40,
+                "paths": [("/v1/" + name, total)], "err_paths": ([[["/v1/" + name, 404], c4]] if c4 else []),
+                "top_ips": [("10.20.1.5", total)],
+                "recent2": [{"ts": "12:00:0" + str(i), "m": "GET", "path": "/v1/" + name, "st": 200,
+                             "dur": p50, "ip": "10.20.1.5", "why": "", "requestid": "1", "uuid": "u", "raw": ""} for i in range(3)],
+                "recent4": [], "recent5": [], "cpu_req": cpu}
+
+    apps = [
+        app_row("user", 200, 5400, 5400, 99.6, 41, 58, 71, "200m"),
+        app_row("product", 200, 5400, 5390, 97.4, 39, 120, 190, "200m"),
+        app_row("stress", 1000, 720, 720, 96.9, 630, 940, 980, "300m"),
+    ]
+    pods = [{"name": f"{a}-abc{i}", "app": a, "phase": "Running", "ready": True, "restarts": 0,
+             "reason": "", "node": f"ip-10-20-{i}", "cpu": "180m", "mem": "90Mi"}
+            for a in ("user", "product", "stress") for i in (1, 2)]
+    nodes = [{"name": f"ip-10-20-{i}.node", "type": "t3.medium", "karpenter": i > 2, "ready": "Ready",
+              "cpu": "780m", "cpu_pct": "40%", "mem": "1.1Gi", "mem_pct": "35%"} for i in (1, 2, 3)]
+    hpa = [{"name": a, "cur": "38%", "tgt": "60%", "min": 2, "max": 10, "replicas": 2}
+           for a in ("user", "product", "stress")]
+    waf = {"enabled": True, "total": 54,
+           "by_reason": [("악성 User-Agent (스캐너/공격도구)", 31), ("SQL 인젝션 의심", 15), ("비정상 헤더 존재(차단 목록): x-junk", 8)],
+           "by_rule": [("BlockedUserAgents", 31), ("AWSManagedRulesSQLiRuleSet", 15)],
+           "by_ip": [("203.0.113.9", 40), ("198.51.100.2", 14)],
+           "by_uri": [("/v1/user", 30), ("/v1/product", 24)],
+           "by_method": [("GET", 39), ("POST", 15)],
+           "recent": [{"ts": "12:00:01", "ip": "203.0.113.9", "m": "GET", "uri": "/v1/user", "args": "",
+                       "url": "https://demo.cloudfront.net/v1/user?email=x", "country": "US",
+                       "reason": "악성 User-Agent (스캐너/공격도구)", "ua": "sqlmap/1.7", "xff": ""}]}
+    summary = {"allow": 11520, "block": 54, "c2": 11510, "c4": 10, "c5": 0,
+               "pods_total": 6, "pods_ready": 6, "nodes_total": 3, "nodes_karp": 1}
+    diag = [["good", "이상 없음 (데모)", "샘플 데이터입니다. 실제 값은 클러스터 연결 시 표시됩니다.", ""]]
+    return {"apps": apps, "pods": pods, "nodes": nodes, "hpa": hpa, "waf": waf,
+            "summary": summary, "diag": diag,
+            "ts": _dt.fromtimestamp(_t.time(), _tz.utc).astimezone().strftime("%H:%M:%S") + " (demo)"}
+
+
 @app.route("/")
 def index():
     return Response(PAGE, mimetype="text/html")
@@ -360,22 +410,28 @@ def index():
 
 @app.route("/api/data")
 def api_data():
+    if DEMO:
+        return jsonify(demo_data())
     since = request.args.get("since", "15m")
     return jsonify(monitor.build_data(since, monitor._mins(since)))
 
 
 def main():
+    global DEMO
     ap = argparse.ArgumentParser(description="3과제 모니터링 대시보드 (Flask)")
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--namespace", default="app")
     ap.add_argument("--waf-log-group", default="aws-waf-logs-wsi2026")
     ap.add_argument("--waf-region", default="us-east-1")
+    ap.add_argument("--demo", action="store_true", help="클러스터 없이 샘플 데이터로 레이아웃 확인")
     a = ap.parse_args()
+    DEMO = a.demo
     monitor.CFG["ns"] = a.namespace
     monitor.CFG["waf_group"] = a.waf_log_group
     monitor.CFG["waf_region"] = a.waf_region
-    print("3과제 모니터링(Flask)  http://%s:%d  (Ctrl+C 종료)" % (a.host, a.port))
+    mode = " [DEMO]" if DEMO else ""
+    print("3과제 모니터링(Flask)%s  http://%s:%d  (Ctrl+C 종료)" % (mode, a.host, a.port))
     app.run(host=a.host, port=a.port, threaded=True)
 
 

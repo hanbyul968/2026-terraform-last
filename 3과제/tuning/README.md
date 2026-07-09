@@ -56,25 +56,37 @@ kubectl -n app get pods
 ```
 > 특정 실행만 다른 엔드포인트로 하려면 `-Url http://...` 를 붙이면 그 값이 우선한다.
 
-### hey 설치 실패 시 (loadtest가 전부 `NO DATA`)
-`setup.ps1`은 hey.exe 를 공식 S3 미러에서 받는데, 미러가 **403(AccessDenied)** 를 내면
-깨진 파일이 저장돼 실행이 안 되고 측정이 `NO DATA`로 나온다. 확인·복구:
+### hey 설치 (loadtest가 전부 `NO DATA` 면 hey.exe 가 깨진 것)
+
+hey.exe 가 **9바이트 등 수백 B 이하면 깨진 것**(다운로드 403/실패). 정상은 수 MB.
 
 ```powershell
-# 진단: 정상이면 usage, 깨졌으면 에러/빈 출력
-hey -h
-Get-Item "$env:USERPROFILE\bin\hey.exe" | Select-Object Length   # 수 MB 면 정상, 수백 B 면 깨짐
-
-# 복구 1) 다시 받기
-Invoke-WebRequest 'https://hey-release.s3.us-east-2.amazonaws.com/hey_windows_amd64' `
-  -OutFile "$env:USERPROFILE\bin\hey.exe"
-
-# 복구 2) Go 로 직접 빌드 (Go 설치돼 있으면)
-$env:GOBIN = "$env:USERPROFILE\bin"; go install github.com/rakyll/hey@latest
+# 진단
+Get-Item "$env:USERPROFILE\bin\hey.exe" | Select-Object Length   # 수 MB=정상, 수백 B=깨짐
 ```
 
-> `setup.ps1`은 `%USERPROFILE%\bin` 에 설치하고 사용자 PATH 에 등록한다(새 창부터 자동 적용).
-> 결과 CSV 는 `%TEMP%\tune-<label>\` 에 쌓인다.
+**복구 방법 1 — Go 로 빌드 (가장 확실, Go 설치돼 있을 때):**
+```powershell
+New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\bin" | Out-Null
+$env:GOBIN = "$env:USERPROFILE\bin"
+go install github.com/rakyll/hey@latest
+hey -h    # usage 나오면 성공
+```
+> Go 없으면: `winget install --id GoLang.Go -e` 후 새 PowerShell 창에서 위 실행.
+
+**복구 방법 2 — S3 미러 직접 다운로드 (403 나면 실패, 반드시 크기 확인):**
+```powershell
+New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\bin" | Out-Null
+$dst = "$env:USERPROFILE\bin\hey.exe"
+Invoke-WebRequest 'https://hey-release.s3.us-east-2.amazonaws.com/hey_windows_amd64' -OutFile $dst -UseBasicParsing
+# 검증: 1MB 미만이면 깨진 것 → 방법 1(Go) 사용
+if ((Get-Item $dst).Length -lt 1MB) { Write-Host "깨짐! Go 빌드(방법1)로 받으세요" -ForegroundColor Red } else { Write-Host "OK" -ForegroundColor Green }
+```
+
+**복구 방법 3 — hey 대신 부하 웹툴 사용:**
+hey 설치가 계속 실패하면 `../../부하/` 웹 도구(`python server.py`)로 부하·채점을 대체할 수 있음.
+
+> hey.exe 는 `%USERPROFILE%\bin` 에 두고 사용자 PATH 에 등록(새 창부터 적용). 결과 CSV 는 `%TEMP%\tune-<label>\`.
 
 ---
 

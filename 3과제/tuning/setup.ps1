@@ -35,7 +35,22 @@ if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) {
 # --- hey ---
 if (-not (Get-Command hey -ErrorAction SilentlyContinue)) {
   Write-Host 'installing hey...'
-  Invoke-WebRequest 'https://hey-release.s3.us-east-2.amazonaws.com/hey_windows_amd64' -OutFile (Join-Path $bin 'hey.exe')
+  $heyPath = Join-Path $bin 'hey.exe'
+  try {
+    Invoke-WebRequest 'https://hey-release.s3.us-east-2.amazonaws.com/hey_windows_amd64' -OutFile $heyPath -UseBasicParsing
+  } catch { Write-Host "  S3 download failed: $($_.Exception.Message)" -ForegroundColor Yellow }
+  # 다운로드 검증: 1MB 미만이면 깨진 것(403 등) → Go 로 빌드 폴백
+  if (-not (Test-Path $heyPath) -or (Get-Item $heyPath).Length -lt 1MB) {
+    Write-Host '  hey.exe 깨짐/실패 → Go 빌드로 폴백...' -ForegroundColor Yellow
+    if (Test-Path $heyPath) { Remove-Item $heyPath -Force }
+    if (Get-Command go -ErrorAction SilentlyContinue) {
+      $env:GOBIN = $bin
+      go install github.com/rakyll/hey@latest
+    } else {
+      Write-Host '  Go 미설치 → winget install --id GoLang.Go -e 후 재실행하거나' -ForegroundColor Red
+      Write-Host '  ../../부하 웹툴(python server.py)로 대체하세요' -ForegroundColor Red
+    }
+  }
 }
 
 # --- kubeconfig ---

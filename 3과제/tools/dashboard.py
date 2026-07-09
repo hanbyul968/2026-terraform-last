@@ -69,8 +69,9 @@ details.det[open]>summary{background:#eef1f5}
 <span class="ctl">자동
 <select id="auto"><option value="0">수동</option><option value="5">5s</option><option value="10" selected>10s</option><option value="30">30s</option><option value="60">60s</option></select></span>
 <button onclick="load()">새로고침</button>
+<button onclick="smoke()" title="엔드포인트에 200/403/404 스모크 테스트">스모크</button>
 <span id="st"></span></header>
-<nav id="tabs"></nav><main id="view"></main><script>
+<nav id="tabs"></nav><div id="alerts" style="padding:0 26px"></div><main id="view"></main><script>
 var D=null,TAB='overview';
 function cr(v,g,w){return v>=g?'gd':v>=w?'wn':'bd'}
 function stp(s){s=''+s;var c=s[0]==='2'?'p2':s[0]==='4'?'p4':'p5';return '<span class="pill '+c+'">'+s+'</span>'}
@@ -344,9 +345,44 @@ function render(){if(!D)return;var v=document.getElementById('view');
  else{var a=D.apps.find(function(x){return x.app===TAB});v.innerHTML=a?vApp(a):''}
  document.querySelectorAll('details.det').forEach(function(d){if(ok[d.dataset.k])d.open=true});}
 function setTab(t){TAB=t;tabs();render()}
+// ---- 최상단 경고 배너: 가용성 게이트/오차단/5xx 를 눈에 띄게 (기존 데이터 재활용) ----
+function renderAlerts(){
+ var el=document.getElementById('alerts');if(!el){return;}
+ if(!D){el.innerHTML='';return;}
+ var al=[];
+ // WAF 가 차단 중인 정상 경로 집합 (공격이 유효경로를 때리는 건 정상 → 그 자체론 경고 X)
+ var wafPaths={};
+ if(D.waf&&D.waf.enabled&&D.waf.by_uri){D.waf.by_uri.forEach(function(u){var p=(u[0]||'').split('?')[0];if(/^\/(v1\/(user|product|stress)|healthcheck)$/.test(p))wafPaths[p]=u[1];});}
+ // (1) 가용성 게이트: 요청 있는 앱 중 성공률 99% 미만. 그 앱 경로가 WAF 차단 중이면 오차단 의심 병기.
+ (D.apps||[]).forEach(function(a){
+   if(a.total>0 && a.ok_rate<99){
+     var why='요청 실패/5초초과. 비용보다 먼저 cpu↑/min↑ (해당 앱 탭·계산 참고).';
+     if(wafPaths['/v1/'+a.app]) why+='\n🚫 WAF 오차단 가능성 — 이 경로가 WAF 차단 로그에 '+wafPaths['/v1/'+a.app]+'건 있음. 정상요청이 403이면 avail 폭락 → waf 커스텀 룰 count/해제 검토.';
+     al.push(['bad','⛔ 가용성 게이트 — '+a.app+' '+a.ok_rate+'% < 99%',why]);
+   }
+ });
+ // (2) 5xx
+ var c5=(D.summary&&D.summary.c5)||0;
+ if(c5>0) al.push(['warn','⚠ 5xx '+c5+'건 — 앱/DB 오류 가능 (진단 탭 확인)','']);
+ if(!al.length){el.innerHTML='';return;}
+ el.innerHTML=al.map(function(t){return '<div class="tip '+t[0]+'" style="margin:10px 0 0"><h3>'+t[1]+'</h3>'+(t[2]?'<div class=why>'+t[2]+'</div>':'')+'</div>'}).join('');
+}
+// ---- 원클릭 스모크: 서버가 엔드포인트에 200/403/404 검증 ----
+async function smoke(){
+ var el=document.getElementById('alerts');
+ if(el)el.innerHTML='<div class="tip dim" style="margin:10px 0 0"><h3>스모크 실행 중…</h3></div>';
+ try{
+  var r=await fetch('/api/smoke');var d=await r.json();
+  if(d.error){el.innerHTML='<div class="tip bad" style="margin:10px 0 0"><h3>스모크 실패</h3><div class=why>'+esc(d.error)+'</div></div>';return;}
+  var rows=d.checks.map(function(c){var cl=c.pass?'gd':'bd';var mk=c.pass?'✓':'✗';
+    return '<div class=row><span>'+mk+' '+esc(c.name)+' <span class=mut>'+esc(c.url)+'</span></span><span class="'+cl+'">'+c.got+' (기대 '+c.expect+')</span></div>'}).join('');
+  var allok=d.checks.every(function(c){return c.pass});
+  el.innerHTML='<div class="tip '+(allok?'good':'bad')+'" style="margin:10px 0 0"><h3>스모크 '+(allok?'전부 통과 👍':'실패 항목 있음')+' <span class=mut style="font-weight:400">'+esc(d.endpoint)+'</span></h3>'+rows+'</div>';
+ }catch(e){el.innerHTML='<div class="tip bad" style="margin:10px 0 0"><h3>스모크 오류</h3><div class=why>'+esc(''+e)+'</div></div>';}
+}
 function setSt(x,c){document.getElementById('st').innerHTML='<span class=dot style="background:'+c+'"></span>'+x}
 async function load(){setSt('불러오는 중','#ffcf5c');var s=document.getElementById('since').value;
- try{var r=await fetch('/api/data?since='+s);D=await r.json();tabs();render();setSt('갱신 '+D.ts,'#3ddc97')}catch(e){setSt('연결 오류','#ff5c7a')}}
+ try{var r=await fetch('/api/data?since='+s);D=await r.json();tabs();render();renderAlerts();setSt('갱신 '+D.ts,'#3ddc97')}catch(e){setSt('연결 오류','#ff5c7a')}}
 var tm=null;function setAuto(){if(tm)clearInterval(tm);var s=+document.getElementById('auto').value;if(s)tm=setInterval(load,s*1000)}
 document.getElementById('auto').onchange=setAuto;document.getElementById('since').onchange=load;
 load();setAuto();
@@ -414,6 +450,49 @@ def api_data():
         return jsonify(demo_data())
     since = request.args.get("since", "15m")
     return jsonify(monitor.build_data(since, monitor._mins(since)))
+
+
+def _tf_endpoint():
+    """../terraform 의 terraform output -raw endpoint (자동 감지)."""
+    import os
+    import subprocess
+    tfdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "terraform")
+    try:
+        out = subprocess.run(["terraform", f"-chdir={tfdir}", "output", "-raw", "endpoint"],
+                             capture_output=True, text=True, timeout=15).stdout.strip()
+        return out.splitlines()[0].strip() if out else ""
+    except Exception:
+        return ""
+
+
+@app.route("/api/smoke")
+def api_smoke():
+    """엔드포인트 스모크: 정상 200 / 비정상 403 / 미정의 404 검증."""
+    import urllib.request
+    import urllib.error
+    ep = (request.args.get("ep") or _tf_endpoint()).rstrip("/")
+    if not ep:
+        return jsonify({"error": "엔드포인트를 못 찾음 — ?ep=http://... 로 전달하거나 terraform output endpoint 확인"})
+
+    def hit(path, expect, ua=None):
+        url = ep + path
+        req = urllib.request.Request(url, headers={"User-Agent": ua} if ua else {})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                got = r.status
+        except urllib.error.HTTPError as e:
+            got = e.code
+        except Exception as e:
+            return {"name": path, "url": url, "expect": expect, "got": "ERR", "pass": False, "err": str(e)[:80]}
+        return {"name": path, "url": url, "expect": expect, "got": got, "pass": got == expect}
+
+    checks = [
+        hit("/healthcheck", 200),
+        hit("/v1/none", 404),                                    # 미정의 경로 → 404
+        hit("/.env", 404),                                       # 없는 경로 → 404 (403 아님)
+        hit("/v1/user?email=x@x.org&requestid=1&uuid=1", 403, ua="sqlmap/1.7"),  # 스캐너 UA → 403
+    ]
+    return jsonify({"endpoint": ep, "checks": checks})
 
 
 def main():

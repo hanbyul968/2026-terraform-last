@@ -1,0 +1,17 @@
+[Unit]
+Description=WSC2026 MSK sensor producer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/app
+Environment=BOOTSTRAP_SERVERS=<MSK IAM 부트스트랩 엔드포인트>
+Environment=TOPIC_RAW=wsc2026-sensor-raw
+Environment=AWS_REGION=ap-northeast-1
+ExecStart=/opt/app/app
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

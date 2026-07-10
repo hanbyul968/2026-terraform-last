@@ -1,0 +1,11 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "PutOrderLogs",
+      "Effect": "Allow",
+      "Action": ["kinesis:PutRecord", "kinesis:PutRecords"],
+      "Resource": "arn:aws:kinesis:ap-northeast-2:<ACCOUNT_ID>:stream/wsc2026-order-stream"
+    }
+  ]
+}

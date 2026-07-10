@@ -1,0 +1,52 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "MskEventSourceMapping",
+      "Effect": "Allow",
+      "Action": [
+        "kafka:DescribeClusterV2",
+        "kafka:GetBootstrapBrokers",
+        "kafka-cluster:Connect",
+        "kafka-cluster:DescribeGroup",
+        "kafka-cluster:AlterGroup",
+        "kafka-cluster:DescribeTopic",
+        "kafka-cluster:ReadData",
+        "kafka-cluster:WriteData",
+        "kafka-cluster:DescribeClusterDynamicConfiguration"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "VpcEni",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateNetworkInterface",
+        "ec2:DescribeNetworkInterfaces",
+        "ec2:DescribeVpcs",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DeleteNetworkInterface"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "SensorData",
+      "Effect": "Allow",
+      "Action": ["dynamodb:PutItem"],
+      "Resource": "arn:aws:dynamodb:ap-northeast-1:<ACCOUNT_ID>:table/wsc2026-sensor-data"
+    },
+    {
+      "Sid": "AlertOutputs",
+      "Effect": "Allow",
+      "Action": ["sns:Publish"],
+      "Resource": "arn:aws:sns:ap-northeast-1:<ACCOUNT_ID>:wsc2026-sensor-alert-topic"
+    },
+    {
+      "Sid": "AlertLogs",
+      "Effect": "Allow",
+      "Action": ["s3:PutObject"],
+      "Resource": "arn:aws:s3:::wsc2026-sensor-alert-bucket-<비번호>/alert/*"
+    }
+  ]
+}

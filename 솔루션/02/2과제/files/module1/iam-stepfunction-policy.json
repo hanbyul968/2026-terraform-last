@@ -1,0 +1,23 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "InvokeProcessingLambda",
+      "Effect": "Allow",
+      "Action": ["lambda:InvokeFunction"],
+      "Resource": "arn:aws:lambda:ap-southeast-1:<ACCOUNT_ID>:function:wsc2026-student-score-function"
+    },
+    {
+      "Sid": "MoveObjects",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::wsc2026-student-score-bucket-<비번호>/*"
+    },
+    {
+      "Sid": "HeadObjectNeedsListBucket",
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket"],
+      "Resource": "arn:aws:s3:::wsc2026-student-score-bucket-<비번호>"
+    }
+  ]
+}

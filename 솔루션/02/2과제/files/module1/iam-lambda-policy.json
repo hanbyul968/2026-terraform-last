@@ -1,0 +1,23 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadInputWriteError",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject"],
+      "Resource": "arn:aws:s3:::wsc2026-student-score-bucket-<비번호>/*"
+    },
+    {
+      "Sid": "WriteScores",
+      "Effect": "Allow",
+      "Action": ["dynamodb:PutItem"],
+      "Resource": "arn:aws:dynamodb:ap-southeast-1:<ACCOUNT_ID>:table/wsc2026-student-score"
+    },
+    {
+      "Sid": "StartWorkflow",
+      "Effect": "Allow",
+      "Action": ["states:StartExecution"],
+      "Resource": "arn:aws:states:ap-southeast-1:<ACCOUNT_ID>:stateMachine:wsc2026-student-score-workflow"
+    }
+  ]
+}

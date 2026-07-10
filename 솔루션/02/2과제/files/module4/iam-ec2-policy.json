@@ -1,0 +1,21 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ConnectCluster",
+      "Effect": "Allow",
+      "Action": ["kafka-cluster:Connect", "kafka-cluster:DescribeCluster"],
+      "Resource": "arn:aws:kafka:ap-northeast-1:<ACCOUNT_ID>:cluster/wsc2026-msk-cluster/*"
+    },
+    {
+      "Sid": "ManageAndWriteTopics",
+      "Effect": "Allow",
+      "Action": [
+        "kafka-cluster:CreateTopic",
+        "kafka-cluster:DescribeTopic",
+        "kafka-cluster:WriteData"
+      ],
+      "Resource": "arn:aws:kafka:ap-northeast-1:<ACCOUNT_ID>:topic/wsc2026-msk-cluster/*/wsc2026-sensor-*"
+    }
+  ]
+}

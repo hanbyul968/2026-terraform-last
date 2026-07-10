@@ -1,0 +1,17 @@
+[Unit]
+Description=WSC2026 order log producer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/app
+Environment=STREAM_NAME=wsc2026-order-stream
+Environment=AWS_REGION=ap-northeast-2
+Environment=AWS_DEFAULT_REGION=ap-northeast-2
+ExecStart=/opt/app/venv/bin/gunicorn -w 2 -b 0.0.0.0:5000 app:app
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

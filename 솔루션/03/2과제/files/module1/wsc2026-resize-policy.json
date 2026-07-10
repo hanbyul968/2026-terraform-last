@@ -1,0 +1,27 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadOriginObjects",
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::wsc2026-cdn-asset-<비번호>/origin/*"
+    },
+    {
+      "Sid": "WriteResizedObjects",
+      "Effect": "Allow",
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::wsc2026-cdn-asset-<비번호>/resized/*"
+    },
+    {
+      "Sid": "EdgeLogging",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Resource": "arn:aws:logs:*:*:log-group:/aws/lambda/*.wsc2026-resize:*"
+    }
+  ]
+}

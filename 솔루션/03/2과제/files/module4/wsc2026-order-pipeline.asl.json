@@ -1,0 +1,276 @@
+{
+  "Comment": "wsc2026-order-pipeline : S3 -> Validate -> Payment -> DynamoDB -> History",
+  "StartAt": "FetchOrders",
+  "States": {
+    "FetchOrders": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:s3:getObject",
+      "Parameters": {
+        "Bucket.$": "$.bucket",
+        "Key.$": "$.key"
+      },
+      "ResultSelector": {
+        "data.$": "States.StringToJson($.Body)"
+      },
+      "ResultPath": "$.orderData",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "PipelineFailed"
+        }
+      ],
+      "Next": "ValidateOrders"
+    },
+
+    "ValidateOrders": {
+      "Type": "Map",
+      "ItemsPath": "$.orderData.data.orders",
+      "MaxConcurrency": 5,
+      "ResultPath": "$.validationResults",
+      "Iterator": {
+        "StartAt": "InvokeValidator",
+        "States": {
+          "InvokeValidator": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+              "FunctionName": "wsc2026-order-validator",
+              "Payload.$": "$"
+            },
+            "ResultSelector": {
+              "valid.$": "$.Payload.valid",
+              "order.$": "$.Payload.order",
+              "errors.$": "$.Payload.errors",
+              "expires_at.$": "$.Payload.expires_at"
+            },
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "Lambda.ServiceException",
+                  "Lambda.AWSLambdaException",
+                  "Lambda.SdkClientException",
+                  "Lambda.TooManyRequestsException"
+                ],
+                "IntervalSeconds": 2,
+                "MaxAttempts": 2,
+                "BackoffRate": 2.0
+              }
+            ],
+            "End": true
+          }
+        }
+      },
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "PipelineFailed"
+        }
+      ],
+      "Next": "ProcessAndStore"
+    },
+
+    "ProcessAndStore": {
+      "Type": "Map",
+      "ItemsPath": "$.validationResults",
+      "MaxConcurrency": 10,
+      "ResultPath": "$.processResults",
+      "Iterator": {
+        "StartAt": "IsValid",
+        "States": {
+          "IsValid": {
+            "Type": "Choice",
+            "Choices": [
+              {
+                "Variable": "$.valid",
+                "BooleanEquals": true,
+                "Next": "ProcessPayment"
+              }
+            ],
+            "Default": "SkipInvalidOrder"
+          },
+
+          "SkipInvalidOrder": {
+            "Type": "Pass",
+            "Parameters": {
+              "skipped": true,
+              "order.$": "$.order",
+              "errors.$": "$.errors"
+            },
+            "End": true
+          },
+
+          "ProcessPayment": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+              "FunctionName": "wsc2026-payment-processor",
+              "Payload.$": "$"
+            },
+            "ResultSelector": {
+              "payment.$": "$.Payload"
+            },
+            "ResultPath": "$.result",
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "Lambda.ServiceException",
+                  "Lambda.AWSLambdaException",
+                  "Lambda.SdkClientException",
+                  "Lambda.TooManyRequestsException"
+                ],
+                "IntervalSeconds": 2,
+                "MaxAttempts": 2,
+                "BackoffRate": 2.0
+              }
+            ],
+            "Catch": [
+              {
+                "ErrorEquals": ["States.ALL"],
+                "ResultPath": "$.error",
+                "Next": "SkipOnError"
+              }
+            ],
+            "Next": "PutOrder"
+          },
+
+          "PutOrder": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::dynamodb:putItem",
+            "Parameters": {
+              "TableName": "wsc2026-orders",
+              "Item": {
+                "order_id":       { "S.$": "$.result.payment.order_id" },
+                "ordered_at":     { "S.$": "$.result.payment.processed_at" },
+                "product_id":     { "S.$": "$.result.payment.product_id" },
+                "product_name":   { "S.$": "$.result.payment.product_name" },
+                "customer_id":    { "S.$": "$.result.payment.customer_id" },
+                "payment_method": { "S.$": "$.result.payment.payment_method" },
+                "payment_status": { "S.$": "$.result.payment.payment_status" },
+                "currency":       { "S.$": "$.result.payment.currency" },
+                "quantity":       { "N.$": "States.Format('{}', $.result.payment.quantity)" },
+                "unit_price":     { "N.$": "States.Format('{}', $.result.payment.unit_price)" },
+                "total_amount":   { "N.$": "States.Format('{}', $.result.payment.total_amount)" },
+                "total_usd":      { "N.$": "States.Format('{}', $.result.payment.total_usd)" },
+                "processed_at":   { "S.$": "$.result.payment.processed_at" }
+              }
+            },
+            "ResultPath": null,
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "DynamoDB.AmazonDynamoDBException",
+                  "DynamoDB.ProvisionedThroughputExceededException",
+                  "DynamoDB.RequestLimitExceeded",
+                  "DynamoDB.ThrottlingException",
+                  "DynamoDB.InternalServerErrorException"
+                ],
+                "IntervalSeconds": 1,
+                "MaxAttempts": 3,
+                "BackoffRate": 2.0
+              }
+            ],
+            "Catch": [
+              {
+                "ErrorEquals": ["States.ALL"],
+                "ResultPath": "$.error",
+                "Next": "SkipOnError"
+              }
+            ],
+            "Next": "UpdateInventory"
+          },
+
+          "UpdateInventory": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::dynamodb:updateItem",
+            "Parameters": {
+              "TableName": "wsc2026-inventory",
+              "Key": {
+                "product_id": { "S.$": "$.result.payment.product_id" }
+              },
+              "UpdateExpression": "SET stock = stock - :q",
+              "ExpressionAttributeValues": {
+                ":q": { "N.$": "States.Format('{}', $.result.payment.quantity)" }
+              }
+            },
+            "ResultPath": null,
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "DynamoDB.AmazonDynamoDBException",
+                  "DynamoDB.ProvisionedThroughputExceededException",
+                  "DynamoDB.RequestLimitExceeded",
+                  "DynamoDB.ThrottlingException",
+                  "DynamoDB.InternalServerErrorException"
+                ],
+                "IntervalSeconds": 1,
+                "MaxAttempts": 3,
+                "BackoffRate": 2.0
+              }
+            ],
+            "Catch": [
+              {
+                "ErrorEquals": ["States.ALL"],
+                "ResultPath": "$.error",
+                "Next": "SkipOnError"
+              }
+            ],
+            "End": true
+          },
+
+          "SkipOnError": {
+            "Type": "Pass",
+            "Parameters": {
+              "skipped": true,
+              "reason": "error",
+              "order.$": "$.order"
+            },
+            "End": true
+          }
+        }
+      },
+      "Next": "RecordResult"
+    },
+
+    "RecordResult": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:putItem",
+      "Parameters": {
+        "TableName": "wsc2026-pipeline-history",
+        "Item": {
+          "execution_id":     { "S.$": "$$.Execution.Id" },
+          "started_at":       { "S.$": "$$.Execution.StartTime" },
+          "status":           { "S": "COMPLETED" },
+          "total_orders":     { "N.$": "States.Format('{}', States.ArrayLength($.orderData.data.orders))" },
+          "valid_orders":     { "N.$": "States.Format('{}', States.ArrayLength($.validationResults[?(@.valid==true)]))" },
+          "processed_orders": { "N.$": "States.Format('{}', States.ArrayLength($.processResults))" },
+          "expires_at":       { "N.$": "States.Format('{}', $.validationResults[0].expires_at)" }
+        }
+      },
+      "End": true
+    },
+
+    "PipelineFailed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:putItem",
+      "Parameters": {
+        "TableName": "wsc2026-pipeline-history",
+        "Item": {
+          "execution_id": { "S.$": "$$.Execution.Id" },
+          "started_at":   { "S.$": "$$.Execution.StartTime" },
+          "status":       { "S": "FAILED" },
+          "error":        { "S.$": "$.error.Error" },
+          "cause":        { "S.$": "$.error.Cause" }
+        }
+      },
+      "Next": "FailState"
+    },
+
+    "FailState": {
+      "Type": "Fail",
+      "Error": "PipelineFailed",
+      "Cause": "Unrecoverable error in FetchOrders or ValidateOrders"
+    }
+  }
+}

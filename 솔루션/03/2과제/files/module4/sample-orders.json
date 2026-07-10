@@ -1,0 +1,54 @@
+{
+  "orders": [
+    {
+      "order_id": "ORD-20260521-001",
+      "product_id": "PROD-A100",
+      "product_name": "Wireless Keyboard",
+      "quantity": 2,
+      "unit_price": 45000,
+      "currency": "KRW",
+      "payment_method": "CARD",
+      "customer_id": "CUST-001"
+    },
+    {
+      "order_id": "ORD-20260521-002",
+      "product_id": "PROD-B200",
+      "product_name": "USB-C Monitor",
+      "quantity": 1,
+      "unit_price": 350000,
+      "currency": "KRW",
+      "payment_method": "BANK_TRANSFER",
+      "customer_id": "CUST-002"
+    },
+    {
+      "order_id": "ORD-20260521-003",
+      "product_id": "PROD-A100",
+      "product_name": "Wireless Keyboard",
+      "quantity": 0,
+      "unit_price": 45000,
+      "currency": "KRW",
+      "payment_method": "CARD",
+      "customer_id": "CUST-003"
+    },
+    {
+      "order_id": "INVALID-004",
+      "product_id": "PROD-C300",
+      "product_name": "Bluetooth Speaker",
+      "quantity": 1,
+      "unit_price": 89000,
+      "currency": "KRW",
+      "payment_method": "CRYPTO",
+      "customer_id": "CUST-004"
+    },
+    {
+      "order_id": "ORD-20260521-005",
+      "product_id": "",
+      "product_name": "",
+      "quantity": 3,
+      "unit_price": 12000,
+      "currency": "KRW",
+      "payment_method": "CARD",
+      "customer_id": "CUST-005"
+    }
+  ]
+}

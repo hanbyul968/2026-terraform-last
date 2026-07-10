@@ -1,0 +1,30 @@
+# helm upgrade -i wsc2026-prometheus prometheus-community/prometheus \
+#   -n wsc2026-logging -f prometheus-values.yaml
+#
+# 릴리스명이 wsc2026-prometheus 이면 서버 Deployment 이름은 wsc2026-prometheus-server
+# (채점 스크립트가 `kubectl exec deploy/wsc2026-prometheus-server -c prometheus-server` 로 접근)
+
+server:
+  persistentVolume:
+    enabled: true
+    size: 8Gi
+  service:
+    type: ClusterIP
+
+alertmanager:
+  enabled: false
+prometheus-pushgateway:
+  enabled: false
+prometheus-node-exporter:
+  enabled: false
+kube-state-metrics:
+  enabled: false
+
+serverFiles:
+  prometheus.yml:
+    scrape_configs:
+      - job_name: otel-collector
+        scrape_interval: 10s
+        static_configs:
+          - targets:
+              - wsc2026-otel-collector-opentelemetry-collector.wsc2026-logging.svc.cluster.local:9464

@@ -1,0 +1,113 @@
+# helm upgrade -i wsc2026-otel-collector open-telemetry/opentelemetry-collector \
+#   -n wsc2026-logging -f otel-collector-values.yaml
+#
+# 릴리스명이 wsc2026-otel-collector 이면 Deployment 이름은
+#   wsc2026-otel-collector-opentelemetry-collector  (채점 스크립트가 참조하는 이름)
+#
+# count connector / transform processor 는 contrib 배포판에만 있으므로 이미지 교체 필수.
+
+mode: deployment
+replicaCount: 1
+
+image:
+  repository: otel/opentelemetry-collector-contrib
+
+command:
+  name: otelcol-contrib
+
+ports:
+  otlp:
+    enabled: true
+    containerPort: 4317
+    servicePort: 4317
+    protocol: TCP
+  otlp-http:
+    enabled: true
+    containerPort: 4318
+    servicePort: 4318
+    protocol: TCP
+  prometheus:
+    enabled: true
+    containerPort: 9464
+    servicePort: 9464
+    protocol: TCP
+  jaeger-compact:
+    enabled: false
+  jaeger-thrift:
+    enabled: false
+  jaeger-grpc:
+    enabled: false
+  zipkin:
+    enabled: false
+
+config:
+  receivers:
+    jaeger: null
+    zipkin: null
+    prometheus: null
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+  processors:
+    batch:
+      timeout: 5s
+      send_batch_size: 512
+
+    # 로그에 cluster 리소스 속성 추가
+    resource:
+      attributes:
+        - key: cluster
+          value: wsc2026-logging-cluster
+          action: upsert
+
+    # JSON 본문을 파싱해 level / message / service 를 로그 속성으로 추출
+    transform/parse_json:
+      error_mode: ignore
+      log_statements:
+        - context: log
+          statements:
+            - merge_maps(cache, ParseJSON(body), "upsert") where IsMatch(body, "^\\s*\\{")
+            - set(attributes["level"],   cache["level"])   where cache["level"]   != nil
+            - set(attributes["message"], cache["message"]) where cache["message"] != nil
+            - set(attributes["service"], cache["service"]) where cache["service"] != nil
+
+  connectors:
+    # 로그 레벨별 발생 건수를 메트릭으로 변환
+    # prometheus exporter 가 monotonic sum 에 _total 접미사를 붙이므로
+    # 메트릭 이름은 log_record_count 로 두어야 log_record_count_total 로 노출된다.
+    count:
+      logs:
+        log_record_count:
+          description: Number of log records by level
+          attributes:
+            - key: level
+              default_value: UNKNOWN
+
+  exporters:
+    # 로그 파이프라인 → Loki Push(OTLP) 엔드포인트
+    otlphttp/loki:
+      endpoint: http://wsc2026-loki.wsc2026-logging.svc.cluster.local:3100/otlp
+      tls:
+        insecure: true
+
+    # 메트릭 파이프라인 → Prometheus 가 scrape 하는 엔드포인트
+    prometheus:
+      endpoint: 0.0.0.0:9464
+      resource_to_telemetry_conversion:
+        enabled: true
+
+  service:
+    pipelines:
+      traces: null
+      logs:
+        receivers: [otlp]
+        processors: [resource, transform/parse_json, batch]
+        exporters: [otlphttp/loki, count]
+      metrics:
+        receivers: [count]
+        processors: [batch]
+        exporters: [prometheus]

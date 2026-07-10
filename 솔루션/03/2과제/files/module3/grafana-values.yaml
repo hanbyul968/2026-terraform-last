@@ -1,0 +1,51 @@
+# helm upgrade -i wsc2026-grafana grafana/grafana -n wsc2026-logging \
+#   -f grafana-values.yaml --set-file dashboards.default.wsc2026-app-logs.json=dashboard-wsc2026-app-logs.json
+#
+# 위 --set-file 대신, 아래 dashboards 블록에 JSON 을 직접 붙여넣어도 된다.
+# 외부 접근을 위해 Service 타입은 LoadBalancer.
+
+adminUser: admin
+adminPassword: "Skill53@@"
+
+service:
+  type: LoadBalancer
+  port: 80
+
+persistence:
+  enabled: true
+  size: 5Gi
+
+datasources:
+  datasources.yaml:
+    apiVersion: 1
+    datasources:
+      - name: Loki
+        type: loki
+        uid: loki
+        access: proxy
+        url: http://wsc2026-loki.wsc2026-logging.svc.cluster.local:3100
+        isDefault: false
+        jsonData:
+          timeout: 60
+      - name: Prometheus
+        type: prometheus
+        uid: prometheus
+        access: proxy
+        url: http://wsc2026-prometheus-server.wsc2026-logging.svc.cluster.local
+        isDefault: true
+
+dashboardProviders:
+  dashboardproviders.yaml:
+    apiVersion: 1
+    providers:
+      - name: default
+        orgId: 1
+        folder: ""
+        type: file
+        disableDeletion: false
+        editable: true
+        options:
+          path: /var/lib/grafana/dashboards/default
+
+# dashboards.default.wsc2026-app-logs 는 --set-file 로 주입한다.
+dashboardsConfigMaps: {}

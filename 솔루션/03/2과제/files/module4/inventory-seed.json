@@ -1,0 +1,5 @@
+[
+  {"product_id": "PROD-A100", "product_name": "Wireless Keyboard", "stock": 50, "category": "electronics"},
+  {"product_id": "PROD-B200", "product_name": "USB-C Monitor", "stock": 20, "category": "electronics"},
+  {"product_id": "PROD-C300", "product_name": "Bluetooth Speaker", "stock": 100, "category": "audio"}
+]

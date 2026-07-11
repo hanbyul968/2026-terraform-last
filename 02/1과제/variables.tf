@@ -41,13 +41,13 @@ variable "s3_access_header_value" {
 variable "grafana_admin_user" {
   description = "Grafana 관리자 ID. 채점 로그인: admin"
   type        = string
-  default     = "admin"
+  default     = "skills-103-admin"
 }
 
 variable "grafana_admin_password" {
   description = "Grafana 관리자 PW. 채점 로그인: wsk2026!"
   type        = string
-  default     = "wsk2026!"
+  default     = "\$korea26!!"
 }
 
 # ── EKS 버전 (과제 8) ──

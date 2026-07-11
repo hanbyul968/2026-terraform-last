@@ -180,7 +180,7 @@ ExecStart=/usr/local/bin/uvicorn app:app --host 127.0.0.1 --port 8080
 StandardOutput=append:/var/log/gj2026/app.log
 StandardError=append:/var/log/gj2026/app.log
 Restart=no
-ExecStartPost=/bin/bash -c 'sleep 5 && aws lambda invoke --function-name gj2026-event-updater --region ap-northeast-2 --payload "{}" /tmp/updater-resp.json || true'
+ExecStartPost=/bin/bash -c 'sleep 8 && curl -sf http://127.0.0.1:8080/health && aws lambda invoke --function-name gj2026-event-updater --region ap-northeast-2 --payload "{}" /tmp/updater-resp.json || true'
 
 [Install]
 WantedBy=multi-user.target

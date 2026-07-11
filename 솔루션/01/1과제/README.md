@@ -458,7 +458,125 @@ helm install aws-load-balancer-controller eks/aws-load-balancer-controller -n ku
 | 리스너 규칙 | `/health`, `/v1/*` → book 대상그룹 **forward** |
 | 기본 동작 | **고정 응답 404** (정의 안된 경로) |
 
-> Ingress/TargetGroupBinding 로 하면 컨트롤러가 ALB 를 자동 생성한다. book Service(포트 8080)를 대상그룹에 IP 타입으로 연결.
+> 💡 **핵심:** 대상 그룹은 `Target type = IP`. book 은 EKS 파드라 IP 가 계속 바뀌므로,
+> 파드 IP 를 대상그룹에 **자동 등록**해줘야 한다. 그 역할을 **LB Controller + `TargetGroupBinding`** 이 한다.
+> 아래 **방법 A(권장)** 또는 **방법 B** 중 하나로 진행.
+
+---
+
+#### ✅ 방법 A (권장) — 콘솔에서 ALB 직접 만들고 `TargetGroupBinding` 으로 파드 IP 연결
+
+404 기본응답·경로 규칙을 **콘솔에서 정확히 통제**할 수 있어 채점에 유리하다.
+
+**① 대상 그룹 생성** — `EC2 → 대상 그룹 → 대상 그룹 생성`
+| 항목 | 값 |
+|------|-----|
+| 대상 유형 | **IP 주소** |
+| 이름 | `wsc-book-tg` |
+| 프로토콜/포트 | HTTP / **8080** |
+| VPC | `wsc-vpc` |
+| 상태 검사 경로 | `/health` (정상 코드 200) |
+> ⚠️ 대상은 **지금 등록하지 않는다**(비워 둠). 파드 IP 는 ③에서 컨트롤러가 자동 등록.
+
+**② ALB 생성** — `EC2 → 로드 밸런서 → 로드 밸런서 생성 → Application Load Balancer`
+| 항목 | 값 |
+|------|-----|
+| 이름 | `wsc-alb` |
+| 체계(Scheme) | **인터넷 경계(Internet-facing)** |
+| 서브넷 | `wsc-pub-sn-a`, `wsc-pub-sn-b` |
+| 보안 그룹 | 인바운드 **80** 허용(0.0.0.0/0) |
+| 리스너 | **HTTP:80** → 기본 작업 **고정 응답(fixed-response) 404** |
+
+→ 생성 후 **리스너(HTTP:80) → 규칙 관리**에서 우선순위 규칙 추가:
+| 우선순위 | 조건(경로) | 작업 |
+|:---:|------|------|
+| 10 | `/health` | `wsc-book-tg` 로 전달(forward) |
+| 20 | `/v1/*` | `wsc-book-tg` 로 전달(forward) |
+| 기본 | (그 외 전부) | **404 고정 응답** |
+
+**③ 파드 IP 를 대상그룹에 자동 등록** — `TargetGroupBinding` (CloudShell)
+
+먼저 대상그룹 ARN 을 구하고, book Service(ClusterIP, 포트 8080)를 대상그룹에 바인딩한다.
+```bash
+TG_ARN=$(aws elbv2 describe-target-groups --names wsc-book-tg \
+  --query 'TargetGroups[0].TargetGroupArn' --output text)
+
+cat <<EOF | kubectl apply -f -
+apiVersion: elbv2.k8s.aws/v1beta1
+kind: TargetGroupBinding
+metadata:
+  name: book-tgb
+  namespace: book
+spec:
+  serviceRef:
+    name: book          # 9단계에서 만든 Service
+    port: 8080
+  targetType: ip
+  targetGroupARN: $TG_ARN
+EOF
+```
+> 이제 LB Controller 가 book 파드 IP(8080)를 `wsc-book-tg` 에 **자동 등록/갱신**한다.
+> (9단계의 `Service/book` 이 파드를 selector 로 잡고 있어야 함 — `selector: app=book`.)
+
+**③ 확인:**
+```bash
+kubectl get targetgroupbinding -n book                 # book-tgb 존재
+aws elbv2 describe-target-health --target-group-arn $TG_ARN \
+  --query 'TargetHealthDescriptions[*].{IP:Target.Id,State:TargetHealthState}'
+# → 파드 IP 2개, State: healthy
+```
+
+---
+
+#### 방법 B — Ingress 로 ALB 자동 생성 (대안)
+
+`kubectl` 로 Ingress 만 만들면 LB Controller 가 ALB·대상그룹을 **자동 생성**한다.
+경로/404 규칙을 annotation·rules 로 표현한다.
+
+<details><summary>📄 book-ingress.yaml (펼치기)</summary>
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: book
+  namespace: book
+  annotations:
+    alb.ingress.kubernetes.io/load-balancer-name: wsc-alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip          # ★ IP 타입
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}]'
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+    alb.ingress.kubernetes.io/subnets: <pub-sn-a-id>,<pub-sn-b-id>
+    # 정의 안된 경로 404 기본 응답
+    alb.ingress.kubernetes.io/actions.resp404: >
+      {"type":"fixed-response","fixedResponseConfig":{"statusCode":"404","contentType":"application/json","messageBody":"{\"message\":\"not found\"}"}}
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          - path: /health
+            pathType: Prefix
+            backend: { service: { name: book, port: { number: 8080 } } }
+          - path: /v1
+            pathType: Prefix
+            backend: { service: { name: book, port: { number: 8080 } } }
+          - path: /                          # 그 외 전부 → 404
+            pathType: Prefix
+            backend: { service: { name: resp404, port: { name: use-annotation } } }
+EOF
+```
+</details>
+
+```bash
+kubectl apply -f book-ingress.yaml
+# ALB 프로비저닝까지 1~2분. 이름 wsc-alb 로 생성됨.
+```
+> 방법 B 는 대상그룹 이름이 자동 생성되므로, 채점이 대상그룹 **이름**을 보지 않는다면 무방하다.
+> 이름·404 세부제어가 필요하면 **방법 A** 를 쓴다.
+
+---
 
 **✅ 확인:**
 ```bash

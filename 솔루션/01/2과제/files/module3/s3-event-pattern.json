@@ -1,0 +1,9 @@
+{
+  "source": ["aws.s3"],
+  "detail-type": ["Object Created"],
+  "detail": {
+    "bucket": {
+      "name": ["wsc2026-wf-inbound-bucket"]
+    }
+  }
+}

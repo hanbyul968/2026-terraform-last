@@ -1,0 +1,42 @@
+{
+  "Comment": "S3 inbound data processing workflow",
+  "StartAt": "TransformData",
+  "States": {
+    "TransformData": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "wsc2026-transform-lambda",
+        "Payload.$": "$"
+      },
+      "ResultSelector": {
+        "transformed.$": "$.Payload.body"
+      },
+      "ResultPath": "$.result",
+      "Next": "SaveToDynamoDB",
+      "Catch": [
+        { "ErrorEquals": ["ValidationError"], "Next": "HandleError" },
+        { "ErrorEquals": ["TransformError"], "Next": "HandleError" }
+      ]
+    },
+    "SaveToDynamoDB": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:putItem",
+      "Parameters": {
+        "TableName": "wsc2026-target-db",
+        "Item": {
+          "id":           { "S.$": "$.result.transformed.id" },
+          "data":         { "S.$": "$.result.transformed.data" },
+          "status":       { "S.$": "$.result.transformed.status" },
+          "processed_at": { "S.$": "$.result.transformed.processed_at" }
+        }
+      },
+      "End": true
+    },
+    "HandleError": {
+      "Type": "Fail",
+      "Error": "WorkflowError",
+      "Cause": "Data transform or validation failed"
+    }
+  }
+}

@@ -60,6 +60,14 @@ kubectl -n app get pods
 
 hey.exe 가 **9바이트 등 수백 B 이하면 깨진 것**(다운로드 403/실패). 정상은 수 MB.
 
+> 참고 — Windows 특이 원인 2가지는 `loadtest.ps1` 안에서 이미 처리돼 있다(코드 최신이면 신경 쓸 필요 없음):
+> - `Start-Job` 안에서 hey stdout 을 `> file` 로 리다이렉트하면 출력이 사라져 **0바이트 CSV → NO DATA**.
+>   → stdout 을 변수로 캡처 후 `Out-File` 로 기록하도록 수정됨.
+> - 따옴표 포함 JSON 을 hey `-d $body` 로 넘기면 따옴표가 깨져 앱이 **400(invalid body)** → POST 앱(stress) 가용성 0%.
+>   → body 를 파일로 쓰고 hey `-D <file>` 로 원문 전송하도록 수정됨(`config.ps1` 의 body 형식은 그대로 두면 됨).
+>
+> 즉 **최신 코드에서 전부 `NO DATA` 면 남은 원인은 hey.exe 손상**이다(아래 진단).
+
 ```powershell
 # 진단
 Get-Item "$env:USERPROFILE\bin\hey.exe" | Select-Object Length   # 수 MB=정상, 수백 B=깨짐

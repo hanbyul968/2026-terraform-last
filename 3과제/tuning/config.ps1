@@ -2,16 +2,23 @@
 # 부하/채점 대상 정의. loadtest.ps1 / autotune.ps1 / autotune-hc.ps1 이 이 파일을 dot-source 한다:
 #     . .\config.ps1
 
-# 엔드포인트 — 비워두면 ../terraform 의 `terraform output endpoint` 에서 자동으로 가져온다.
-# (하드코딩 금지: 대회날 계정/주소가 바뀌어도 그대로 동작. 주소를 못 읽거나 다른 걸 쓰려면
-#  아래에 직접 넣거나, 스크립트에 -Url http://... 로 넘긴다.)
-if (-not $ENDPOINT) {
+# 엔드포인트 해석 — 우선순위: $env:ENDPOINT > `terraform output endpoint`.
+# ⚠ 매 실행마다 새로 계산한다(세션에 옛 주소가 캐시돼 죽은 도메인을 계속 쓰던 버그 방지).
+#   - 다른 주소 강제: 스크립트에 -Url http://... (최우선), 또는  $env:ENDPOINT = 'http://...'
+#   - 하드코딩 금지: 못 읽으면 빈값 → loadtest.ps1 이 "-Url 로 전달" 에러를 낸다(죽은 주소로 조용히 안 감).
+#   - -chdir= 는 PowerShell 5.1 에서 파싱이 깨질 수 있어 Push-Location 으로 디렉터리를 옮겨 실행.
+if ($env:ENDPOINT) {
+  $ENDPOINT = $env:ENDPOINT
+} else {
   $ENDPOINT = ''
   $tfdir = Join-Path $PSScriptRoot '..\terraform'
   if (Test-Path $tfdir) {
-    try { $ENDPOINT = (& terraform "-chdir=$tfdir" output -raw endpoint 2>$null | Select-Object -First 1) } catch {}
+    Push-Location $tfdir
+    try { $ENDPOINT = (terraform output -raw endpoint 2>$null) } catch {}
+    Pop-Location
   }
 }
+if ($ENDPOINT) { $ENDPOINT = "$ENDPOINT".Trim() }
 
 # 공통 식별자(앱이 요구하면). 안 쓰면 비워둬도 됨.
 if (-not $UUID) { $UUID = '7c5a3c6a-758f-4bc5-9bdf-3e573a0ad729' }

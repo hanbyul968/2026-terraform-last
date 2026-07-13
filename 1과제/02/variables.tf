@@ -47,7 +47,7 @@ variable "grafana_admin_user" {
 variable "grafana_admin_password" {
   description = "Grafana 관리자 PW. 채점 로그인: wsk2026!"
   type        = string
-  default     = "\$korea26!!"
+  default     = "\\$korea26!!"
 }
 
 # ── EKS 버전 (과제 8) ──

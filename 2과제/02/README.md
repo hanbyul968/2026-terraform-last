@@ -21,7 +21,7 @@
 
 ### 1) Bastion 생성 (로컬 PowerShell)
 ```powershell
-cd C:\Users\competitor\2026-terraform\02\2과제\bastion
+cd C:\Users\competitor\2026-terraform\2과제\02\bastion
 terraform init
 terraform apply -auto-approve
 terraform output -raw ssm_connect_command   # 접속 명령 확인
@@ -31,7 +31,7 @@ Bastion 은 전용 VPC(`10.250.0.0/16` + public `10.250.0.0/24` + IGW)에 생성
 
 ### 2) module1 은 로컬에서 바로 apply 가능 (선택)
 ```powershell
-cd C:\Users\competitor\2026-terraform\02\2과제\module1
+cd C:\Users\competitor\2026-terraform\2과제\02\module1
 terraform init
 terraform apply -auto-approve -var="bibunho=<비번호>"
 ```
@@ -111,11 +111,6 @@ BIBUNHO=<비번호> bash /opt/task2/deploy.sh
    (module1/4 는 `-var="bibunho=<비번호>"` 필요)
 2. 로컬 PowerShell 에서 Bastion 제거(별도 state):
    ```powershell
-   cd C:\Users\competitor\2026-terraform\02\2과제\bastion
+   cd C:\Users\competitor\2026-terraform\2과제\02\bastion
    terraform destroy -auto-approve
    ```
-
-## NEEDS-REVIEW
-- module3 follows 문제지 (Cloud Event Handling, eu-west-1). (EventBridge/CloudTrail/Lambda/SNS 설계로 재구성; AWS Config 접근은 제거함.)
-- MSK 토픽 생성은 TF 밖(producer EC2 kafka CLI, user_data 자동). MSK 생성에 15~30분 소요 → producer setup 은 백그라운드 재시도.
-- Managed Flink Studio 는 aws CLI(`null_resource`) 생성 → apply 머신(Bastion)에 aws CLI 필요(설치됨).

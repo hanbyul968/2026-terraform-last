@@ -88,27 +88,55 @@ resource "aws_iam_openid_connect_provider" "eks" {
   thumbprint_list = [data.tls_certificate.eks.certificates[0].sha1_fingerprint]
 }
 
-# 채점 계정 principal -> ClusterAdmin (CloudShell kubectl 채점용)
-#   주의: principal_arn 은 role/user ARN 이어야 한다(STS assumed-role 세션 ARN 불가).
-#   bastion 에서 apply 시 data.aws_caller_identity 는 세션 ARN 이라 그대로 못 쓴다 →
-#   채점 신원(예: arn:aws:iam::<acct>:user/<name>)을 var.grader_principal_arn 으로 넘긴다.
-#   비우면(기본값) 생성 안 함 — 클러스터 생성자(apply 주체)는 이미 admin.
-resource "aws_eks_access_entry" "admin" {
-  count         = var.grader_principal_arn == "" ? 0 : 1
-  cluster_name  = aws_eks_cluster.this.name
-  principal_arn = var.grader_principal_arn
-  type          = "STANDARD"
+# ── apply 주체(caller)를 자동으로 ClusterAdmin access entry 로 등록 ──
+#   caller ARN 이 STS assumed-role 세션 ARN 이면 IAM role ARN 으로 정규화한다.
+#     arn:aws:sts::<acct>:assumed-role/<Role>/<session>
+#       -> arn:aws:iam::<acct>:role/<Role>
+#   IAM user/role ARN 이면 그대로 사용.
+#   => apply 한 신원이 곧바로 kubectl(ClusterAdmin) 가능. (var 로 안 넘겨도 됨)
+locals {
+  _caller_arn     = data.aws_caller_identity.current.arn
+  _is_assumed     = can(regex(":assumed-role/", local._caller_arn))
+  _assumed_role   = local._is_assumed ? split("/", local._caller_arn)[1] : ""
+  apply_principal = local._is_assumed ? "arn:${local.partition}:iam::${local.account_id}:role/${local._assumed_role}" : local._caller_arn
+
+  # 자동(apply 주체) + 선택(추가 채점 신원) 을 합쳐 중복 제거
+  admin_principals = toset(compact([
+    local.apply_principal,
+    var.grader_principal_arn,
+  ]))
 }
 
-resource "aws_eks_access_policy_association" "admin" {
-  count         = var.grader_principal_arn == "" ? 0 : 1
-  cluster_name  = aws_eks_cluster.this.name
-  principal_arn = var.grader_principal_arn
-  policy_arn    = "arn:${local.partition}:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
-  access_scope {
-    type = "cluster"
+# bootstrap_cluster_creator_admin_permissions=true 가 이미 apply 주체용 access entry 를
+# 자동 생성하므로, 동일 principal 을 관리형 aws_eks_access_entry 로 또 만들면
+# ResourceInUseException 이 난다. → CLI 로 멱등(있으면 무시) 등록해 충돌을 피한다.
+#   등록 대상: apply 주체(정규화된 ARN) + (선택) var.grader_principal_arn
+resource "null_resource" "eks_admin_access" {
+  triggers = {
+    cluster    = aws_eks_cluster.this.name
+    principals = join(",", local.admin_principals)
   }
-  depends_on = [aws_eks_access_entry.admin]
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    environment = {
+      REGION     = local.region
+      CLUSTER    = aws_eks_cluster.this.name
+      PRINCIPALS = join(" ", local.admin_principals)
+      POLICY     = "arn:${local.partition}:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+    }
+    command = <<-EOT
+      set -eu
+      for P in $PRINCIPALS; do
+        echo "granting ClusterAdmin to $P"
+        aws eks create-access-entry --cluster-name "$CLUSTER" --region "$REGION" \
+          --principal-arn "$P" --type STANDARD >/dev/null 2>&1 || true
+        aws eks associate-access-policy --cluster-name "$CLUSTER" --region "$REGION" \
+          --principal-arn "$P" --policy-arn "$POLICY" \
+          --access-scope type=cluster >/dev/null 2>&1 || true
+      done
+    EOT
+  }
+  depends_on = [aws_eks_cluster.this]
 }
 
 # ═══════════════════════════════════════════════════════════════

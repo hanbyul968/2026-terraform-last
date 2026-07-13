@@ -140,21 +140,62 @@
 
 ## 10. IRSA 역할 3개 (app / KEDA / Karpenter)
 
-각각 IAM → 역할 생성 → **웹 자격 증명** → 방금 만든 OIDC 공급자 선택.
+각각 IAM → 역할 생성 → **웹 자격 증명** → 방금 만든 OIDC 공급자, Audience `sts.amazonaws.com`.
+역할 생성 후 **신뢰 관계 편집**에서 아래 형태로 `sub` Condition을 추가한다 (`<OIDC>`는 공급자 URL에서 `https://` 뗀 값, `<ACCOUNT>`는 계정 ID).
 
 **(a) 앱 워커 역할 `wsi-worker-role`** — SQS 송수신
-- 신뢰: `system:serviceaccount:wsi-app:wsi-worker-sa`
-- 인라인 정책: `sqs:ReceiveMessage`, `sqs:DeleteMessage`, `sqs:GetQueueAttributes` on `wsi-task-queue` ARN
+신뢰 정책:
+```json
+{ "Version": "2012-10-17", "Statement": [{
+  "Effect": "Allow",
+  "Principal": { "Federated": "arn:aws:iam::<ACCOUNT>:oidc-provider/<OIDC>" },
+  "Action": "sts:AssumeRoleWithWebIdentity",
+  "Condition": { "StringEquals": {
+    "<OIDC>:sub": "system:serviceaccount:wsi-app:wsi-worker-sa",
+    "<OIDC>:aud": "sts.amazonaws.com" } } }] }
+```
+권한 정책 (`<QUEUE_ARN>` = wsi-task-queue ARN):
+```json
+{ "Version": "2012-10-17", "Statement": [{
+  "Effect": "Allow",
+  "Action": ["sqs:ReceiveMessage","sqs:DeleteMessage","sqs:GetQueueAttributes"],
+  "Resource": "<QUEUE_ARN>" }] }
+```
 
 **(b) KEDA 역할 `wsi-keda-operator-role`** — SQS 메트릭 조회
-- 신뢰: `system:serviceaccount:keda:keda-operator`
-- 정책: `sqs:GetQueueAttributes`, `sqs:GetQueueUrl` on 큐 ARN
+- 신뢰 정책: (a)와 동일하되 `sub` = `system:serviceaccount:keda:keda-operator`
+- 권한 정책:
+```json
+{ "Version": "2012-10-17", "Statement": [{
+  "Effect": "Allow",
+  "Action": ["sqs:GetQueueAttributes","sqs:GetQueueUrl"],
+  "Resource": "<QUEUE_ARN>" }] }
+```
 
 **(c) Karpenter 컨트롤러 역할 `wsi-karpenter-controller-role`**
-- 신뢰: `system:serviceaccount:kube-system:karpenter`
-- 정책: EC2 (RunInstances, CreateFleet, CreateLaunchTemplate, Describe*, TerminateInstances, CreateTags 등), `iam:PassRole`/`CreateInstanceProfile` 등, `eks:DescribeCluster`, `ssm:GetParameter` on `arn:aws:ssm:ap-northeast-2::parameter/aws/service/eks/optimized-ami/*`
+- 신뢰 정책: (a)와 동일하되 `sub` = `system:serviceaccount:kube-system:karpenter`
+- 권한 정책:
+```json
+{ "Version": "2012-10-17", "Statement": [
+  { "Effect": "Allow", "Resource": "*", "Action": [
+      "ec2:CreateLaunchTemplate","ec2:CreateFleet","ec2:RunInstances","ec2:CreateTags",
+      "ec2:TerminateInstances","ec2:DeleteLaunchTemplate",
+      "ec2:DescribeLaunchTemplates","ec2:DescribeInstances","ec2:DescribeSecurityGroups",
+      "ec2:DescribeSubnets","ec2:DescribeImages","ec2:DescribeInstanceTypes",
+      "ec2:DescribeInstanceTypeOfferings","ec2:DescribeAvailabilityZones",
+      "ec2:DescribeSpotPriceHistory","pricing:GetProducts" ] },
+  { "Effect": "Allow", "Resource": "*", "Action": [
+      "iam:PassRole","iam:CreateInstanceProfile","iam:DeleteInstanceProfile",
+      "iam:GetInstanceProfile","iam:TagInstanceProfile",
+      "iam:AddRoleToInstanceProfile","iam:RemoveRoleFromInstanceProfile" ] },
+  { "Effect": "Allow", "Action": "eks:DescribeCluster",
+      "Resource": "arn:aws:eks:ap-northeast-2:<ACCOUNT>:cluster/wsi-eks" },
+  { "Effect": "Allow", "Action": "ssm:GetParameter",
+      "Resource": "arn:aws:ssm:ap-northeast-2::parameter/aws/service/eks/optimized-ami/*" }
+]}
+```
 
-> 신뢰 정책의 Condition에는 `<OIDC>:sub` = 위 serviceaccount, `<OIDC>:aud` = `sts.amazonaws.com` 둘 다 넣는다.
+> `<OIDC>`, `<ACCOUNT>`, `<QUEUE_ARN>` 은 실제 값으로 치환. Audience(`aud`) Condition은 웹 자격증명 역할 생성 시 자동으로 들어가 있으니 `sub`만 추가하면 된다.
 
 ---
 

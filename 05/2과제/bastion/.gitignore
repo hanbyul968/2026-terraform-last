@@ -1,6 +1,0 @@
-.terraform/
-.terraform.lock.hcl
-*.tfstate
-*.tfstate.*
-*.tfplan
-.task2_bundle_05.zip

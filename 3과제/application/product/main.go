@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"fmt"
 	"log"
 	"math/rand"
 	"net/http"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -70,20 +72,45 @@ type CreateProductReq struct {
 	Price     float64 `json:"price"`
 }
 
-// jitter introduces variable per-request latency: a small base jitter on
-// every call plus a rare (~1/20) larger spike, so the latency profile is
-// uneven under load rather than flat.
-func jitter() {
-	d := time.Duration(rand.Intn(8)) * time.Millisecond
-	if rand.Intn(20) == 0 {
-		d += time.Duration(50+rand.Intn(70)) * time.Millisecond
+// loadMult scales the synthetic per-request work. Tune LOAD_MULT in the
+// deployment to raise or lower contest difficulty without rebuilding the image.
+var loadMult = envFloat("LOAD_MULT", 1.0)
+
+// burnBuf is written once at init and only read afterwards, so it is safe to
+// hash from many request goroutines concurrently.
+var burnBuf = make([]byte, 64*1024)
+
+// load applies the synthetic per-request work. It is deliberately CPU-bound:
+// hashing work shrinks as replicas are added, so scaling out is what earns the
+// latency back. The small sleep only models I/O-like variance. Most requests
+// take the base path; ~1/10 hit a heavier burst so the profile stays spiky.
+func load() {
+	burst := 1.0
+	if rand.Intn(10) == 0 {
+		burst = 4 + rand.Float64()*4
 	}
-	time.Sleep(d)
+	iters := int(float64(100+rand.Intn(150)) * loadMult * burst)
+	h := sha256.New()
+	for i := 0; i < iters; i++ {
+		h.Write(burnBuf)
+	}
+	_ = h.Sum(nil)[0]
+
+	time.Sleep(time.Duration(float64(rand.Intn(5)) * loadMult * float64(time.Millisecond)))
 }
 
 func env(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return def
+}
+
+func envFloat(key string, def float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 {
+			return f
+		}
 	}
 	return def
 }
@@ -174,7 +201,7 @@ func createProduct(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"err": "id and name required"})
 		return
 	}
-	jitter()
+	load()
 
 	_, err := db.ExecContext(c.Request.Context(),
 		"INSERT INTO product (id, name, price) VALUES (?, ?, ?)",
@@ -203,7 +230,7 @@ func getProduct(c *gin.Context) {
 		return
 	}
 
-	jitter()
+	load()
 	var p Product
 	var imagePath sql.NullString
 	err := db.QueryRowContext(c.Request.Context(),

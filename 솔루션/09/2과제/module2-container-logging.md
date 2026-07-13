@@ -64,7 +64,11 @@
    - 스케일링: 최소 2 / 최대 4 / 원하는 2
    - 서브넷: **프라이빗 2개**
    - 생성
-3. 워커 노드 Name 태그를 `wsc2026-logging-worker-node`로: (노드그룹은 태그 전파가 제한적이라, 노드그룹 편집 → 태그에 `Name=wsc2026-logging-worker-node` 추가 또는 시작 템플릿 사용)
+3. **워커 노드 Name 태그** `wsc2026-logging-worker-node`:
+   - 관리형 노드그룹은 노드그룹 태그가 **EC2 인스턴스의 Name 태그로 전파되지 않는다.**
+   - 방법 A(권장): 노드그룹 생성 시 **시작 템플릿(Launch Template)** 을 지정하고, 템플릿의 "리소스 태그 지정"에서 인스턴스 태그 `Name=wsc2026-logging-worker-node` 추가.
+   - 방법 B(간단): 노드 생성 후 EC2 콘솔에서 해당 노드들 선택 → 태그 관리 → `Name=wsc2026-logging-worker-node` 수동 추가 (노드가 교체되면 다시 붙여야 함).
+   > 참고: 채점 스크립트(2-1~2-6)는 이 Name 태그를 직접 검사하지 않지만, 과제지 요건이므로 맞춰둔다.
 
 ## 4. IRSA용 OIDC + ALB Controller 역할
 

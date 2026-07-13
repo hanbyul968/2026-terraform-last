@@ -17,6 +17,36 @@ AWS **Management Console**만으로 4개 모듈을 만드는 방법입니다. (�
 
 ---
 
+# 사전 준비
+
+## 계정 ID(ACCOUNT_ID) 확인
+
+정책·ARN 작성에 계정 ID(12자리)가 필요합니다.
+
+- 콘솔 우측 상단 계정 메뉴에 표시되거나,
+- CloudShell에서:
+
+  ```bash
+  aws sts get-caller-identity --query Account --output text
+  ```
+
+문서 안 `<ACCOUNT_ID>`, `<비번호>`, `<...ARN>` 은 전부 본인 값으로 바꿉니다.
+
+## 제공 파일을 CloudShell에 올리기
+
+`insert.sh`, `query.sh`, 그리고 채점 스크립트 `grade_module*_v2.sh` 는 CloudShell에서 실행합니다.
+
+1. 콘솔 우측 상단 **CloudShell**(`>_`) 실행.
+2. **Actions → Upload file** 로 필요한 파일을 업로드.
+3. CloudShell은 리전 개념이 없고, 명령의 `--region` 값으로 대상 리전을 지정합니다. (스크립트에 이미 포함)
+
+## 작업 순서 팁
+
+- **Module 4 (Aurora)를 가장 먼저** 시작하세요. 기동에 ~10분 걸리므로, 만들어 두고 1→2→3을 진행하면 시간을 아낍니다.
+- CloudFront 배포도 ~3분 걸리니 Module 2 배포 생성 후 다른 작업을 병행하세요.
+
+---
+
 # Module 1. NoSQL (DynamoDB) — 리전: ap-northeast-2
 
 ## 1-1. DynamoDB 테이블 생성
@@ -147,8 +177,10 @@ AWS **Management Console**만으로 4개 모듈을 만드는 방법입니다. (�
 
    | 항목 | 값 |
    |------|-----|
-   | 원본 도메인 | `cdn-static-<비번호>.s3.us-east-1.amazonaws.com` (S3 버킷 선택) |
-   | 원본 액세스 | **Origin access control settings** 선택 → `cdn-oac` |
+   | 원본 도메인 | 드롭다운에서 **S3 버킷 `cdn-static-<비번호>` 선택** → `cdn-static-<비번호>.s3.us-east-1.amazonaws.com` |
+   | 원본 액세스 | **Origin access control settings (recommended)** 선택 → `cdn-oac` |
+
+   > ⚠️ 원본 도메인은 반드시 **S3 REST 엔드포인트**(`...s3.us-east-1.amazonaws.com`)여야 합니다. "웹사이트 엔드포인트"(`...s3-website...`)를 고르면 OAC가 동작하지 않습니다. 드롭다운에서 버킷을 선택하면 REST 엔드포인트가 자동 입력됩니다.
 
 3. **기본 캐시 동작(Default cache behavior)**:
 

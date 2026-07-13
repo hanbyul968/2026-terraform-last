@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -24,6 +25,22 @@ func env(key, def string) string {
 	}
 	return def
 }
+
+func envFloat(key string, def float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 {
+			return f
+		}
+	}
+	return def
+}
+
+// loadMult scales the synthetic per-request work. Tune LOAD_MULT in the
+// deployment to raise or lower contest difficulty without rebuilding the image.
+var loadMult = envFloat("LOAD_MULT", 1.0)
+
+// maxLength is the documented upper bound of the stress API's length field.
+const maxLength = 4096
 
 func main() {
 	gin.SetMode(gin.ReleaseMode)
@@ -61,6 +78,10 @@ func handleStress(c *gin.Context) {
 	if req.Length <= 0 {
 		req.Length = 1
 	}
+	// cap Length so a stray large value cannot request a multi-GB allocation.
+	if req.Length > maxLength {
+		req.Length = maxLength
+	}
 
 	// allocate (req.Length * 4) KB and compute hashes to generate CPU + memory pressure.
 	// work grows ~quadratically with Length, so a small Length bump is a large load bump.
@@ -68,14 +89,14 @@ func handleStress(c *gin.Context) {
 	buf := make([]byte, size)
 	rand.Read(buf)
 
-	// variable load: most requests run a 1x-3x burst, ~1/12 spike up to 8x.
+	// variable load: most requests run a 2x-5x burst, ~1/8 spike up to 12x.
 	// identical Length therefore yields a spiky, uneven CPU profile.
-	burst := 1 + rand.Intn(3)
-	if rand.Intn(12) == 0 {
-		burst = 4 + rand.Intn(5)
+	burst := 2 + rand.Intn(4)
+	if rand.Intn(8) == 0 {
+		burst = 6 + rand.Intn(7)
 	}
 	h := sha256.New()
-	iters := req.Length * 4 * burst
+	iters := int(float64(req.Length*4*burst) * loadMult)
 	for i := 0; i < iters; i++ {
 		h.Write(buf)
 	}

@@ -1,2 +1,0 @@
-# 배포파일은 바이트 그대로 보존 (data-app.py는 채점 SHA256 검증 대상)
-files/** -text

@@ -1,7 +1,7 @@
 > # 🚀 배포 방법 (2단계 — 이 안내가 최신/정답)
 > 아래 본문의 "Step 1 로컬에서 `terraform apply`" 는 구버전입니다. **로컬에서 bastion 만 띄우고, bastion 안에서 apply** 합니다.
 > ```powershell
-> cd C:\Users\competitor\2026-terraform\06\1과제\bastion
+> cd C:\Users\competitor\2026-terraform\1과제\07\bastion
 > terraform init; terraform apply -auto-approve
 > terraform output -raw ssm_connect_command
 > ```
@@ -20,7 +20,7 @@
 ## Step 1 — 로컬에서 Terraform 실행
 
 ```bash
-cd C:\Users\competitor\2026-terraform\06\1과제
+cd C:\Users\competitor\2026-terraform\1과제\07
 terraform init
 terraform apply --auto-approve
 # 프롬프트에서 비번호 입력 (예: 103)
@@ -533,7 +533,7 @@ $TF aws_lb_listener.grafana                             $G_LISTENER_ARN
 로컬에서는 **bastion 만** 띄우고, **bastion(Linux) 안에서 main**을 apply 합니다.
 
 ```powershell
-cd C:\Users\competitor\2026-terraform\06\1과제\bastion
+cd C:\Users\competitor\2026-terraform\1과제\07\bastion
 terraform init ; terraform apply -auto-approve
 terraform output -raw ssm_connect_command
 ```
@@ -543,7 +543,7 @@ bash /opt/task1/run.sh        # 루트 terraform apply
 #  EKS/이미지/모니터링 등 k8s 작업은 manifest/apply.sh 로 수행 (docker/eksctl/helm 필요)
 ```
 ```powershell
-cd C:\Users\competitor\2026-terraform\06\1과제\bastion ; terraform destroy -auto-approve
+cd C:\Users\competitor\2026-terraform\1과제\07\bastion ; terraform destroy -auto-approve
 ```
 
 > ⚠️ **default VPC 없음**: `bastion/main.tf` 의 default VPC 참조를 전용 VPC 로 교체해야 apply 됩니다(01/1과제 bastion 참고).
@@ -558,7 +558,7 @@ cd C:\Users\competitor\2026-terraform\06\1과제\bastion ; terraform destroy -au
 - **AMI**: 표준 AL2023(`al2023-ami-2023.*`)만 선택 — minimal AMI 는 SSM 에이전트가 없어 제외.
 - **Bastion 삭제** (채점 대상과 분리된 별도 state → bastion 만 안전하게 제거):
 ```powershell
-cd C:\Users\competitor\2026-terraform\06\1과제\bastion
+cd C:\Users\competitor\2026-terraform\1과제\07\bastion
 terraform destroy -auto-approve
 ```
 > 채점 대상(main/모듈)은 bastion 안에서 별도로 destroy. EKS 가 private-only 인 과제는 destroy 전 public 재오픈 필요.

@@ -43,7 +43,7 @@
 
 ```powershell
 # ── 1단계 (로컬 Windows PowerShell): Bastion 생성 ──────────────────
-cd "C:\Users\competitor\2026-terraform\06\2과제\bastion"
+cd "C:\Users\competitor\2026-terraform\2과제\07\bastion"
 terraform init
 terraform apply -var="competitor_number=<선수등번호>"
 #   (선택) -var="player_id=<비번호>"  → Bastion 리소스/부트스트랩 버킷 이름 접두어
@@ -84,7 +84,7 @@ module4 는 `setup.sh`(이미지 빌드/Helm/대시보드)까지 자동 실행�
 
 ```powershell
 # 최상위(2과제) 디렉터리에서
-cd "C:\Users\competitor\2026-terraform\06\2과제"
+cd "C:\Users\competitor\2026-terraform\2과제\07"
 terraform init
 terraform apply -var="competitor_number=<선수등번호>"
 ```
@@ -515,7 +515,7 @@ aws eks update-kubeconfig --region ap-northeast-1 --name o11y-cluster   && kubec
 - **AMI**: 표준 AL2023(`al2023-ami-2023.*`)만 선택 — minimal AMI 는 SSM 에이전트가 없어 제외.
 - **Bastion 삭제** (채점 대상과 분리된 별도 state → bastion 만 안전하게 제거):
 ```powershell
-cd C:\Users\competitor\2026-terraform\06\2과제\bastion
+cd C:\Users\competitor\2026-terraform\2과제\07\bastion
 terraform destroy -auto-approve
 ```
 > 채점 대상(main/모듈)은 bastion 안에서 별도로 destroy. EKS 가 private-only 인 과제는 destroy 전 public 재오픈 필요.

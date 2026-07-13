@@ -17,7 +17,7 @@ winget install Amazon.AWSCLI
 aws configure        # Access Key / Secret / region=us-west-2
 
 # 소스: 지급된 2과제 폴더로 이동 (별도 clone 불필요 — 런타임 외부 repo 의존 없음)
-cd C:\Users\competitor\2026-terraform\07\2과제
+cd C:\Users\competitor\2026-terraform\2과제\08
 ```
 
 ---
@@ -82,7 +82,7 @@ apply하면 **배포 전용 Linux bastion**(전용 VPC `10.250.0.0/16`, SSM 접�
 
 ```powershell
 # 1) 로컬(Windows)에서 배포용 bastion 생성
-cd C:\Users\competitor\2026-terraform\07\2과제\bastion
+cd C:\Users\competitor\2026-terraform\2과제\08\bastion
 terraform init
 terraform apply -auto-approve
 terraform output ssm_connect_command      # 접속 명령 출력
@@ -307,7 +307,7 @@ kubectl scale deployment karpenter -n karpenter --replicas=1
 - **AMI**: 표준 AL2023(`al2023-ami-2023.*`)만 선택 — minimal AMI 는 SSM 에이전트가 없어 제외.
 - **Bastion 삭제** (채점 대상과 분리된 별도 state → bastion 만 안전하게 제거):
 ```powershell
-cd C:\Users\competitor\2026-terraform\07\2과제\bastion
+cd C:\Users\competitor\2026-terraform\2과제\08\bastion
 terraform destroy -auto-approve
 ```
 > 채점 대상(main/모듈)은 bastion 안에서 별도로 destroy. EKS 가 private-only 인 과제는 destroy 전 public 재오픈 필요.

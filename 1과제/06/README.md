@@ -1,7 +1,7 @@
 > # 🚀 배포 방법 (2단계 — 이 안내가 최신/정답)
 > **로컬에서 bastion 만 띄우고, bastion(Linux) 안에서 main 을 apply** 합니다(로컬 직접 apply 불가).
 > ```powershell
-> cd C:\Users\competitor\2026-terraform\05\1과제\bastion
+> cd C:\Users\competitor\2026-terraform\1과제\06\bastion
 > terraform init; terraform apply -auto-approve
 > terraform output -raw ssm_connect_command
 > ```
@@ -59,7 +59,7 @@
 ### 1-3. Terraform 실행
 
 ```powershell
-cd C:\Users\competitor\2026-terraform\05\1과제
+cd C:\Users\competitor\2026-terraform\1과제\06
 
 terraform init
 
@@ -356,7 +356,7 @@ prefix가 `gj2026-` → 다른 값으로 바뀌면 아래를 **일괄 찾아 바
 로컬에서는 **bastion 만** 띄우고, **bastion(Linux) 안에서 main 전체**를 apply 합니다.
 
 ```powershell
-cd C:\Users\competitor\2026-terraform\05\1과제\bastion
+cd C:\Users\competitor\2026-terraform\1과제\06\bastion
 terraform init ; terraform apply -auto-approve
 terraform output -raw ssm_connect_command
 ```
@@ -365,7 +365,7 @@ until [ -f /opt/task1/READY ]; do sleep 5; done
 bash /opt/task1/run.sh
 ```
 ```powershell
-cd C:\Users\competitor\2026-terraform\05\1과제\bastion ; terraform destroy -auto-approve
+cd C:\Users\competitor\2026-terraform\1과제\06\bastion ; terraform destroy -auto-approve
 ```
 
 > ⚠️ **default VPC 없음**: `bastion/main.tf` 의 default VPC 참조를 전용 VPC(10.250.0.0/16 + public subnet + IGW + route)로 교체해야 apply 됩니다(01/1과제 bastion 참고).

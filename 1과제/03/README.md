@@ -5,7 +5,7 @@
 >
 > ```powershell
 > # Phase 1 (로컬): 새 VPC + bastion + 소스 번들
-> cd C:\Users\competitor\2026-terraform\03\1과제\bastion
+> cd C:\Users\competitor\2026-terraform\1과제\03\bastion
 > terraform init; terraform apply -auto-approve
 > terraform output -raw ssm_connect_command   # 또는 SSH
 > ```
@@ -220,7 +220,7 @@ terraform output cloudfront_domain   # 채점 진입점
 로컬에서는 **bastion 만** 띄우고, **bastion(Linux) 안에서 main 전체**를 apply 합니다.
 
 ```powershell
-cd C:\Users\competitor\2026-terraform\03\1과제\bastion
+cd C:\Users\competitor\2026-terraform\1과제\03\bastion
 terraform init ; terraform apply -auto-approve
 terraform output -raw ssm_connect_command
 ```
@@ -229,7 +229,7 @@ until [ -f /opt/task1/READY ]; do sleep 5; done
 bash /opt/task1/run.sh        # EKS + helm, 마지막 finalize 에서 EKS private-only 전환(채점 4-1)
 ```
 ```powershell
-cd C:\Users\competitor\2026-terraform\03\1과제\bastion ; terraform destroy -auto-approve
+cd C:\Users\competitor\2026-terraform\1과제\03\bastion ; terraform destroy -auto-approve
 ```
 
 > ⚠️ 구 `bastion.tf` 는 `bastion.tf.OLD-in-main` 으로 비활성화됨(외부 bastion/ 스테이지로 대체).
@@ -245,7 +245,7 @@ cd C:\Users\competitor\2026-terraform\03\1과제\bastion ; terraform destroy -au
 - **AMI**: 표준 AL2023(`al2023-ami-2023.*`)만 선택 — minimal AMI 는 SSM 에이전트가 없어 제외.
 - **Bastion 삭제** (채점 대상과 분리된 별도 state → bastion 만 안전하게 제거):
 ```powershell
-cd C:\Users\competitor\2026-terraform\03\1과제\bastion
+cd C:\Users\competitor\2026-terraform\1과제\03\bastion
 terraform destroy -auto-approve
 ```
 > 채점 대상(main/모듈)은 bastion 안에서 별도로 destroy. EKS 가 private-only 인 과제는 destroy 전 public 재오픈 필요.

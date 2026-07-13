@@ -12,7 +12,10 @@ RUN apk add --no-cache upx binutils \
  && upx -9 /out/app || true
 
 FROM alpine:3.21
-RUN apk add --no-cache --upgrade ca-certificates curl
+# tzdata + TZ: book 앱이 created_at 을 로컬시간으로 기록하므로 KST(+09:00)로 맞춘다.
+#   (Reference03: created_at 은 KST. tzdata 없으면 UTC 'Z' 로 기록됨 → 채점 9-2)
+RUN apk add --no-cache --upgrade ca-certificates curl tzdata
+ENV TZ=Asia/Seoul
 COPY --from=prep /out/app /app
 # book 앱은 TCP/8080 바인딩 (Reference02)
 EXPOSE 8080

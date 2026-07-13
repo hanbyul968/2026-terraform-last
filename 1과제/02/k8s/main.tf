@@ -69,6 +69,7 @@ resource "kubernetes_config_map_v1" "book" {
   data = {
     AWS_REGION = var.region
     TABLE_NAME = var.table_name
+    TZ         = "Asia/Seoul" # created_at KST(+09:00) 기록 (Reference03, 채점 9-2)
   }
 }
 

@@ -1,9 +1,16 @@
 #!/bin/bash
 set -x
-# 비번호: terraform apply 시 입력한 var.number 가 S3의 number.env 로 내려온다.
-# (없으면 환경변수 number, 그것도 없으면 103)
+set +H   # '!' 히스토리 확장 비활성화 (Grafana 비번 HelloKrSkills!<번호>@ 보호; source 실행 대비)
+# 비번호(등번호) 우선순위:
+#  1) 로컬 number.env (CloudShell: S3에서 함께 내려받는 경우)
+#  2) 상위 terraform.tfvars (bastion 번들 /opt/task1/terraform.tfvars)
+#  3) 환경변수 number, 4) 그래도 없으면 103
 [ -f number.env ] && source number.env
+if [ -z "${number:-}" ] && [ -f ../terraform.tfvars ]; then
+  number=$(grep -E '^[[:space:]]*number[[:space:]]*=' ../terraform.tfvars | head -1 | sed -E 's/.*=[[:space:]]*"?([0-9]+)"?.*/\1/')
+fi
 export NUMBER="${number:-${NUMBER:-103}}"
+echo "[apply.sh] NUMBER=${NUMBER} (Grafana user: skills${NUMBER})"
 ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
 REGION=ap-northeast-2
 WORKDIR=$(pwd)
@@ -133,8 +140,8 @@ helm install unicorn-monitoring prometheus-community/kube-prometheus-stack \
   -n monitoring --create-namespace \
   --set prometheus.prometheusSpec.nodeSelector.unicorn=addon \
   --set grafana.nodeSelector.unicorn=addon \
-  --set grafana.adminUser="skills${NUMBER}" \
-  --set grafana.adminPassword="HelloKrSkills!${NUMBER}@" \
+  --set-string grafana.adminUser="skills${NUMBER}" \
+  --set-string grafana.adminPassword="HelloKrSkills!${NUMBER}@" \
   --set grafana.service.type=NodePort \
   --set grafana.service.nodePort=30300 \
   --set alertmanager.alertmanagerSpec.nodeSelector.unicorn=addon \

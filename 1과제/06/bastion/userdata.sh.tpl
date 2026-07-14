@@ -39,6 +39,23 @@ curl -SL https://github.com/docker/buildx/releases/download/v0.17.1/buildx-v0.17
   -o /usr/libexec/docker/cli-plugins/docker-buildx
 chmod +x /usr/libexec/docker/cli-plugins/docker-buildx
 
+# ---- 4b) helm (앱 배포: LBC/grafana helm 설치). 실패해도 부트스트랩은 계속 → READY 생성 보장 ----
+#   get.helm.sh 가 간헐적으로 느려 연결 타임아웃이 날 수 있어 재시도한다.
+#   set +e 로 감싸 실패해도 부트스트랩을 중단하지 않는다(READY 를 반드시 만들기 위함).
+#   eksctl 은 배포 스크립트에서 사용하지 않으므로 설치하지 않는다.
+set +e
+HELM_VER="v3.16.3"
+for i in 1 2 3 4 5 6; do
+  curl -fsSL --connect-timeout 15 --max-time 180 \
+    "https://get.helm.sh/helm-$${HELM_VER}-linux-amd64.tar.gz" -o /tmp/helm.tgz \
+    && tar xzf /tmp/helm.tgz -C /tmp \
+    && install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm \
+    && break
+  echo "helm install retry $i failed; sleeping 15s..."; sleep 15
+done
+command -v helm || echo "WARNING: helm not installed in userdata (deploy 단계에서 재시도)"
+set -e
+
 # ---- 5) 1과제 코드 번들 받기 (terraform 이 로컬 현재 파일을 S3 로 업로드해 둠) ----
 mkdir -p /opt/task1
 aws s3 cp "s3://${bucket}/${key}" /tmp/task1.zip --region "${region}"

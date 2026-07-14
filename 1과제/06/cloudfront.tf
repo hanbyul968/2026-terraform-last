@@ -28,6 +28,27 @@ resource "aws_cloudfront_vpc_origin" "alb" {
 }
 
 ############################
+# CloudFront Function: 디렉터리 요청을 index.html 로 리라이트
+#   "/" 와 "/index.html" 의 캐시 키를 동일("/index.html")하게 만들어
+#   "/" 요청 후 "/index.html" 요청이 캐시 Hit 가 되게 한다 (채점 8-1).
+############################
+resource "aws_cloudfront_function" "index_rewrite" {
+  name    = "gj2026-index-rewrite"
+  runtime = "cloudfront-js-2.0"
+  comment = "Rewrite trailing-slash requests to index.html"
+  publish = true
+  code    = <<-EOT
+    function handler(event) {
+      var request = event.request;
+      if (request.uri.endsWith('/')) {
+        request.uri += 'index.html';
+      }
+      return request;
+    }
+  EOT
+}
+
+############################
 # CloudFront Distribution
 ############################
 
@@ -76,6 +97,11 @@ resource "aws_cloudfront_distribution" "cdn" {
     cached_methods         = ["GET", "HEAD"]
     cache_policy_id        = "658327ea-f89d-4fab-a63d-7e88639e58f6" # CachingOptimized
     compress               = true
+
+    function_association {
+      event_type   = "viewer-request"
+      function_arn = aws_cloudfront_function.index_rewrite.arn
+    }
   }
 
   # /v1* -> ALB (no cache, forward all query strings)

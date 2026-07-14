@@ -148,14 +148,17 @@ resource "aws_eks_cluster" "cluster" {
 # OIDC Provider
 ############################
 
-data "tls_certificate" "eks" {
-  url = aws_eks_cluster.cluster.identity[0].oidc[0].issuer
-}
+# data "tls_certificate" "eks" 제거됨.
+# gj2026-vpc 안(bastion)에서 apply 하면 eks 인터페이스 엔드포인트의 private DNS 존
+# (eks.ap-northeast-2.amazonaws.com)이 하위도메인 oidc.eks.ap-northeast-2.amazonaws.com
+# 까지 가로채 tls_certificate 조회가 NXDOMAIN 으로 실패한다.
+# EKS 가 호스팅하는 OIDC provider 는 thumbprint 를 실제 검증에 사용하지 않으므로
+# 알려진 루트 CA(Starfield) thumbprint 를 고정해 DNS 의존을 없앤다.
 
 resource "aws_iam_openid_connect_provider" "eks" {
   url             = aws_eks_cluster.cluster.identity[0].oidc[0].issuer
   client_id_list  = ["sts.amazonaws.com"]
-  thumbprint_list = [data.tls_certificate.eks.certificates[0].sha1_fingerprint]
+  thumbprint_list = ["9e99a48a9960b14926bb7f3b02e22da2b0ab7280"]
 }
 
 ############################
@@ -362,5 +365,26 @@ resource "aws_eks_node_group" "app" {
     aws_iam_role_policy_attachment.node,
     null_resource.build_push_bootstrap,
     null_resource.aws_auth,
+  ]
+}
+
+############################
+# VPC CNI Addon — NetworkPolicy 집행 활성화 (4-5)
+#   기본 self-managed vpc-cni 를 managed addon 으로 adopt(OVERWRITE)하고
+#   enableNetworkPolicy=true 로 켜서 k8s NetworkPolicy 가 실제로 집행되게 한다.
+############################
+resource "aws_eks_addon" "vpc_cni" {
+  cluster_name                = aws_eks_cluster.cluster.name
+  addon_name                  = "vpc-cni"
+  resolve_conflicts_on_create = "OVERWRITE"
+  resolve_conflicts_on_update = "OVERWRITE"
+
+  configuration_values = jsonencode({
+    enableNetworkPolicy = "true"
+  })
+
+  depends_on = [
+    aws_eks_node_group.addon,
+    aws_eks_node_group.app,
   ]
 }

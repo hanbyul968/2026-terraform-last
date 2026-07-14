@@ -1,16 +1,25 @@
-> # 🚀 배포 방법 (2단계 — 이 안내가 최신/정답)
-> 아래 본문의 "Step 1 로컬에서 `terraform apply`" 는 구버전입니다. **로컬에서 bastion 만 띄우고, bastion 안에서 apply** 합니다.
-> ```powershell
-> cd C:\Users\competitor\2026-terraform\1과제\07\bastion
-> terraform init; terraform apply -auto-approve
-> terraform output -raw ssm_connect_command
-> ```
-> ```bash
-> until [ -f /opt/task1/READY ]; do sleep 5; done
-> cd /opt/task1 && bash run.sh 2>&1 | tee /tmp/apply.log
-> # EKS/이미지/모니터링 k8s 작업은 manifest/apply.sh (docker/eksctl/helm 필요)
-> ```
-> ⚠️ default VPC 없음 → `bastion/main.tf` 를 전용 VPC 로 교체 필요(01 참고).
+# 🚀 배포 방법 (순서대로 3단계 — 반드시 apply.sh 까지 실행)
+
+```powershell
+# 1) 로컬 PowerShell: Bastion 띄우기
+cd C:\Users\competitor\2026-terraform\1과제\07\bastion
+terraform init; terraform apply -auto-approve
+terraform output -raw ssm_connect_command   # 출력된 명령으로 SSM 접속
+```
+
+```bash
+# 2) Bastion(SSM) 안: 루트 인프라 apply (KMS/S3/DynamoDB/ECR repo/Lambda/ALB/CloudFront/IAM)
+until [ -f /opt/task1/READY ]; do sleep 5; done
+cd /opt/task1 && bash run.sh 2>&1 | tee /tmp/apply.log
+
+# 3) 이미지 빌드/푸시 + EKS 생성 + kubectl/helm  ← 이걸 안 하면 ECR 이미지·EKS 클러스터가 안 생김
+cd /opt/task1/manifest && bash apply.sh
+```
+
+> ⚠️ `terraform apply` 만으로는 **ECR 이미지(v1.0.0)와 EKS 클러스터가 생성되지 않는다.**
+> 둘 다 `manifest/apply.sh` 가 만든다(3단계). apply.sh 실행 전에는 ECR `MUTABLE`/이미지 없음,
+> `describe-cluster` 시 `No cluster found` 가 정상. **3단계까지 끝내야 채점이 통과한다.**
+> (docker 는 Bastion userdata 가 자동 설치, eksctl/helm 은 apply.sh 가 자체 설치 → 사전 설치 불필요)
 
 
 # 1과제 실행 가이드

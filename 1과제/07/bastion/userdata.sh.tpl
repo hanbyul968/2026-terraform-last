@@ -27,10 +27,15 @@ dnf install -y terraform
 curl -sLO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
 install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
 
-# (NOTE) 루트 main.tf 는 terraform 으로 docker 이미지를 빌드하지 않는다
-#        (이미지 빌드/푸시는 manifest/apply.sh 가 수행). 따라서 docker/buildx 는
-#        설치하지 않는다. apply.sh 를 이 Bastion 에서 돌리려면 docker/eksctl/helm
-#        을 별도 설치할 것. (manual-review)
+# ---- 3-1) docker (manifest/apply.sh 의 이미지 빌드/푸시에 필수) ----
+#   apply.sh 는 이 Bastion 에서 실행된다. docker 가 없으면 book 이미지(v1.0.0)가
+#   ECR 로 push 되지 않아 Pod 가 ImagePullBackOff → 앱 502 로 전부 실패한다.
+dnf install -y docker
+systemctl enable --now docker
+# apply.sh 를 실행하는 ssm-user / ec2-user 가 sudo 없이 docker 를 쓸 수 있도록
+usermod -aG docker ec2-user 2>/dev/null || true
+usermod -aG docker ssm-user 2>/dev/null || true
+# (eksctl/helm 은 apply.sh 가 curl 로 자체 설치한다)
 
 # ---- 4) 1과제 코드 번들 받기 (terraform 이 로컬 현재 파일을 S3 로 업로드해 둠) ----
 mkdir -p /opt/task1

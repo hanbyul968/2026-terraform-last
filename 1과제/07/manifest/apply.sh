@@ -41,11 +41,19 @@ curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 |
 curl -sL "https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_Linux_amd64.tar.gz" | tar xz -C /tmp && sudo mv /tmp/eksctl /usr/local/bin
 
 # --- 1. book 이미지 빌드 & ECR push ---
+# docker 를 sudo 없이 쓸 수 있으면 그대로, 아니면 sudo (bastion 그룹반영 지연 대비)
+if docker info >/dev/null 2>&1; then DOCKER="docker"; else DOCKER="sudo docker"; fi
 ECR_URL=$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/unicorn-concert-app
-aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin $ACCOUNT.dkr.ecr.$REGION.amazonaws.com
+aws ecr get-login-password --region $REGION | $DOCKER login --username AWS --password-stdin $ACCOUNT.dkr.ecr.$REGION.amazonaws.com
 mkdir -p /tmp/docker && cp book Dockerfile /tmp/docker/ && chmod +x /tmp/docker/book
-cd /tmp/docker && docker build -t $ECR_URL:v1.0.0 -t $ECR_URL:latest . && docker push $ECR_URL:v1.0.0 && docker push $ECR_URL:latest
+cd /tmp/docker && $DOCKER build -t $ECR_URL:v1.0.0 -t $ECR_URL:latest . && $DOCKER push $ECR_URL:v1.0.0 && $DOCKER push $ECR_URL:latest
 cd $WORKDIR
+
+# push 검증: v1.0.0 이 없으면 Pod 가 ImagePullBackOff → 앱 전체 실패하므로 즉시 중단
+if ! aws ecr describe-images --repository-name unicorn-concert-app --image-ids imageTag=v1.0.0 >/dev/null 2>&1; then
+  echo "FATAL: book 이미지(v1.0.0) ECR push 실패. docker 설치/로그인 확인 필요." >&2
+  exit 1
+fi
 
 # --- 2. ECR IMMUTABLE_WITH_EXCLUSION ---
 aws ecr put-image-tag-mutability --repository-name unicorn-concert-app \
@@ -63,12 +71,22 @@ aws ec2 authorize-security-group-ingress --group-id $CLUSTER_SG --protocol -1 --
 aws eks update-kubeconfig --name unicorn-eks-cluster --region $REGION
 # (CloudShell 전용 kubectl-connect 제거 → bastion/CloudShell 양쪽 동작. update-kubeconfig 로 충분)
 
-# Access Entry: bastion이 클러스터를 만들면 creator=bastion role 이므로,
-# 채점자(CloudShell)가 쓰는 계정의 모든 IAM User에게 cluster admin 을 부여해
-# unicorn-mark에서 kubectl 이 동작하도록 한다.
-for UARN in $(aws iam list-users --query "Users[].Arn" --output text); do
-  aws eks create-access-entry --cluster-name unicorn-eks-cluster --principal-arn "$UARN" --type STANDARD 2>/dev/null
-  aws eks associate-access-policy --cluster-name unicorn-eks-cluster --principal-arn "$UARN" \
+# Access Entry: 계정의 "모든" IAM User 를 등록하면 액세스 엔트리가 지저분해지므로,
+# 채점에 실제로 쓰는 principal 에게만 cluster admin 을 부여한다.
+#  - 기본값: apply.sh 를 실행하는 현재 호출자
+#            (assumed-role 이면 원본 IAM role ARN 으로 정규화)
+#  - 채점자가 다른 IAM User 를 쓴다면, 실행 전 아래처럼 지정:
+#      export GRADER_ARNS="arn:aws:iam::${ACCOUNT}:user/console-user"
+RAW_ARN=$(aws sts get-caller-identity --query Arn --output text)
+if echo "$RAW_ARN" | grep -q ":assumed-role/"; then
+  ROLE_NAME=$(echo "$RAW_ARN" | awk -F/ '{print $2}')
+  CALLER_ARN="arn:aws:iam::${ACCOUNT}:role/${ROLE_NAME}"
+else
+  CALLER_ARN="$RAW_ARN"
+fi
+for PARN in $CALLER_ARN ${GRADER_ARNS:-}; do
+  aws eks create-access-entry --cluster-name unicorn-eks-cluster --principal-arn "$PARN" --type STANDARD 2>/dev/null
+  aws eks associate-access-policy --cluster-name unicorn-eks-cluster --principal-arn "$PARN" \
     --policy-arn arn:aws:iam::aws:policy/AmazonEKSClusterAdminPolicy --access-scope type=cluster 2>/dev/null
 done
 

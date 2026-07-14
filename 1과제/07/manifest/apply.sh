@@ -45,7 +45,12 @@ curl -sL "https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_Li
 if docker info >/dev/null 2>&1; then DOCKER="docker"; else DOCKER="sudo docker"; fi
 ECR_URL=$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/unicorn-concert-app
 aws ecr get-login-password --region $REGION | $DOCKER login --username AWS --password-stdin $ACCOUNT.dkr.ecr.$REGION.amazonaws.com
-mkdir -p /tmp/docker && cp book Dockerfile /tmp/docker/ && chmod +x /tmp/docker/book
+mkdir -p /tmp/docker
+# book/Dockerfile 위치: 같은 폴더(CloudShell S3 방식) 또는 ../docker(bastion 번들 /opt/task1/docker)
+if [ -f book ] && [ -f Dockerfile ]; then SRC=.
+elif [ -f ../docker/book ] && [ -f ../docker/Dockerfile ]; then SRC=../docker
+else echo "FATAL: book/Dockerfile 을 찾을 수 없음 (현재: $(pwd))" >&2; exit 1; fi
+cp "$SRC/book" "$SRC/Dockerfile" /tmp/docker/ && chmod +x /tmp/docker/book
 cd /tmp/docker && $DOCKER build -t $ECR_URL:v1.0.0 -t $ECR_URL:latest . && $DOCKER push $ECR_URL:v1.0.0 && $DOCKER push $ECR_URL:latest
 cd $WORKDIR
 

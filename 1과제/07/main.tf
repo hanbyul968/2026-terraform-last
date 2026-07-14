@@ -16,6 +16,12 @@ variable "number" {
   type        = string
 }
 
+variable "dynamodb_deletion_protection" {
+  description = "DynamoDB 삭제 보호. 채점 시 true, destroy 전 false 로 apply 후 destroy"
+  type        = bool
+  default     = true
+}
+
 provider "aws" {
   region = "ap-northeast-2"
 }
@@ -61,6 +67,8 @@ module "DynamoDB" {
   gsi_hash_key   = "client_id"
   gsi_range_key  = "created_at"
   gsi_projection = "ALL"
+  # destroy 전: terraform apply -var dynamodb_deletion_protection=false  → 그 후 destroy
+  deletion_protection = var.dynamodb_deletion_protection
 }
 
 # ========== ECR ==========

@@ -34,7 +34,8 @@ resource "aws_dynamodb_table" "concert" {
     enabled = true
   }
 
-  deletion_protection_enabled = true
+  # 채점 시엔 true(기본값) 유지, destroy 전에는 -var 로 false 후 apply → destroy
+  deletion_protection_enabled = var.deletion_protection
 
   tags = {
     Name = var.table_name

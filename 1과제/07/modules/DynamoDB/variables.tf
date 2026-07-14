@@ -37,3 +37,10 @@ variable "gsi_projection" {
   type        = string
   default     = "ALL"
 }
+
+
+variable "deletion_protection" {
+  description = "삭제 보호 (채점 시 true, destroy 전 false 로 apply)"
+  type        = bool
+  default     = true
+}

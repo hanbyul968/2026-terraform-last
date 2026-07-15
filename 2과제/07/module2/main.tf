@@ -1,4 +1,8 @@
 terraform {
+  # 원격 state(S3) — bucket/key/region 은 deploy.sh 가 -backend-config 로 주입.
+  # (단독: terraform init -backend-config="bucket=..." -backend-config="key=task2-06/module2.tfstate" -backend-config="region=ap-northeast-2")
+  backend "s3" {}
+
   required_providers {
     aws = {
       source  = "hashicorp/aws"

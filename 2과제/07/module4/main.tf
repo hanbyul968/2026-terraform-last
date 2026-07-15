@@ -112,7 +112,41 @@ resource "aws_eks_cluster" "main" {
     subnet_ids = local.subnet_ids
   }
 
+  # API access entry 를 붙일 수 있도록 인증 모드를 API_AND_CONFIG_MAP 으로.
+  # (기본 CONFIG_MAP 이면 create-access-entry 가 거부됨 → 채점자/타 주체 kubectl 불가)
+  access_config {
+    authentication_mode                         = "API_AND_CONFIG_MAP"
+    bootstrap_cluster_creator_admin_permissions = true
+  }
+
   depends_on = [aws_iam_role_policy_attachment.eks_cluster_policy]
+}
+
+# === 채점/운영 주체에 EKS Cluster Admin 부여 (module3 와 동일 패턴) ===
+locals {
+  m4_caller_arn = data.aws_caller_identity.current.arn
+  # STS assumed-role 세션 ARN → IAM Role ARN 으로 변환 (access entry 는 Role/User ARN 요구)
+  m4_grader_principal_arn = can(regex(":assumed-role/", local.m4_caller_arn)) ? format(
+    "arn:aws:iam::%s:role/%s",
+    data.aws_caller_identity.current.account_id,
+    element(split("/", local.m4_caller_arn), 1)
+  ) : local.m4_caller_arn
+}
+
+resource "aws_eks_access_entry" "creator" {
+  cluster_name  = aws_eks_cluster.main.name
+  principal_arn = local.m4_grader_principal_arn
+  type          = "STANDARD"
+}
+
+resource "aws_eks_access_policy_association" "creator" {
+  cluster_name  = aws_eks_cluster.main.name
+  principal_arn = local.m4_grader_principal_arn
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+  access_scope {
+    type = "cluster"
+  }
+  depends_on = [aws_eks_access_entry.creator]
 }
 
 # NodeGroup IAM Role

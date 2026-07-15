@@ -65,6 +65,11 @@ MDIR="${ROOT}/module3/.deploybundle"
 mkdir -p "${MDIR}"
 aws s3 cp "s3://skm-deploy-${ACCOUNT}/" "${MDIR}/" --recursive --region "${M3_REGION}"
 
+# CRLF 방지: 번들이 Windows(CRLF)에서 렌더링됐을 수 있으므로 LF 로 정규화한다.
+# (env.sh 가 CRLF 면 source 시 REGION="...\r" 가 되어 aws/docker 로그인이 깨짐)
+find "${MDIR}" -type f \( -name '*.sh' -o -name '*.yaml' \) -exec sed -i 's/\r$//' {} +
+sed -i 's/\r$//' "${MDIR}/env.sh"
+
 # env.sh: REGION ECR_REPO CLUSTER_NAME CLUSTER_ENDPOINT KEDA_ROLE_ARN KARPENTER_ROLE_ARN (모두 export)
 # shellcheck disable=SC1091
 source "${MDIR}/env.sh"

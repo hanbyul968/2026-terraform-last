@@ -506,10 +506,12 @@ resource "aws_s3_object" "m_keda" {
 }
 
 # deploy.sh 가 source 할 환경변수 파일 (apply 시점 값으로 렌더링)
+# ※ replace(..., "\r", "") : main.tf 가 CRLF 로 저장돼 있어도 env.sh 는 LF 로 업로드.
+#   (CRLF 면 Linux 에서 source 시 REGION="...\r" 가 되어 aws/docker 가 깨짐)
 resource "aws_s3_object" "env_sh" {
   bucket  = aws_s3_bucket.deploy.id
   key     = "env.sh"
-  content = <<-EOT
+  content = replace(<<-EOT
     export REGION="${data.aws_region.current.name}"
     export ECR_REPO="${aws_ecr_repository.app.repository_url}"
     export CLUSTER_NAME="${aws_eks_cluster.main.name}"
@@ -517,13 +519,14 @@ resource "aws_s3_object" "env_sh" {
     export KEDA_ROLE_ARN="${aws_iam_role.keda_irsa.arn}"
     export KARPENTER_ROLE_ARN="${aws_iam_role.karpenter_irsa.arn}"
   EOT
+  , "\r", "")
 }
 
+# deploy.sh 도 CRLF 로 저장돼 있을 수 있으므로 LF 로 정규화해 업로드.
 resource "aws_s3_object" "deploy_sh" {
-  bucket = aws_s3_bucket.deploy.id
-  key    = "deploy.sh"
-  source = "${path.module}/deploy.sh"
-  etag   = filemd5("${path.module}/deploy.sh")
+  bucket  = aws_s3_bucket.deploy.id
+  key     = "deploy.sh"
+  content = replace(file("${path.module}/deploy.sh"), "\r\n", "\n")
 }
 
 # --- Bastion IAM Role (SSM + ECR push + EKS describe + S3 read) ---

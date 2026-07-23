@@ -8,6 +8,9 @@
 # =============================================================================
 set -ex
 exec > /var/log/skills-bastion-bootstrap.log 2>&1
+export HOME=/root
+export KUBECONFIG=/root/.kube/config
+export PATH=$PATH:/usr/local/bin
 REGION=us-west-2
 CLUSTER=skills-sqs-cluster
 

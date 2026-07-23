@@ -1,11 +1,28 @@
 #!/bin/bash
 set -e
 
+# cloud-init/user_data(root) 환경에서는 HOME 이 비어있을 수 있다.
+# 그러면 aws eks update-kubeconfig 가 kubectl 이 읽는 ~/.kube/config 와
+# 다른 경로에 config 를 쓰게 되어, kubectl 이 기본값(localhost:8080)으로 붙는다.
+# → HOME/KUBECONFIG/PATH 를 고정해 aws 와 kubectl 이 동일한 config 를 보게 한다.
+export HOME="${HOME:-/root}"
+export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
+export PATH="$PATH:/usr/local/bin"
+
 REGION=us-west-2
 CLUSTER=skills-sqs-cluster
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 
-aws eks update-kubeconfig --region $REGION --name $CLUSTER
+mkdir -p "$(dirname "$KUBECONFIG")"
+aws eks update-kubeconfig --region $REGION --name $CLUSTER --kubeconfig "$KUBECONFIG"
+
+# 클러스터 API 접근이 실제로 될 때까지 대기 (kubeconfig 유효성 확인)
+for i in $(seq 1 30); do
+  if kubectl version -o json >/dev/null 2>&1 && kubectl get --raw='/readyz' >/dev/null 2>&1; then
+    echo "kube API reachable"; break
+  fi
+  echo "waiting for kube API... ($i)"; sleep 10
+done
 
 # CoreDNS를 Fargate에서 실행하도록 패치 (EC2 nodeSelector annotation 제거)
 # 이게 빠지면 클러스터 DNS가 죽어 KEDA/Karpenter가 STS/SQS 주소를 못 풀어 전부 실패한다.

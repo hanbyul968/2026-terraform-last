@@ -14,6 +14,13 @@ variable "cluster_name" {
   default = "wsc2026-eks-cluster"
 }
 
+variable "cluster_dns_domain" {
+  description = "Kubernetes 내부 DNS 도메인. root cluster_dns_domain과 동일해야 함."
+  type        = string
+  default     = "wsc2026.skills.local"
+}
+
+
 variable "table_name" {
   type    = string
   default = "wsc2026-book-table"

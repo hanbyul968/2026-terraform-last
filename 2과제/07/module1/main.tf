@@ -1,9 +1,4 @@
 terraform {
-  # 원격 state(S3) — 배스천 교체와 무관하게 state 유지. 부분 설정이며
-  # bucket/key/region 은 deploy.sh 가 `terraform init -backend-config=...` 로 주입한다.
-  # (단독 실행 시: terraform init -backend-config="bucket=..." -backend-config="key=task2-06/module1.tfstate" -backend-config="region=ap-northeast-2")
-  backend "s3" {}
-
   required_providers {
     aws = {
       source  = "hashicorp/aws"

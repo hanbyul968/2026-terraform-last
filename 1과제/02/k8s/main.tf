@@ -287,7 +287,9 @@ resource "kubernetes_persistent_volume_claim_v1" "prometheus" {
 
 resource "kubernetes_persistent_volume_claim_v1" "grafana" {
   metadata {
-    name      = "wskorea26-grafana-pvc"
+    # Grafana의 adminUser/adminPassword는 DB 최초 생성 때만 반영된다.
+    # 비번호별 새 PVC를 사용해 과거 고정 계정 DB가 남아 있어도 올바른 계정으로 초기화한다.
+    name      = "wskorea26-grafana-pvc-${var.bi_number}"
     namespace = kubernetes_namespace_v1.monitoring.metadata[0].name
   }
   spec {
@@ -298,6 +300,10 @@ resource "kubernetes_persistent_volume_claim_v1" "grafana" {
     }
   }
   wait_until_bound = false
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 # Grafana 대시보드 (sidecar 자동 로드)
@@ -336,7 +342,7 @@ resource "helm_release" "grafana" {
 
   values = [templatefile("${path.module}/grafana-values.yaml.tftpl", {
     pvc_name       = kubernetes_persistent_volume_claim_v1.grafana.metadata[0].name
-    admin_user     = var.grafana_admin_user
+    admin_user     = "skills-${var.bi_number}-admin"
     admin_password = var.grafana_admin_password
     ds_url         = "http://prometheus-server.monitoring.svc.cluster.local"
   })]

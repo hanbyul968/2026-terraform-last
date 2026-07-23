@@ -39,6 +39,7 @@ resource "null_resource" "build_push_book" {
     dockerfile = filemd5("${path.module}/files/Dockerfile")
     binary     = filemd5("${path.module}/files/book")
     repo       = aws_ecr_repository.book.repository_url
+    kms_key    = local.kms_ecr_arn
   }
 
   # main 은 Linux Bastion 에서 apply 된다 (bastion/ 1단계 참고). bash + docker.

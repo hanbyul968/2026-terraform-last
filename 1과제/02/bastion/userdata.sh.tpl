@@ -65,7 +65,7 @@ terraform apply -auto-approve -var="bi_number=$BIBUNHO"
 #   logging(fluent-bit). 클러스터는 이름으로 data 조회.
 cd /opt/task1/k8s
 terraform init -input=false
-terraform apply -auto-approve
+terraform apply -auto-approve -var="bi_number=$BIBUNHO"
 echo ""
 echo "================= OUTPUTS ================="
 cd /opt/task1 && terraform output || true

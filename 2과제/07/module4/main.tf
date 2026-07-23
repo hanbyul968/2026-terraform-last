@@ -1,8 +1,4 @@
 terraform {
-  # 원격 state(S3) — bucket/key/region 은 deploy.sh 가 -backend-config 로 주입.
-  # (단독: terraform init -backend-config="bucket=..." -backend-config="key=task2-06/module4.tfstate" -backend-config="region=ap-northeast-2")
-  backend "s3" {}
-
   required_providers {
     aws = {
       source  = "hashicorp/aws"
@@ -122,32 +118,12 @@ resource "aws_eks_cluster" "main" {
   depends_on = [aws_iam_role_policy_attachment.eks_cluster_policy]
 }
 
-# === 채점/운영 주체에 EKS Cluster Admin 부여 (module3 와 동일 패턴) ===
-locals {
-  m4_caller_arn = data.aws_caller_identity.current.arn
-  # STS assumed-role 세션 ARN → IAM Role ARN 으로 변환 (access entry 는 Role/User ARN 요구)
-  m4_grader_principal_arn = can(regex(":assumed-role/", local.m4_caller_arn)) ? format(
-    "arn:aws:iam::%s:role/%s",
-    data.aws_caller_identity.current.account_id,
-    element(split("/", local.m4_caller_arn), 1)
-  ) : local.m4_caller_arn
-}
-
-resource "aws_eks_access_entry" "creator" {
-  cluster_name  = aws_eks_cluster.main.name
-  principal_arn = local.m4_grader_principal_arn
-  type          = "STANDARD"
-}
-
-resource "aws_eks_access_policy_association" "creator" {
-  cluster_name  = aws_eks_cluster.main.name
-  principal_arn = local.m4_grader_principal_arn
-  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
-  access_scope {
-    type = "cluster"
-  }
-  depends_on = [aws_eks_access_entry.creator]
-}
+# === EKS Cluster Admin access entry 안내 ===
+# user(생성자/채점자) access entry 는 대회장에서 직접 등록하므로 명시적으로 만들지 않는다.
+# 단, module4 는 로컬(Git Bash)에서 setup.sh 로 배포하므로 생성자(user)가 클러스터
+# admin 이어야 한다. 이는 위 access_config 의
+# bootstrap_cluster_creator_admin_permissions = true 로 EKS 가 자동 부여한다.
+# (명시적 access entry 리소스를 만들지 않으므로 409 ResourceInUse 충돌이 없다.)
 
 # NodeGroup IAM Role
 resource "aws_iam_role" "node_group" {
@@ -283,47 +259,116 @@ resource "aws_iam_role" "alb_controller" {
   })
 }
 
-resource "aws_iam_role_policy_attachment" "alb_controller" {
-  policy_arn = "arn:aws:iam::aws:policy/ElasticLoadBalancingFullAccess"
-  role       = aws_iam_role.alb_controller.name
-}
-
-resource "aws_iam_role_policy" "alb_controller_extra" {
-  name = "o11y-alb-controller-extra"
+# AWS Load Balancer Controller 권한. 과제지의 최소 권한 원칙에 따라
+# ElasticLoadBalancingFullAccess 및 서비스 전체 와일드카드 Action은 사용하지 않는다.
+resource "aws_iam_role_policy" "alb_controller" {
+  name = "o11y-alb-controller-policy"
   role = aws_iam_role.alb_controller.id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
+        Effect   = "Allow"
+        Action   = "iam:CreateServiceLinkedRole"
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "iam:AWSServiceName" = "elasticloadbalancing.amazonaws.com"
+          }
+        }
+      },
+      {
         Effect = "Allow"
         Action = [
-          "ec2:DescribeAvailabilityZones",
-          "ec2:DescribeVpcs",
-          "ec2:DescribeSubnets",
-          "ec2:DescribeSecurityGroups",
-          "ec2:DescribeInstances",
-          "ec2:DescribeInternetGateways",
           "ec2:DescribeAccountAttributes",
           "ec2:DescribeAddresses",
+          "ec2:DescribeAvailabilityZones",
+          "ec2:DescribeCoipPools",
+          "ec2:DescribeInstances",
+          "ec2:DescribeInternetGateways",
           "ec2:DescribeNetworkInterfaces",
+          "ec2:DescribeSecurityGroups",
+          "ec2:DescribeSubnets",
           "ec2:DescribeTags",
-          "ec2:CreateSecurityGroup",
+          "ec2:DescribeVpcPeeringConnections",
+          "ec2:DescribeVpcs",
+          "elasticloadbalancing:DescribeListenerAttributes",
+          "elasticloadbalancing:DescribeListeners",
+          "elasticloadbalancing:DescribeLoadBalancerAttributes",
+          "elasticloadbalancing:DescribeLoadBalancers",
+          "elasticloadbalancing:DescribeRules",
+          "elasticloadbalancing:DescribeSSLPolicies",
+          "elasticloadbalancing:DescribeTags",
+          "elasticloadbalancing:DescribeTargetGroupAttributes",
+          "elasticloadbalancing:DescribeTargetGroups",
+          "elasticloadbalancing:DescribeTargetHealth"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ec2:AuthorizeSecurityGroupIngress",
+          "ec2:RevokeSecurityGroupIngress"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = "ec2:CreateSecurityGroup"
+        Resource = "*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = "ec2:CreateTags"
+        Resource = "arn:aws:ec2:*:*:security-group/*"
+        Condition = {
+          StringEquals = {
+            "ec2:CreateAction" = "CreateSecurityGroup"
+          }
+          Null = {
+            "aws:RequestTag/elbv2.k8s.aws/cluster" = "false"
+          }
+        }
+      },
+      {
+        Effect = "Allow"
+        Action = [
           "ec2:CreateTags",
           "ec2:DeleteTags",
-          "ec2:AuthorizeSecurityGroupIngress",
-          "ec2:RevokeSecurityGroupIngress",
-          "ec2:DeleteSecurityGroup",
-          "elasticloadbalancing:*",
-          "cognito-idp:DescribeUserPoolClient",
-          "acm:ListCertificates",
-          "acm:DescribeCertificate",
-          "iam:ListServerCertificates",
-          "iam:GetServerCertificate",
-          "waf-regional:*",
-          "wafv2:*",
-          "shield:*",
-          "tag:GetResources",
-          "tag:TagResources"
+          "ec2:DeleteSecurityGroup"
+        ]
+        Resource = "arn:aws:ec2:*:*:security-group/*"
+        Condition = {
+          Null = {
+            "aws:ResourceTag/elbv2.k8s.aws/cluster" = "false"
+          }
+        }
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "elasticloadbalancing:AddTags",
+          "elasticloadbalancing:CreateListener",
+          "elasticloadbalancing:CreateLoadBalancer",
+          "elasticloadbalancing:CreateRule",
+          "elasticloadbalancing:CreateTargetGroup",
+          "elasticloadbalancing:DeleteListener",
+          "elasticloadbalancing:DeleteLoadBalancer",
+          "elasticloadbalancing:DeleteRule",
+          "elasticloadbalancing:DeleteTargetGroup",
+          "elasticloadbalancing:DeregisterTargets",
+          "elasticloadbalancing:ModifyListener",
+          "elasticloadbalancing:ModifyListenerAttributes",
+          "elasticloadbalancing:ModifyLoadBalancerAttributes",
+          "elasticloadbalancing:ModifyRule",
+          "elasticloadbalancing:ModifyTargetGroup",
+          "elasticloadbalancing:ModifyTargetGroupAttributes",
+          "elasticloadbalancing:RegisterTargets",
+          "elasticloadbalancing:RemoveTags",
+          "elasticloadbalancing:SetIpAddressType",
+          "elasticloadbalancing:SetSecurityGroups",
+          "elasticloadbalancing:SetSubnets"
         ]
         Resource = "*"
       }

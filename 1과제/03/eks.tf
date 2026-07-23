@@ -86,18 +86,12 @@ resource "aws_eks_cluster" "this" {
     bootstrap_cluster_creator_admin_permissions = true
   }
 
-  # EKS Secret CMK 암호화.
-  # ⚠ reuse_kms=true(잠긴 eks 키 재사용) 에선 CreateCluster 가 배포 주체에게 kms:DescribeKey 를
-  #   요구하는데 잠긴 키는 그것도 거부(root 조차)라 클러스터 생성이 실패한다. 그래서 그 계정에선
-  #   암호화를 끈다(그 항목만 미충족). 깨끗한 계정(reuse_kms=false)에선 새 키로 정상 암호화 -> 채점 통과.
-  dynamic "encryption_config" {
-    for_each = var.reuse_kms ? [] : [1]
-    content {
-      provider {
-        key_arn = local.kms_eks_arn
-      }
-      resources = ["secrets"]
+  # EKS Secret는 항상 alias/wsc2026-eks-kms가 가리키는 관리 가능한 CMK로 암호화한다.
+  encryption_config {
+    provider {
+      key_arn = local.kms_eks_arn
     }
+    resources = ["secrets"]
   }
 
   enabled_cluster_log_types = ["api", "audit", "authenticator", "controllerManager", "scheduler"]
@@ -222,6 +216,11 @@ resource "aws_eks_addon" "ebs_csi" {
   addon_name                  = "aws-ebs-csi-driver"
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
+  configuration_values = jsonencode({
+    controller = {
+      nodeSelector = { "wsc2026/node" = "addon" }
+    }
+  })
   # ⚠ Pod Identity 자격증명은 파드 '생성 시점'에 주입된다. association 이 addon 보다 늦으면
   #   controller 파드가 노드 역할로 떠서 EC2 권한 없어 CrashLoop → addon 이 ACTIVE 안 됨.
   #   그래서 association 이후에 addon 을 만든다.

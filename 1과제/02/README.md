@@ -99,7 +99,7 @@ terraform destroy -auto-approve
 |-----------|-----------|
 | 대시보드 이름/uid | `k8s/wskorea26-dashboard.json` `title`/`uid` |
 | 표시 지표(패널) | `k8s/wskorea26-dashboard.json` `panels[].targets[].expr` |
-| Grafana 계정 | `k8s/variables.tf` `grafana_admin_user`/`grafana_admin_password` |
+| Grafana 계정 | `run.sh`에서 받은 `bi_number`로 `skills-<비번호>-admin` 자동 생성, 비밀번호는 `k8s/variables.tf` |
 | Grafana LB 이름 | `k8s/grafana-values.yaml.tftpl` `aws-load-balancer-name` |
 | 모니터링 배치 노드 | `k8s/*-values.yaml.tftpl` `nodeSelector.node-type` |
 
@@ -111,7 +111,7 @@ terraform destroy -auto-approve
 |---|------|------|
 | 1 | Network | CIDR/라우팅. private RTB = 0.0.0.0/0→NAT 만, public → IGW |
 | 2 | S3 | 객체 `web/main/*`, KMS=`wskorea26-s3-key`, PublicAccessBlock 4종 True |
-| 3 | ECR | scanOnPush + **레지스트리 BASIC 스캔** / KMS / 태그 stable / Critical·High 0 (alpine:3.21) |
+| 3 | ECR | scanOnPush + **레지스트리 BASIC 스캔** / KMS / 태그 stable / Critical·High 0 (Debian slim 보안 업데이트 + 스캔 결과 non-empty 검증) |
 | 4 | DynamoDB | client_id HASH / DeletionProtection / `wskorea26-dynamodb-key` |
 | 5 | EKS | 1.35 / 로그 5종 / `wskorea26-eks-key` / priv-c·d / 노드 node-type 라벨 / ns wskorea26 |
 | 6 | Lambda | python3.14 / TABLE_NAME |

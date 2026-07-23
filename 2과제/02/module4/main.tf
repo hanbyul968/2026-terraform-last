@@ -2,6 +2,7 @@ terraform {
   required_providers {
     aws     = { source = "hashicorp/aws", version = "~> 6.0" }
     archive = { source = "hashicorp/archive", version = "~> 2.0" }
+    time    = { source = "hashicorp/time", version = "0.13.1" }
   }
 }
 
@@ -14,6 +15,11 @@ data "aws_caller_identity" "current" {}
 
 variable "bibunho" {
   type = string
+}
+
+locals {
+  producer_app_key     = "artifacts/module4-app"
+  producer_support_key = "artifacts/module4-topic-admin.zip"
 }
 
 # ── VPC msk-vpc 192.168.0.0/16 ───────────────────────────────────────
@@ -176,12 +182,17 @@ resource "aws_iam_role_policy" "producer_msk" {
       {
         Effect   = "Allow"
         Action   = ["kafka-cluster:Connect", "kafka-cluster:WriteData", "kafka-cluster:DescribeTopic", "kafka-cluster:CreateTopic", "kafka-cluster:WriteDataIdempotently", "kafka-cluster:DescribeCluster", "kafka-cluster:AlterCluster", "kafka-cluster:DescribeGroup", "kafka-cluster:AlterGroup"]
-        Resource = ["${replace(aws_msk_cluster.main.arn, "cluster", "topic")}/*", aws_msk_cluster.main.arn, "${replace(aws_msk_cluster.main.arn, "cluster", "group")}/*"]
+        Resource = ["${replace(aws_msk_cluster.main.arn, ":cluster/", ":topic/")}/*", aws_msk_cluster.main.arn, "${replace(aws_msk_cluster.main.arn, ":cluster/", ":group/")}/*"]
       },
       {
         Effect   = "Allow"
-        Action   = ["kafka:DescribeCluster", "kafka:GetBootstrapBrokers"]
+        Action   = ["kafka:DescribeClusterV2", "kafka:GetBootstrapBrokers"]
         Resource = aws_msk_cluster.main.arn
+      },
+      {
+        Effect   = "Allow"
+        Action   = "s3:GetObject"
+        Resource = "${aws_s3_bucket.alert.arn}/artifacts/*"
       }
     ]
   })
@@ -202,17 +213,25 @@ resource "aws_security_group" "producer" {
   tags = { Name = "wsc2026-sensor-producer-sg" }
 }
 resource "aws_instance" "producer" {
-  ami                    = data.aws_ami.al2023.id
-  instance_type          = "t3.small"
-  subnet_id              = aws_subnet.priv_a.id
-  vpc_security_group_ids = [aws_security_group.producer.id]
-  iam_instance_profile   = aws_iam_instance_profile.producer.name
+  ami                         = data.aws_ami.al2023.id
+  instance_type               = "t3.small"
+  subnet_id                   = aws_subnet.priv_a.id
+  vpc_security_group_ids      = [aws_security_group.producer.id]
+  iam_instance_profile        = aws_iam_instance_profile.producer.name
+  user_data_replace_on_change = true
   user_data = templatefile("${path.module}/userdata.sh.tpl", {
-    producer_py = file("${path.module}/app/producer.py")
     region      = "ap-northeast-1"
     msk_arn     = aws_msk_cluster.main.arn
+    app_bucket  = aws_s3_bucket.alert.id
+    app_key     = local.producer_app_key
+    support_key = local.producer_support_key
   })
   tags = { Name = "wsc2026-sensor-producer" }
+  depends_on = [
+    aws_iam_role_policy.producer_msk,
+    aws_s3_object.producer_app,
+    aws_s3_object.producer_support
+  ]
 }
 
 # ── Storage: DynamoDB, S3, SNS ───────────────────────────────────────
@@ -233,6 +252,18 @@ resource "aws_dynamodb_table" "sensor" {
 resource "aws_s3_bucket" "alert" {
   bucket        = "wsc2026-sensor-alert-bucket-${var.bibunho}"
   force_destroy = true
+}
+resource "aws_s3_object" "producer_app" {
+  bucket = aws_s3_bucket.alert.id
+  key    = local.producer_app_key
+  source = "${path.module}/app/app"
+  etag   = filemd5("${path.module}/app/app")
+}
+resource "aws_s3_object" "producer_support" {
+  bucket      = aws_s3_bucket.alert.id
+  key         = local.producer_support_key
+  source      = data.archive_file.raw_lambda.output_path
+  source_hash = data.archive_file.raw_lambda.output_base64sha256
 }
 resource "aws_sns_topic" "alert" {
   name = "wsc2026-sensor-alert"
@@ -256,19 +287,84 @@ resource "aws_iam_role_policy" "lambda" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      { Effect = "Allow", Action = ["kafka-cluster:Connect", "kafka-cluster:DescribeGroup", "kafka-cluster:AlterGroup", "kafka-cluster:DescribeTopic", "kafka-cluster:ReadData", "kafka-cluster:DescribeClusterDynamicConfiguration"], Resource = ["${aws_msk_cluster.main.arn}", "${replace(aws_msk_cluster.main.arn, "cluster", "topic")}/*", "${replace(aws_msk_cluster.main.arn, "cluster", "group")}/*"] },
-      { Effect = "Allow", Action = ["dynamodb:PutItem"], Resource = aws_dynamodb_table.sensor.arn },
-      { Effect = "Allow", Action = ["s3:PutObject"], Resource = "${aws_s3_bucket.alert.arn}/*" },
-      { Effect = "Allow", Action = ["sns:Publish"], Resource = aws_sns_topic.alert.arn },
-      { Effect = "Allow", Action = ["ec2:CreateNetworkInterface", "ec2:DescribeNetworkInterfaces", "ec2:DeleteNetworkInterface"], Resource = "*" },
-      { Effect = "Allow", Action = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"], Resource = "arn:aws:logs:*:*:*" }
+      {
+        Sid    = "DiscoverMSKCluster"
+        Effect = "Allow"
+        Action = [
+          "kafka:DescribeClusterV2",
+          "kafka:GetBootstrapBrokers"
+        ]
+        Resource = aws_msk_cluster.main.arn
+      },
+      {
+        Sid    = "ConsumeFromMSKWithIAM"
+        Effect = "Allow"
+        Action = [
+          "kafka-cluster:Connect",
+          "kafka-cluster:DescribeGroup",
+          "kafka-cluster:AlterGroup",
+          "kafka-cluster:DescribeTopic",
+          "kafka-cluster:ReadData",
+          "kafka-cluster:WriteData",
+          "kafka-cluster:WriteDataIdempotently"
+        ]
+        Resource = [
+          aws_msk_cluster.main.arn,
+          "${replace(aws_msk_cluster.main.arn, ":cluster/", ":topic/")}/wsc2026-sensor-raw",
+          "${replace(aws_msk_cluster.main.arn, ":cluster/", ":topic/")}/wsc2026-sensor-alert",
+          "${replace(aws_msk_cluster.main.arn, ":cluster/", ":group/")}/wsc2026-sensor-raw-cg",
+          "${replace(aws_msk_cluster.main.arn, ":cluster/", ":group/")}/wsc2026-sensor-alert-cg"
+        ]
+      },
+      {
+        Sid      = "DiscoverMSKVpc"
+        Effect   = "Allow"
+        Action   = ["ec2:DescribeVpcs", "ec2:DescribeSubnets", "ec2:DescribeSecurityGroups"]
+        Resource = "*"
+      },
+      {
+        Sid      = "WriteSensorData"
+        Effect   = "Allow"
+        Action   = "dynamodb:PutItem"
+        Resource = aws_dynamodb_table.sensor.arn
+      },
+      {
+        Sid      = "WriteAlertObject"
+        Effect   = "Allow"
+        Action   = "s3:PutObject"
+        Resource = "${aws_s3_bucket.alert.arn}/*"
+      },
+      {
+        Sid      = "PublishAlert"
+        Effect   = "Allow"
+        Action   = "sns:Publish"
+        Resource = aws_sns_topic.alert.arn
+      }
     ]
   })
 }
-data "archive_file" "lambda" {
+
+# Event Source Mapping 생성 API가 갱신된 IAM 정책을 보기 전에 실행되는 것을 방지한다.
+resource "time_sleep" "lambda_iam_propagation" {
+  create_duration = "20s"
+  triggers = {
+    role_name   = aws_iam_role.lambda.name
+    policy_hash = sha256(aws_iam_role_policy.lambda.policy)
+  }
+  depends_on = [
+    aws_iam_role_policy.lambda,
+    aws_iam_role_policy_attachment.lambda_vpc
+  ]
+}
+data "archive_file" "raw_lambda" {
   type        = "zip"
-  source_dir  = "${path.module}/lambda"
-  output_path = "${path.module}/consumer.zip"
+  source_dir  = "${path.module}/lambda/raw"
+  output_path = "${path.module}/raw-consumer.zip"
+}
+data "archive_file" "alert_lambda" {
+  type        = "zip"
+  source_dir  = "${path.module}/lambda/alert"
+  output_path = "${path.module}/alert-consumer.zip"
 }
 resource "aws_security_group" "lambda" {
   name   = "wsc2026-msk-lambda-sg"
@@ -284,36 +380,44 @@ resource "aws_security_group" "lambda" {
 resource "aws_lambda_function" "raw" {
   function_name    = "wsc2026-sensor-consumer"
   role             = aws_iam_role.lambda.arn
-  handler          = "consumer.raw_handler"
+  handler          = "index.handler"
   runtime          = "python3.14"
-  filename         = data.archive_file.lambda.output_path
-  source_code_hash = data.archive_file.lambda.output_base64sha256
-  timeout          = 60
+  filename         = data.archive_file.raw_lambda.output_path
+  source_code_hash = data.archive_file.raw_lambda.output_base64sha256
+  timeout          = 120
   vpc_config {
     subnet_ids         = [aws_subnet.priv_a.id, aws_subnet.priv_b.id]
     security_group_ids = [aws_security_group.lambda.id]
   }
-  environment { variables = { TABLE_NAME = aws_dynamodb_table.sensor.name } }
+  environment {
+    variables = {
+      DDB_TABLE        = aws_dynamodb_table.sensor.name
+      ALERT_TOPIC      = "wsc2026-sensor-alert"
+      BOOTSTRAP_SERVER = aws_msk_cluster.main.bootstrap_brokers_sasl_iam
+    }
+  }
 }
 resource "aws_lambda_function" "alert" {
   function_name    = "wsc2026-sensor-alert-consumer"
   role             = aws_iam_role.lambda.arn
-  handler          = "consumer.alert_handler"
+  handler          = "index.handler"
   runtime          = "python3.14"
-  filename         = data.archive_file.lambda.output_path
-  source_code_hash = data.archive_file.lambda.output_base64sha256
+  filename         = data.archive_file.alert_lambda.output_path
+  source_code_hash = data.archive_file.alert_lambda.output_base64sha256
   timeout          = 60
-  vpc_config {
-    subnet_ids         = [aws_subnet.priv_a.id, aws_subnet.priv_b.id]
-    security_group_ids = [aws_security_group.lambda.id]
+  environment {
+    variables = {
+      SNS_TOPIC_ARN = aws_sns_topic.alert.arn
+      S3_BUCKET     = aws_s3_bucket.alert.id
+    }
   }
-  environment { variables = { ALERT_BUCKET = aws_s3_bucket.alert.id, ALERT_TOPIC = aws_sns_topic.alert.arn } }
 }
 resource "aws_lambda_event_source_mapping" "raw" {
   event_source_arn  = aws_msk_cluster.main.arn
   function_name     = aws_lambda_function.raw.arn
   topics            = ["wsc2026-sensor-raw"]
   starting_position = "TRIM_HORIZON"
+  depends_on        = [time_sleep.lambda_iam_propagation]
   amazon_managed_kafka_event_source_config {
     consumer_group_id = "wsc2026-sensor-raw-cg"
   }
@@ -323,6 +427,7 @@ resource "aws_lambda_event_source_mapping" "alert" {
   function_name     = aws_lambda_function.alert.arn
   topics            = ["wsc2026-sensor-alert"]
   starting_position = "TRIM_HORIZON"
+  depends_on        = [time_sleep.lambda_iam_propagation]
   amazon_managed_kafka_event_source_config {
     consumer_group_id = "wsc2026-sensor-alert-cg"
   }

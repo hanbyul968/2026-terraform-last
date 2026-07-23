@@ -121,8 +121,8 @@ resource "kubernetes_deployment_v1" "book" {
             }
           }
           resources {
-            requests = { cpu = "256m", memory = "512Mi" }
-            limits   = { cpu = "256m", memory = "512Mi" }
+            requests = { cpu = "250m", memory = "512Mi" }
+            limits   = { cpu = "250m", memory = "512Mi" }
           }
           startup_probe {
             http_get {
@@ -157,6 +157,7 @@ resource "kubernetes_service_v1" "book" {
   metadata {
     name      = var.service_name
     namespace = kubernetes_namespace_v1.app.metadata[0].name
+    labels    = { app = "wsc2026-book" }
     annotations = {
       "service.kubernetes.io/topology-mode" = "Auto"
     }
@@ -164,6 +165,7 @@ resource "kubernetes_service_v1" "book" {
   spec {
     selector = { app = "wsc2026-book" }
     port {
+      name        = "http"
       port        = 8080
       target_port = 8080
       protocol    = "TCP"
@@ -192,15 +194,15 @@ resource "kubernetes_ingress_v1" "book" {
     name      = var.ingress_name
     namespace = kubernetes_namespace_v1.app.metadata[0].name
     annotations = {
-      "alb.ingress.kubernetes.io/scheme"                              = "internet-facing"
-      "alb.ingress.kubernetes.io/target-type"                         = "ip"
-      "alb.ingress.kubernetes.io/load-balancer-name"                  = var.alb_name
-      "alb.ingress.kubernetes.io/subnets"                             = "${data.aws_subnet.hub_a.id},${data.aws_subnet.hub_b.id}"
-      "alb.ingress.kubernetes.io/security-groups"                     = data.aws_security_group.alb.id
-      "alb.ingress.kubernetes.io/manage-backend-security-group-rules" = "true"
-      "alb.ingress.kubernetes.io/listen-ports"                        = "[{\"HTTP\":80}]"
-      "alb.ingress.kubernetes.io/healthcheck-path"                    = "/health"
-      "alb.ingress.kubernetes.io/healthcheck-port"                    = "8080"
+      "alb.ingress.kubernetes.io/scheme"             = "internet-facing"
+      "alb.ingress.kubernetes.io/target-type"        = "ip"
+      "alb.ingress.kubernetes.io/load-balancer-name" = var.alb_name
+      "alb.ingress.kubernetes.io/subnets"            = "${data.aws_subnet.hub_a.id},${data.aws_subnet.hub_b.id}"
+      "alb.ingress.kubernetes.io/security-groups"    = data.aws_security_group.alb.id
+      # shared backend SG를 비활성화했으므로 target SG 규칙은 root alb.tf에서 직접 관리한다.
+      "alb.ingress.kubernetes.io/listen-ports"     = "[{\"HTTP\":80}]"
+      "alb.ingress.kubernetes.io/healthcheck-path" = "/health"
+      "alb.ingress.kubernetes.io/healthcheck-port" = "8080"
       # 잘못된 경로는 403 (채점 12 / CDN 외 직접 경로)
       "alb.ingress.kubernetes.io/actions.deny-403" = jsonencode({
         type = "fixed-response"
@@ -252,6 +254,7 @@ resource "helm_release" "lb_controller" {
   name       = "aws-load-balancer-controller"
   repository = "https://aws.github.io/eks-charts"
   chart      = "aws-load-balancer-controller"
+  version    = "3.4.2"
   namespace  = "kube-system"
 
   set {
@@ -277,6 +280,11 @@ resource "helm_release" "lb_controller" {
   set {
     name  = "nodeSelector.wsc2026/node"
     value = "addon"
+  }
+  # 기본값 true이면 k8s-traffic-* shared SG가 ALB에 추가되어 채점 8-1이 실패한다.
+  set {
+    name  = "enableBackendSecurityGroup"
+    value = "false"
   }
 }
 
@@ -333,16 +341,23 @@ resource "helm_release" "fluentbit" {
   name       = "fluent-bit"
   repository = "https://aws.github.io/eks-charts"
   chart      = "aws-for-fluent-bit"
+  version    = "0.2.0"
   namespace  = kubernetes_namespace_v1.obs.metadata[0].name
 
   values = [templatefile("${path.module}/fluentbit-values.yaml.tftpl", {
-    log_group = var.app_log_group
-    region    = var.region
-    sa_name   = kubernetes_service_account_v1.fluentbit.metadata[0].name
+    log_group      = var.app_log_group
+    region         = var.region
+    sa_name        = kubernetes_service_account_v1.fluentbit.metadata[0].name
+    cluster_domain = var.cluster_dns_domain
   })]
 
+  wait            = true
+  atomic          = true
+  cleanup_on_fail = true
+  timeout         = 600
+
   depends_on = [
-    helm_release.lb_controller,
+    kubernetes_service_account_v1.fluentbit,
   ]
 }
 
@@ -350,18 +365,53 @@ resource "helm_release" "fluentbit" {
 # ingress 가 만든 ALB 가 active 가 될 때까지 대기 (root CloudFront origin 용)
 # ═══════════════════════════════════════════════════════════════
 resource "null_resource" "wait_alb" {
-  triggers = { ingress = var.ingress_name }
+  triggers = {
+    ingress             = var.ingress_name
+    ingress_annotations = sha256(jsonencode(kubernetes_ingress_v1.book.metadata[0].annotations))
+    controller          = helm_release.lb_controller.id
+  }
+
   provisioner "local-exec" {
     interpreter = ["/bin/bash", "-c"]
-    environment = { REGION = var.region, ALB = var.alb_name }
-    command     = <<-EOT
+    environment = {
+      REGION    = var.region
+      CLUSTER   = var.cluster_name
+      ALB       = var.alb_name
+      NAMESPACE = var.app_namespace
+      INGRESS   = var.ingress_name
+    }
+    command = <<-EOT
       set -eu
+      export KUBECONFIG=$(mktemp)
+      trap 'rm -f "$KUBECONFIG"' EXIT
+      aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER" >/dev/null
+
       for i in $(seq 1 60); do
-        state=$(aws elbv2 describe-load-balancers --region "$REGION" --names "$ALB" --query "LoadBalancers[0].State.Code" --output text 2>/dev/null || true)
-        if [ "$state" = "active" ]; then exit 0; fi
-        sleep 15
+        state=$(aws elbv2 describe-load-balancers --region "$REGION" --names "$ALB" \
+          --query "LoadBalancers[0].State.Code" --output text 2>/dev/null || true)
+        address=$(kubectl get ingress "$INGRESS" -n "$NAMESPACE" \
+          -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+
+        if [ "$state" = "active" ] && [ -n "$address" ]; then
+          echo "ALB $ALB is active: $address"
+          exit 0
+        fi
+
+        if [ $((i % 3)) -eq 0 ]; then
+          echo "Waiting for ALB $ALB (attempt $i/60, state=$${state:-not-created})"
+          kubectl get events -n "$NAMESPACE" \
+            --field-selector "involvedObject.kind=Ingress,involvedObject.name=$INGRESS" \
+            --sort-by='.lastTimestamp' --no-headers 2>/dev/null | tail -n 3 || true
+        fi
+        sleep 10
       done
-      echo "ALB $ALB not active in time" >&2
+
+      echo "ALB $ALB was not created or active within 10 minutes." >&2
+      echo "=== Ingress diagnostics ===" >&2
+      kubectl describe ingress "$INGRESS" -n "$NAMESPACE" >&2 || true
+      echo "=== Load Balancer Controller errors ===" >&2
+      kubectl logs -n kube-system deploy/aws-load-balancer-controller \
+        --all-containers=true --since=15m 2>&1 | grep -Ei 'error|fail|denied|security.group|backend' | tail -n 100 >&2 || true
       exit 1
     EOT
   }

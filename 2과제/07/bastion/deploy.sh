@@ -30,29 +30,11 @@ fi
 
 echo "===== [Task2-06] deploy start (competitor_number=${COMPETITOR_NUMBER}) ====="
 
-# =============================================================================
-# 원격 state(S3) 준비 — 배스천이 교체돼도 state 가 유지되어 import/destroy 지옥 방지.
-#   * state 버킷은 terraform 밖에서 idempotent 하게 생성(어떤 모듈 destroy 로도 안 지워짐).
-#   * 각 모듈 init 시 backend-config 로 bucket/key/region 주입.
-# =============================================================================
-STATE_REGION="ap-northeast-2"
+# 새 계정 단일 배포용: 각 module 디렉터리의 로컬 state를 사용한다.
 ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
-STATE_BUCKET="task2-06-tfstate-${ACCOUNT}"
 
-if ! aws s3api head-bucket --bucket "${STATE_BUCKET}" 2>/dev/null; then
-  aws s3api create-bucket --bucket "${STATE_BUCKET}" --region "${STATE_REGION}" \
-    --create-bucket-configuration LocationConstraint="${STATE_REGION}"
-fi
-aws s3api put-bucket-versioning --bucket "${STATE_BUCKET}" \
-  --versioning-configuration Status=Enabled
-echo "[state] s3://${STATE_BUCKET} (region ${STATE_REGION})"
-
-# tinit <module>  : S3 backend 로 terraform init (모듈별 key 분리)
 tinit() {
-  terraform init -input=false -no-color -reconfigure \
-    -backend-config="bucket=${STATE_BUCKET}" \
-    -backend-config="key=task2-06/$1.tfstate" \
-    -backend-config="region=${STATE_REGION}"
+  terraform init -input=false -no-color -reconfigure
 }
 
 # -----------------------------------------------------------------------------

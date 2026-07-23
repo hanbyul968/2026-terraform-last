@@ -10,11 +10,27 @@ terraform output -raw ssm_connect_command   # 출력된 명령으로 SSM 접속
 ```bash
 # 2) Bastion(SSM) 안: 루트 인프라 apply (KMS/S3/DynamoDB/ECR repo/Lambda/ALB/CloudFront/IAM)
 until [ -f /opt/task1/READY ]; do sleep 5; done
-cd /opt/task1 && bash run.sh 2>&1 | tee /tmp/apply.log
+cd /opt/task1 && bash run.sh
+# run.sh는 systemd unit으로 실행되므로 SSM의 wsasend 연결이 끊겨도 apply는 계속된다.
+# 재접속 후 진행 확인: sudo journalctl -fu unicorn-task1-terraform
+# 완료 확인: test -f /opt/task1/TERRAFORM_APPLY_SUCCESS && echo SUCCESS
+# CloudFront VPC Origin은 정상 상태에서도 최대 15분 동안 Still creating이 출력될 수 있다.
 
-# 3) 이미지 빌드/푸시 + EKS 생성 + kubectl/helm  ← 이걸 안 하면 ECR 이미지·EKS 클러스터가 안 생김
+# 3) 2단계 SUCCESS 확인 후 이미지 빌드/푸시 + EKS 생성 + kubectl/helm
 cd /opt/task1/manifest && bash apply.sh
 ```
+
+> ⚠️ 기존 Bastion에서 이전 root apply를 한 적이 있다면 Bastion을 먼저 destroy/recreate하지 마세요.
+> `/opt/task1/terraform.tfstate`가 유실될 수 있습니다. 로컬 `bastion` 폴더에서 apply하여
+> bootstrap S3 object만 갱신한 뒤, 기존 Bastion에서 아래처럼 최신 번들을 덮어씁니다.
+>
+> ```bash
+> ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+> aws s3 cp "s3://wsc-task1-bootstrap-${ACCOUNT}/task1-bundle.zip" /tmp/task1.zip
+> unzip -o /tmp/task1.zip -d /opt/task1
+> chmod +x /opt/task1/run.sh /opt/task1/terraform-apply-worker.sh
+> bash /opt/task1/run.sh
+> ```
 
 > ⚠️ `terraform apply` 만으로는 **ECR 이미지(v1.0.0)와 EKS 클러스터가 생성되지 않는다.**
 > 둘 다 `manifest/apply.sh` 가 만든다(3단계). apply.sh 실행 전에는 ECR `MUTABLE`/이미지 없음,
@@ -26,20 +42,35 @@ cd /opt/task1/manifest && bash apply.sh
 
 ---
 
-## Step 1 — 로컬에서 Terraform 실행
+## Step 1 — 로컬에서 Bastion + 채점 VPC 실행
 
-```bash
-cd C:\Users\competitor\2026-terraform\1과제\07
+```powershell
+cd C:\Users\competitor\2026-terraform\1과제\07\bastion
 terraform init
-terraform apply --auto-approve
-# 프롬프트에서 비번호 입력 (예: 103)
+terraform apply -auto-approve -var="number=<비번호>"
+terraform output -raw ssm_connect_command
 ```
 
-> 생성되는 주요 리소스: VPC / KMS / S3 / DynamoDB / ECR / Lambda / ALB / CloudFront / WAF / IAM / Grafana ALB / CloudShell SG / manifest S3 버킷
+> `07` 루트의 과거 `terraform.tfstate`는 사용하지 않습니다. 루트에서 직접 apply하면
+> 현재 Bastion stage가 소유하는 VPC를 삭제 대상으로 해석할 수 있습니다.
 
 ---
 
-## Step 2 — CloudShell VPC Environment 생성 (콘솔 수동)
+## Step 2 — Bastion(SSM)에서 root Terraform 실행
+
+```bash
+until [ -f /opt/task1/READY ]; do sleep 5; done
+cd /opt/task1
+bash run.sh
+# 연결이 끊겨도 계속 실행됨. 재접속 후:
+sudo journalctl -fu unicorn-task1-terraform
+```
+
+`/opt/task1/TERRAFORM_APPLY_SUCCESS`가 생성된 뒤 다음 단계로 진행합니다.
+
+---
+
+## Step 3 — CloudShell VPC Environment 생성 (콘솔 수동)
 
 AWS 콘솔 → CloudShell → VPC Environment 생성
 
@@ -52,7 +83,7 @@ AWS 콘솔 → CloudShell → VPC Environment 생성
 
 ---
 
-## Step 3 — CloudShell 접속 후 실행
+## Step 4 — CloudShell 접속 후 EKS/애플리케이션 실행
 
 ```bash
 # 1. 환경변수 설정
@@ -102,7 +133,7 @@ aws s3 cp s3://$(aws s3 ls | grep unicorn-manifest | awk '{print $3}')/ ./ --rec
 
 ---
 
-## Step 4 — Grafana 대시보드 (자동 생성)
+## Step 5 — Grafana 대시보드 (자동 생성)
 
 대시보드는 **`manifest/grafana-dashboard.yaml` ConfigMap**으로 자동 생성됩니다.
 kube-prometheus-stack의 Grafana 사이드카가 `grafana_dashboard: "1"` 라벨이 붙은
@@ -343,7 +374,7 @@ $TF aws_lb_target_group.grafana                         $G_TG_ARN
 $TF aws_lb_listener.grafana                             $G_LISTENER_ARN
 ```
 
-> `aws_security_group_rule.alb_from_cloudfront` 와 `aws_s3_object.*` 는 import 불필요 — apply 시 자동 생성됩니다.
+> `module.CloudFront.aws_security_group_rule.alb_from_vpc_origin` 와 `aws_s3_object.*` 는 import 불필요 — apply 시 자동 생성됩니다.
 
 ---
 

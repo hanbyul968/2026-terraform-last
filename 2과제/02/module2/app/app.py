@@ -1,68 +1,72 @@
-"""
-module2 - 주문 로그 생성 애플리케이션 (port 5000)
-  GET  /health -> {"status":"healthy"}
-  POST /order  -> 주문 JSON 생성 + Kinesis(wsc2026-order-stream) put_record
-
-systemd 서비스명: app  (rubric 2-6: systemctl is-active/is-enabled app)
-출력은 compact JSON(separators) 으로 채점 기댓값과 정확히 일치시킨다.
-"""
-import datetime
 import json
 import os
+import random
 import uuid
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from datetime import datetime, timezone
 
 import boto3
+from flask import Flask, jsonify
 
-STREAM_NAME = os.environ.get("STREAM_NAME", "wsc2026-order-stream")
-REGION = os.environ.get("AWS_REGION", "ap-northeast-2")
+app = Flask(__name__)
 
-_kinesis = boto3.client("kinesis", region_name=REGION)
+STREAM_NAME = os.environ.get("STREAM_NAME")
+REGION = os.environ.get("AWS_REGION")
+
+if not STREAM_NAME or not REGION:
+    raise RuntimeError("STREAM_NAME and AWS_REGION environment variables are required")
+
+kinesis = boto3.client("kinesis", region_name=REGION)
+
+PRODUCTS = [
+    {"name": "Laptop", "price": 1200000},
+    {"name": "Mouse", "price": 25000},
+    {"name": "Keyboard", "price": 55000},
+    {"name": "Monitor", "price": 350000},
+    {"name": "Headset", "price": 89000},
+]
 
 
-def _dump(obj):
-    return json.dumps(obj, separators=(",", ":")).encode("utf-8")
+def generate_order():
+    product = random.choice(PRODUCTS)
+    return {
+        "order_id": str(uuid.uuid4()),
+        "product_name": product["name"],
+        "price": product["price"],
+        "quantity": random.randint(1, 5),
+        "event_time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+    }
 
 
-class Handler(BaseHTTPRequestHandler):
-    def _send(self, code, obj):
-        body = _dump(obj)
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "healthy"})
 
-    def do_GET(self):  # noqa: N802
-        if self.path == "/health":
-            self._send(200, {"status": "healthy"})
-        else:
-            self._send(404, {"error": "not found"})
 
-    def do_POST(self):  # noqa: N802
-        if self.path == "/order":
-            order = {
-                "event_time": datetime.datetime.utcnow().isoformat(),
-                "order_id": str(uuid.uuid4()),
-                "price": 55000,
-                "product_name": "Keyboard",
-                "quantity": 3,
-            }
-            try:
-                _kinesis.put_record(
-                    StreamName=STREAM_NAME,
-                    Data=_dump(order),
-                    PartitionKey=order["order_id"],
-                )
-            except Exception:  # noqa: BLE001  (채점 시 응답은 항상 반환)
-                pass
-            self._send(200, order)
-        else:
-            self._send(404, {"error": "not found"})
+@app.route("/order", methods=["POST"])
+def create_order():
+    order = generate_order()
+    kinesis.put_record(
+        StreamName=STREAM_NAME,
+        Data=json.dumps(order),
+        PartitionKey=order["order_id"],
+    )
+    return jsonify(order), 201
 
-    def log_message(self, *args):  # 로그 소음 제거
-        return
+
+@app.route("/orders/generate", methods=["POST"])
+def generate_orders():
+    count = 10
+    orders = []
+    for _ in range(count):
+        order = generate_order()
+        kinesis.put_record(
+            StreamName=STREAM_NAME,
+            Data=json.dumps(order),
+            PartitionKey=order["order_id"],
+        )
+        orders.append(order)
+    return jsonify({"generated": count, "orders": orders}), 201
 
 
 if __name__ == "__main__":
-    HTTPServer(("0.0.0.0", 5000), Handler).serve_forever()
+    app.run(host="0.0.0.0", port=5000)

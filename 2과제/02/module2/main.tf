@@ -156,15 +156,17 @@ resource "aws_security_group" "ec2" {
   tags = { Name = "wsc2026-analytics-ec2-sg" }
 }
 resource "aws_instance" "ec2" {
-  ami                    = data.aws_ami.al2023.id
-  instance_type          = "t3.small"
-  subnet_id              = aws_subnet.priv_a.id
-  vpc_security_group_ids = [aws_security_group.ec2.id]
-  iam_instance_profile   = aws_iam_instance_profile.ec2.name
+  ami                         = data.aws_ami.al2023.id
+  instance_type               = "t3.small"
+  subnet_id                   = aws_subnet.priv_a.id
+  vpc_security_group_ids      = [aws_security_group.ec2.id]
+  iam_instance_profile        = aws_iam_instance_profile.ec2.name
+  user_data_replace_on_change = true
   user_data = templatefile("${path.module}/userdata.sh.tpl", {
-    app_py = file("${path.module}/app/app.py")
-    region = "ap-northeast-2"
-    stream = aws_kinesis_stream.orders.name
+    app_py       = file("${path.module}/app/app.py")
+    requirements = file("${path.module}/app/requirements.txt")
+    region       = "ap-northeast-2"
+    stream       = aws_kinesis_stream.orders.name
   })
   tags = { Name = "wsc2026-analytics-ec2" }
 }
@@ -222,6 +224,40 @@ resource "aws_lb_listener" "http" {
 }
 
 # ── Managed Apache Flink Studio (Zeppelin) ───────────────────────────
+data "aws_caller_identity" "current" {}
+
+# Studio Notebook의 SQL Catalog로 사용할 Glue 데이터베이스.
+# CreateApplication은 CatalogConfiguration이 없으면 이름이 default인 DB를 조회한다.
+resource "aws_glue_catalog_database" "flink" {
+  name        = "default"
+  description = "Glue Data Catalog for wsc2026-analytics-flink Studio Notebook"
+}
+
+locals {
+  flink_glue_catalog_arn  = "arn:aws:glue:ap-northeast-2:${data.aws_caller_identity.current.account_id}:catalog"
+  flink_glue_database_arn = "arn:aws:glue:ap-northeast-2:${data.aws_caller_identity.current.account_id}:database/${aws_glue_catalog_database.flink.name}"
+
+  flink_application_configuration = jsonencode({
+    FlinkApplicationConfiguration = {
+      ParallelismConfiguration = {
+        ConfigurationType = "CUSTOM"
+        Parallelism       = 1
+        ParallelismPerKPU = 1
+      }
+    }
+    ZeppelinApplicationConfiguration = {
+      MonitoringConfiguration = {
+        LogLevel = "INFO"
+      }
+      CatalogConfiguration = {
+        GlueDataCatalogConfiguration = {
+          DatabaseARN = local.flink_glue_database_arn
+        }
+      }
+    }
+  })
+}
+
 resource "aws_iam_role" "flink" {
   name = "wsc2026-analytics-flink-role"
   assume_role_policy = jsonencode({
@@ -229,39 +265,143 @@ resource "aws_iam_role" "flink" {
     Statement = [{ Action = "sts:AssumeRole", Effect = "Allow", Principal = { Service = "kinesisanalytics.amazonaws.com" } }]
   })
 }
+
+# AWS 공식 Studio Notebook 정책 예시에 따라 Kinesis source와 Glue Catalog에
+# 필요한 작업만 허용한다.
 resource "aws_iam_role_policy" "flink" {
   name = "flink-min"
   role = aws_iam_role.flink.id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      { Effect = "Allow", Action = ["kinesis:GetRecords", "kinesis:GetShardIterator", "kinesis:DescribeStream", "kinesis:DescribeStreamSummary", "kinesis:ListShards", "kinesis:SubscribeToShard"], Resource = aws_kinesis_stream.orders.arn },
-      { Effect = "Allow", Action = ["logs:*", "cloudwatch:PutMetricData", "glue:*"], Resource = "*" }
+      {
+        Sid      = "KinesisShardDiscovery"
+        Effect   = "Allow"
+        Action   = "kinesis:ListShards"
+        Resource = "*"
+      },
+      {
+        Sid    = "KinesisShardConsumption"
+        Effect = "Allow"
+        Action = [
+          "kinesis:GetShardIterator",
+          "kinesis:GetRecords",
+          "kinesis:DescribeStream",
+          "kinesis:DescribeStreamSummary",
+          "kinesis:RegisterStreamConsumer",
+          "kinesis:DeregisterStreamConsumer"
+        ]
+        Resource = aws_kinesis_stream.orders.arn
+      },
+      {
+        Sid      = "KinesisEfoConsumer"
+        Effect   = "Allow"
+        Action   = ["kinesis:DescribeStreamConsumer", "kinesis:SubscribeToShard"]
+        Resource = "${aws_kinesis_stream.orders.arn}/consumer/*"
+      },
+      {
+        Sid    = "GlueTable"
+        Effect = "Allow"
+        Action = [
+          "glue:GetConnection",
+          "glue:GetTable",
+          "glue:GetTables",
+          "glue:GetDatabase",
+          "glue:CreateTable",
+          "glue:UpdateTable"
+        ]
+        Resource = [
+          "arn:aws:glue:ap-northeast-2:${data.aws_caller_identity.current.account_id}:connection/*",
+          "arn:aws:glue:ap-northeast-2:${data.aws_caller_identity.current.account_id}:table/${aws_glue_catalog_database.flink.name}/*",
+          local.flink_glue_database_arn,
+          "arn:aws:glue:ap-northeast-2:${data.aws_caller_identity.current.account_id}:database/hive",
+          local.flink_glue_catalog_arn
+        ]
+      },
+      {
+        Sid      = "GlueDatabaseList"
+        Effect   = "Allow"
+        Action   = "glue:GetDatabases"
+        Resource = "*"
+      },
+      {
+        Sid      = "CloudWatchMetrics"
+        Effect   = "Allow"
+        Action   = "cloudwatch:PutMetricData"
+        Resource = "*"
+      },
+      {
+        Sid      = "CloudWatchLogGroupList"
+        Effect   = "Allow"
+        Action   = "logs:DescribeLogGroups"
+        Resource = "arn:aws:logs:ap-northeast-2:${data.aws_caller_identity.current.account_id}:log-group:*"
+      }
     ]
   })
 }
+
 resource "null_resource" "flink" {
-  triggers = { name = "wsc2026-analytics-flink", role = aws_iam_role.flink.arn }
+  triggers = {
+    name               = "wsc2026-analytics-flink"
+    role               = aws_iam_role.flink.arn
+    database_arn       = local.flink_glue_database_arn
+    policy_hash        = sha256(aws_iam_role_policy.flink.policy)
+    configuration_hash = sha256(local.flink_application_configuration)
+  }
+
   provisioner "local-exec" {
     interpreter = ["/bin/bash", "-c"]
     environment = {
-      REGION = "ap-northeast-2"
-      ROLE   = aws_iam_role.flink.arn
+      REGION     = "ap-northeast-2"
+      ROLE       = aws_iam_role.flink.arn
+      APP_CONFIG = local.flink_application_configuration
     }
     command = <<-EOT
       set -eu
-      if aws kinesisanalyticsv2 describe-application --region "$REGION" --application-name wsc2026-analytics-flink >/dev/null 2>&1; then
-        echo "flink studio exists"; exit 0
+      APP_NAME="wsc2026-analytics-flink"
+
+      if aws kinesisanalyticsv2 describe-application --region "$REGION" --application-name "$APP_NAME" >/dev/null 2>&1; then
+        echo "flink studio exists"
+        exit 0
       fi
-      aws kinesisanalyticsv2 create-application --region "$REGION" \
-        --application-name wsc2026-analytics-flink \
-        --runtime-environment ZEPPELIN-FLINK-3_0 \
-        --application-mode INTERACTIVE \
-        --service-execution-role "$ROLE" \
-        --application-configuration '{"FlinkApplicationConfiguration":{"ParallelismConfiguration":{"ConfigurationType":"CUSTOM","Parallelism":1,"ParallelismPerKPU":1}},"ZeppelinApplicationConfiguration":{"MonitoringConfiguration":{"LogLevel":"INFO"}}}'
+
+      # IAM 정책과 새 Glue DB가 각 서비스에 전파될 때까지 검증 오류만 재시도한다.
+      for attempt in $(seq 1 12); do
+        set +e
+        output=$(aws kinesisanalyticsv2 create-application --region "$REGION" \
+          --application-name "$APP_NAME" \
+          --runtime-environment ZEPPELIN-FLINK-3_0 \
+          --application-mode INTERACTIVE \
+          --service-execution-role "$ROLE" \
+          --application-configuration "$APP_CONFIG" 2>&1)
+        status=$?
+        set -e
+
+        if [ "$status" -eq 0 ]; then
+          echo "$output"
+          exit 0
+        fi
+
+        echo "$output" >&2
+        if ! echo "$output" | grep -Eq "ServiceExecutionRole has insufficient permission|Cannot find database with name"; then
+          exit "$status"
+        fi
+
+        if [ "$attempt" -lt 12 ]; then
+          echo "IAM/Glue configuration is still propagating; retrying Flink creation in 10 seconds ($attempt/12)" >&2
+          sleep 10
+        fi
+      done
+
+      echo "Flink Studio creation failed after waiting for IAM/Glue propagation" >&2
+      exit 1
     EOT
   }
-  depends_on = [aws_iam_role_policy.flink]
+
+  depends_on = [
+    aws_glue_catalog_database.flink,
+    aws_iam_role_policy.flink
+  ]
 }
 
 output "alb_dns" { value = aws_lb.main.dns_name }

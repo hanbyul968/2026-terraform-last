@@ -62,12 +62,20 @@ resource "aws_iam_policy" "book_function" {
   name = local.func_policy
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Sid      = "DynamoQuery"
-      Effect   = "Allow"
-      Action   = ["dynamodb:Query"]
-      Resource = [aws_dynamodb_table.this.arn, "${aws_dynamodb_table.this.arn}/index/booking_id-index"]
-    }]
+    Statement = [
+      {
+        Sid      = "DynamoQuery"
+        Effect   = "Allow"
+        Action   = ["dynamodb:Query"]
+        Resource = [aws_dynamodb_table.this.arn, "${aws_dynamodb_table.this.arn}/index/booking_id-index"]
+      },
+      {
+        Sid      = "DecryptTableName"
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt"]
+        Resource = local.kms_function_arn
+      }
+    ]
   })
 }
 

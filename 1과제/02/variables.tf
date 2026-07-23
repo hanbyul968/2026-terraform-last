@@ -19,8 +19,13 @@ variable "azs" {
 # S3 버킷명 wskorea26-concert-bucket-<비번호> 에 사용. 채점 예시: 103
 # !! 대회 시작하면 반드시 본인 비번호로 변경 !!
 variable "bi_number" {
-  description = "선수 비번호. S3 버킷 suffix 등에 사용. 고정 default 없음 → apply 시 입력(-var/프롬프트)."
+  description = "선수 비번호. S3 버킷 suffix와 Grafana 관리자 ID에 사용. 고정 default 없음 → apply 시 입력(-var/프롬프트)."
   type        = string
+
+  validation {
+    condition     = can(regex("^[0-9]+$", var.bi_number))
+    error_message = "bi_number는 숫자로만 입력해야 합니다."
+  }
 }
 
 # ── CloudFront -> ALB 식별 헤더 (과제 11/10) ──
@@ -35,19 +40,6 @@ variable "s3_access_header_value" {
   description = "CloudFront 가 S3 origin 으로 보낼 wskorea26-s3-access 헤더 값."
   type        = string
   default     = "true"
-}
-
-# ── Grafana 관리자 (채점 10-1: admin / wsk2026!) ──
-variable "grafana_admin_user" {
-  description = "Grafana 관리자 ID. 채점 로그인: admin"
-  type        = string
-  default     = "skills-103-admin"
-}
-
-variable "grafana_admin_password" {
-  description = "Grafana 관리자 PW. 채점 로그인: wsk2026!"
-  type        = string
-  default     = "\\$korea26!!"
 }
 
 # ── EKS 버전 (과제 8) ──

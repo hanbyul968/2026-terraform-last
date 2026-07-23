@@ -1,17 +1,15 @@
 # =============================================================================
-# 최상위 오케스트레이터 (선택적 All-in-One Apply)
+# Windows All-in-One 오케스트레이터
 #
-# ※ 2단계 배포 방식(권장): bastion/ 를 로컬에서 apply → SSM 접속 →
-#   /opt/task2/deploy.sh 로 module1~4 일괄 배포. 이 deploy.sh 가 표준 경로다.
+# 각 module은 독립 Terraform root/state를 유지한다. 이 root는 PowerShell 실행기를
+# 통해 module1~4를 순서대로 apply하고, module3/4의 Kubernetes 후처리까지 수행한다.
 #
-# 이 루트 오케스트레이터는 위 deploy.sh 와 동일한 순서를 terraform 으로도 돌릴 수
-# 있게 남겨둔 "대안" 경로다. apply 가 Linux Bastion 에서 수행되므로 모든
-# local-exec 는 PowerShell -> /bin/bash 로 변환되었다.
+# [실행]
+#   terraform init
+#   terraform apply -var="competitor_number=<선수등번호>"
 #
-# 각 모듈(module1~4)은 여전히 독립 루트로서 standalone 실행이 가능하며
-# (cd module1 && terraform apply), 자체 state 를 그대로 유지한다.
-#
-# [실행]  terraform init && terraform apply -var="competitor_number=<번호>"
+# 중요: null_resource 교체 시 하위 인프라를 먼저 삭제하지 않도록 destroy-time
+# provisioner를 사용하지 않는다. 전체 삭제는 README의 모듈별 teardown을 사용한다.
 # =============================================================================
 
 terraform {
@@ -24,143 +22,136 @@ terraform {
 }
 
 variable "competitor_number" {
-  description = "선수등번호 (module4 Grafana 계정/비번 및 setup.sh 에 사용)"
+  description = "선수등번호 (module4 Grafana 계정/비밀번호에 사용)"
   type        = string
+
+  validation {
+    condition     = length(trimspace(var.competitor_number)) > 0
+    error_message = "competitor_number must not be empty."
+  }
 }
 
-# (Deprecated on Linux) 과거 Windows Git Bash 경로. Linux Bastion 에서는 /bin/bash 사용.
 variable "git_bash_path" {
-  description = "[deprecated] Windows 전용. Linux Bastion 에서는 사용되지 않음."
+  description = "module4 setup.sh 실행에 사용할 Windows Git Bash 경로"
   type        = string
-  default     = "/bin/bash"
+  default     = "C:/Program Files/Git/bin/bash.exe"
 }
 
-# module4 setup.sh(이미지 빌드/Helm/대시보드)를 apply 시 자동 실행할지 여부.
+variable "run_module3_setup" {
+  description = "module3 apply 후 SSM Bastion에서 KEDA/Karpenter/App을 자동 배포할지 여부"
+  type        = bool
+  default     = true
+}
+
 variable "run_module4_setup" {
-  description = "true 면 module4 apply 후 setup.sh 자동 실행"
+  description = "module4 apply 후 로컬 Git Bash에서 이미지/Helm/대시보드를 자동 배포할지 여부"
   type        = bool
   default     = true
 }
 
 locals {
-  m1 = "${path.module}/module1"
-  m2 = "${path.module}/module2"
-  m3 = "${path.module}/module3"
-  m4 = "${path.module}/module4"
+  m1     = "${path.module}/module1"
+  m2     = "${path.module}/module2"
+  m3     = "${path.module}/module3"
+  m4     = "${path.module}/module4"
+  runner = "${path.module}/scripts/run-module.ps1"
+
+  # timestamp() 대신 실제 입력 파일 hash만 trigger로 사용한다. 따라서 평범한
+  # terraform apply는 인프라 destroy/recreate 없이 no-op이고, 코드가 바뀐
+  # 모듈만 idempotent하게 다시 apply된다.
+  module1_hash = sha256(join("", [
+    filesha256("${local.m1}/main.tf"),
+    filesha256("${local.m1}/app.py"),
+    filesha256("${local.m1}/lambda.py"),
+    filesha256("${local.m1}/requirements.txt"),
+    filesha256(local.runner),
+  ]))
+  module2_hash = sha256(join("", [
+    filesha256("${local.m2}/main.tf"),
+    filesha256("${local.m2}/cf_req_fn.js"),
+    filesha256("${local.m2}/cf_res_fn.js"),
+    filesha256("${local.m2}/index_a.html"),
+    filesha256("${local.m2}/index_b.html"),
+    filesha256(local.runner),
+  ]))
+  module3_hash = sha256(join("", [
+    filesha256("${local.m3}/main.tf"),
+    filesha256("${local.m3}/deploy.sh"),
+    filesha256("${local.m3}/k8s-app.yaml"),
+    filesha256("${local.m3}/k8s-keda.yaml"),
+    filesha256("${local.m3}/k8s-karpenter.yaml"),
+    filesha256("${local.m3}/app/app.py"),
+    filesha256("${local.m3}/app/Dockerfile"),
+    filesha256("${local.m3}/app/requirements.txt"),
+    filesha256(local.runner),
+  ]))
+  module4_hash = sha256(join("", [
+    filesha256("${local.m4}/main.tf"),
+    filesha256("${local.m4}/manifest/setup.sh"),
+    filesha256("${local.m4}/manifest/app.py"),
+    filesha256("${local.m4}/manifest/Dockerfile"),
+    filesha256(local.runner),
+  ]))
 }
 
-# -----------------------------------------------------------------------------
-# module1 — NoSQL (ap-southeast-1)
-# -----------------------------------------------------------------------------
 resource "null_resource" "module1" {
-  triggers = { always_run = timestamp() }
-
-  provisioner "local-exec" {
-    interpreter = ["/bin/bash", "-c"]
-    command     = <<-EOT
-      set -e
-      terraform -chdir="${local.m1}" init -input=false
-      terraform -chdir="${local.m1}" apply -auto-approve -input=false
-    EOT
+  triggers = {
+    source_hash = local.module1_hash
   }
 
-  # destroy 시(역순) : module1 정리
   provisioner "local-exec" {
-    when        = destroy
-    interpreter = ["/bin/bash", "-c"]
-    command     = "terraform -chdir=\"${path.module}/module1\" destroy -auto-approve -input=false"
+    interpreter = ["PowerShell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command"]
+    working_dir = path.module
+    command     = <<-EOT
+      & "${local.runner}" -Module "module1" -CompetitorNumber "${var.competitor_number}" -RunWorkloadSetup "false" -GitBashPath "${var.git_bash_path}"
+    EOT
   }
 }
 
-# -----------------------------------------------------------------------------
-# module2 — CDN Function (us-east-1)
-# -----------------------------------------------------------------------------
 resource "null_resource" "module2" {
-  triggers = { always_run = timestamp() }
-
-  provisioner "local-exec" {
-    interpreter = ["/bin/bash", "-c"]
-    command     = <<-EOT
-      set -e
-      terraform -chdir="${local.m2}" init -input=false
-      terraform -chdir="${local.m2}" apply -auto-approve -input=false
-    EOT
+  triggers = {
+    source_hash = local.module2_hash
   }
 
   provisioner "local-exec" {
-    when        = destroy
-    interpreter = ["/bin/bash", "-c"]
-    command     = "terraform -chdir=\"${path.module}/module2\" destroy -auto-approve -input=false"
+    interpreter = ["PowerShell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command"]
+    working_dir = path.module
+    command     = <<-EOT
+      & "${local.runner}" -Module "module2" -CompetitorNumber "${var.competitor_number}" -RunWorkloadSetup "false" -GitBashPath "${var.git_bash_path}"
+    EOT
   }
 }
 
-# -----------------------------------------------------------------------------
-# module3 — EKS Scaling (ap-northeast-2)
-#   docker/kubeconfig 충돌 방지를 위해 module4 보다 먼저(순차) 실행.
-# -----------------------------------------------------------------------------
 resource "null_resource" "module3" {
-  triggers = { always_run = timestamp() }
-
-  provisioner "local-exec" {
-    interpreter = ["/bin/bash", "-c"]
-    command     = <<-EOT
-      set -e
-      terraform -chdir="${local.m3}" init -input=false
-      terraform -chdir="${local.m3}" apply -auto-approve -input=false
-    EOT
+  triggers = {
+    source_hash        = local.module3_hash
+    run_workload_setup = tostring(var.run_module3_setup)
   }
 
   provisioner "local-exec" {
-    when        = destroy
-    interpreter = ["/bin/bash", "-c"]
-    command     = "terraform -chdir=\"${path.module}/module3\" destroy -auto-approve -input=false"
+    interpreter = ["PowerShell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command"]
+    working_dir = path.module
+    command     = <<-EOT
+      & "${local.runner}" -Module "module3" -CompetitorNumber "${var.competitor_number}" -RunWorkloadSetup "${var.run_module3_setup}" -GitBashPath "${var.git_bash_path}"
+    EOT
   }
 
   depends_on = [null_resource.module1, null_resource.module2]
 }
 
-# -----------------------------------------------------------------------------
-# module4 — Container Logging / O11y (ap-northeast-1)
-#   1) terraform apply (인프라)  2) setup.sh (이미지 빌드/Helm/워크로드/대시보드)
-# -----------------------------------------------------------------------------
 resource "null_resource" "module4" {
   triggers = {
-    always_run        = timestamp()
-    competitor_number = var.competitor_number
+    source_hash        = local.module4_hash
+    competitor_number  = var.competitor_number
+    git_bash_path      = var.git_bash_path
+    run_workload_setup = tostring(var.run_module4_setup)
   }
 
-  # 4-1) 인프라 apply
   provisioner "local-exec" {
-    interpreter = ["/bin/bash", "-c"]
+    interpreter = ["PowerShell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command"]
+    working_dir = path.module
     command     = <<-EOT
-      set -e
-      terraform -chdir="${local.m4}" init -input=false
-      terraform -chdir="${local.m4}" apply -auto-approve -input=false -var="competitor_number=${var.competitor_number}"
-    EOT
-  }
-
-  # 4-2) setup.sh (run_module4_setup = true 일 때만)
-  provisioner "local-exec" {
-    interpreter = ["/bin/bash", "-c"]
-    command     = <<-EOT
-      set -e
-      if [ "${var.run_module4_setup}" = "true" ]; then
-        cd "${local.m4}/manifest"
-        number="${var.competitor_number}" bash ./setup.sh
-      else
-        echo "run_module4_setup=false : setup.sh 자동 실행을 건너뜀."
-      fi
-    EOT
-  }
-
-  # destroy 시(역순) : Helm 릴리스 제거 후 module4 destroy
-  provisioner "local-exec" {
-    when        = destroy
-    interpreter = ["/bin/bash", "-c"]
-    command     = <<-EOT
-      helm uninstall aws-load-balancer-controller -n kube-system 2>/dev/null || true
-      helm uninstall o11y-loki o11y-grafana -n monitoring 2>/dev/null || true
-      terraform -chdir="${path.module}/module4" destroy -auto-approve -input=false -var="competitor_number=${self.triggers.competitor_number}"
+      & "${local.runner}" -Module "module4" -CompetitorNumber "${var.competitor_number}" -RunWorkloadSetup "${var.run_module4_setup}" -GitBashPath "${var.git_bash_path}"
     EOT
   }
 

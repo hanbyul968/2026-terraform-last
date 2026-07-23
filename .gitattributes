@@ -7,6 +7,7 @@
 
 # Terraform/스크립트/매니페스트/도커파일도 LF 고정 (Linux bastion/CloudShell의 local-exec, docker build 등에서 CRLF로 인한 \r 에러 방지)
 *.tf       text eol=lf
+*.tftpl    text eol=lf
 *.tpl      text eol=lf
 *.hcl      text eol=lf
 *.json     text eol=lf

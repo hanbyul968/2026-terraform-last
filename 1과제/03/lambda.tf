@@ -17,6 +17,12 @@ data "archive_file" "lambda" {
   output_path = "${path.module}/files/lambda_function.zip"
 }
 
+# 채점은 get-function에서 TABLE_NAME 자체가 평문이 아닌 KMS CiphertextBlob이기를 요구한다.
+data "aws_kms_ciphertext" "table_name" {
+  key_id    = local.kms_function_arn
+  plaintext = local.table_name
+}
+
 resource "aws_lambda_function" "book_get" {
   function_name    = local.lambda_name
   role             = aws_iam_role.book_function.arn
@@ -27,12 +33,12 @@ resource "aws_lambda_function" "book_get" {
   timeout          = 15
   memory_size      = 128
 
-  # 환경변수 + 코드 CMK 암호화
+  # Lambda 환경변수의 저장 시 암호화와 TABLE_NAME의 클라이언트 측 암호화를 모두 적용한다.
   kms_key_arn = local.kms_function_arn
 
   environment {
     variables = {
-      TABLE_NAME = local.table_name
+      TABLE_NAME = data.aws_kms_ciphertext.table_name.ciphertext_blob
       INDEX_NAME = "booking_id-index"
     }
   }
@@ -55,4 +61,14 @@ resource "aws_lambda_permission" "function_url" {
   function_name          = aws_lambda_function.book_get.function_name
   principal              = "*"
   function_url_auth_type = "NONE"
+}
+
+
+# 신규 Function URL은 URL 호출 권한과 실제 함수 실행 권한이 모두 필요하다.
+resource "aws_lambda_permission" "function_url_invoke" {
+  statement_id             = "AllowPublicFunctionUrlInvoke"
+  action                   = "lambda:InvokeFunction"
+  function_name            = aws_lambda_function.book_get.function_name
+  principal                = "*"
+  invoked_via_function_url = true
 }

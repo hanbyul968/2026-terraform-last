@@ -15,26 +15,19 @@
 > BIBUNHO=<비번호> GRADER=arn:aws:iam::<acct>:user/<채점자> bash /opt/task1/run.sh
 > ```
 >
-> ## ⚑ KMS 두 가지 모드 (계정에 따라)
+> ## ⚑ KMS 배포 원칙
 >
-> | 변수 | 기본값 | 의미 |
-> |---|---|---|
-> | `reuse_kms` | **false** | CMK 5개를 **신규 생성**(관리자=배포 role, 안 잠김). 대회/깨끗한 계정용. |
-> | `reuse_eks_cluster_role` | **false** | `wsc2026-eks-cluster-role` **신규 생성**. |
+> 채점 스크립트는 서비스별 실제 키 ARN과 아래 고정 별칭을 비교하므로, 잠긴 과거 키를 재사용하지 않습니다.
+> 이 구성은 배포할 때마다 Terraform state가 관리하는 CMK 5개와 별칭을 생성합니다.
 >
-> **대회(깨끗한 다른 계정)** → 기본값 그대로. 즉 이 폴더의 **`reuse.auto.tfvars` 를 삭제**하면
-> CMK와 eks 역할을 정상 신규 생성한다. **이게 정답 경로다.**
+> - `wsc2026-db-kms`
+> - `wsc2026-ecr-kms`
+> - `wsc2026-eks-kms`
+> - `wsc2026-bucket-kms`
+> - `wsc2026-function-kms`
 >
-> **이 연습 계정(640107381732)만** → `reuse.auto.tfvars`(reuse_kms=true, reuse_eks_cluster_role=true)로
-> 이전 배포가 남긴 '잠긴' CMK 5개를 재사용한다. 그 키들은 정책이 root 를 배제하고 관리 권한을
-> 사라진 세션 ARN 에만 줘서 **root 조차 삭제/DescribeKey 불가**(AWS Support 만 해제 가능).
-> 그래서 새로 만들 수도, `data.aws_kms_alias`(내부 DescribeKey)로 읽을 수도 없어 `kms_key_arns`
-> 로 ARN 을 직접 지정해 재사용하고(서비스 ViaService 사용 권한은 열려 있음), eks 키 정책이
-> 기존 클러스터 역할만 허용하므로 그 역할도 재사용한다.
->
-> **왜 잠겼나(재발 방지)**: `kms_admin_arn` 을 bastion 의 일회성 STS 세션 ARN 으로 두면 세션 종료
-> 후 키가 영구 잠긴다. `locals.tf` 에서 세션 ARN → **지속되는 role ARN** 으로 정규화해 두었으니
-> 신규 생성(reuse_kms=false)한 키는 다시는 안 잠긴다.
+> `reuse_kms`와 `kms_key_arns` 변수는 이전 실행 명령 호환용으로만 남아 있으며 값과 관계없이 신규 키를 사용합니다.
+> `kms_admin_arn`은 일회성 STS 세션 ARN이 아닌 지속되는 IAM role ARN이어야 합니다.
 >
 > ## ⚠️ 편집 시 CRLF 금지
 > `.tf`/`.sh` 를 Windows 에서 편집하면 `\r\n` 이 들어가 `ecr.tf` 의 bash local-exec 가
@@ -155,7 +148,7 @@ terraform output cloudfront_domain   # 채점 진입점
 | 네임스페이스 (wsc2026) | `locals.tf` | `app_namespace` |
 | ConfigMap 이름 (book-config) | `k8s_app.tf` | `kubernetes_config_map_v1.book` (채점이 `book-config` 로 조회) |
 | replica 수 | `k8s_app.tf` | `kubernetes_deployment_v1.book` `replicas` |
-| CPU/Mem (256m/512Mi) | `k8s_app.tf` | `resources.requests/limits` |
+| CPU/Mem (250m/512Mi) | `k8s/main.tf` | `resources.requests/limits` |
 | Probe 경로/포트 (/health:8080) | `k8s_app.tf` | `*_probe.http_get` |
 | 노드 라벨 (wsc2026/node) | `eks_nodegroups.tf` `labels` + `k8s_app.tf` `node_selector` |
 | Pod Identity 역할 권한 | `iam_app.tf` | `aws_iam_policy.book_pod` (※ Action 에 `*` 절대 금지) |

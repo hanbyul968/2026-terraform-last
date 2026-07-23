@@ -322,7 +322,7 @@ resource "aws_security_group_rule" "vpce_from_cloudshell" {
 # ※ ALB SG 는 의도적으로 제외한다.
 #   채점 8-5 (ALB Direct Request deny Test)는 CloudShell에서 ALB로 직접 요청 시
 #   000/403 이 나와야 득점이므로, CloudShell을 ALB SG에 허용하면 200이 반환되어 감점된다.
-#   ALB 는 CloudFront VPC Origin SG 에서만 허용한다(aws_security_group_rule.alb_from_cloudfront).
+#   ALB 는 CloudFront 전용 prefix list 및 VPC Origin service SG 에서만 80을 허용한다.
 
 resource "aws_security_group_rule" "lambda_from_cloudshell" {
   type                     = "ingress"
@@ -361,29 +361,14 @@ resource "aws_security_group_rule" "grafana_alb_from_cloudshell" {
 # resource "aws_security_group_rule" "eks_from_cloudshell" { ... }
 
 # ========== ALB Ingress: CloudFront VPC Origin 전용 (과제지 10-1) ==========
-# Internal ALB는 CloudFront를 거치지 않는 모든 요청(내부망 포함)을 거절해야 한다.
-# VPC Origin 생성 시 CloudFront가 만드는 서비스 관리형 SG에서만 80을 허용한다.
-data "aws_security_group" "cloudfront_vpc_origin" {
-  filter {
-    name   = "group-name"
-    values = ["CloudFront-VPCOrigins-Service-SG*"]
-  }
-  filter {
-    name   = "vpc-id"
-    values = [local.vpc_id]
-  }
-
-  depends_on = [module.CloudFront]
-}
-
-resource "aws_security_group_rule" "alb_from_cloudfront" {
-  type                     = "ingress"
-  security_group_id        = module.ALB.alb_sg_id
-  from_port                = 80
-  to_port                  = 80
-  protocol                 = "tcp"
-  source_security_group_id = data.aws_security_group.cloudfront_vpc_origin.id
-  description              = "Allow only CloudFront VPC origin (req 10-1)"
+# 생성 순서는 각 모듈에서 보장한다.
+# 1) ALB module: CloudFront origin-facing managed prefix list를 먼저 허용
+# 2) CloudFront module: VPC Origin 배포 후 service-managed SG를 ALB에 허용
+# 3) 그 뒤 Distribution 배포
+# 기존 root state 주소가 있으면 새 module 주소로 자동 이동한다.
+moved {
+  from = aws_security_group_rule.alb_from_cloudfront
+  to   = module.CloudFront.aws_security_group_rule.alb_from_vpc_origin
 }
 
 

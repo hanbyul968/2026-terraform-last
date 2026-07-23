@@ -136,10 +136,11 @@ resource "aws_security_group" "bastion" {
 # ---- user_data: 도구 설치 + 코드 번들 자동 준비 ----
 locals {
   user_data = templatefile("${path.module}/userdata.sh.tpl", {
-    bucket    = aws_s3_bucket.bootstrap.id
-    key       = aws_s3_object.task1_bundle.key
-    region    = var.region
-    player_id = var.player_id
+    bucket      = aws_s3_bucket.bootstrap.id
+    key         = aws_s3_object.task1_bundle.key
+    region      = var.region
+    player_id   = var.player_id
+    bundle_hash = data.archive_file.task1.output_base64sha256
   })
 }
 
@@ -151,8 +152,9 @@ resource "aws_instance" "bastion" {
   vpc_security_group_ids      = [aws_security_group.bastion.id]
   associate_public_ip_address = true
 
-  # 번들 내용이 바뀌면 user_data 해시가 바뀌어 인스턴스가 교체된다.
-  user_data = local.user_data
+  # 번들 내용이 바뀌면 user_data 해시가 바뀌고 인스턴스를 교체하여 cloud-init을 다시 실행한다.
+  user_data                   = local.user_data
+  user_data_replace_on_change = true
 
   metadata_options {
     http_tokens   = "required" # IMDSv2 강제

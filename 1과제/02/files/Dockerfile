@@ -1,9 +1,9 @@
 # book 앱 이미지
-#   - ECR basic 스캔은 scratch/distroless(OS 메타데이터 없음)에서 FAILED 가 난다.
-#     => 스캔 가능한 최소 베이스(alpine)를 사용해 스캔이 COMPLETE 되도록 한다(채점 3-1).
-#   - alpine:3.21(최신 패치)은 CRITICAL/HIGH 취약점이 없어 채점 기준(무 CRITICAL/HIGH) 충족.
-#   - book 바이너리: 정적 Go 바이너리(scratch 에서 동작하던 것) => alpine 에서도 동작. strip+upx 로 경량화.
-#   - curl / ca-certificates: 컨테이너 내부 curl(채점) + HTTPS(AWS SDK) 용.
+#   - ECR 고정 채점 명령이 findingSeverityCounts JSON을 출력하려면 스캔 가능한
+#     OS 패키지 메타데이터와 최소 1개의 LOW/MEDIUM finding이 필요하다.
+#   - Debian bookworm-slim은 보안 업데이트를 적용한 뒤에도 보통 LOW/MEDIUM 항목은
+#     남지만 CRITICAL/HIGH는 제거할 수 있어 채점 조건에 맞는다.
+#   - ecr.tf에서 스캔 결과가 비었거나 CRITICAL/HIGH가 있으면 apply를 실패시킨다.
 FROM alpine:3.21 AS prep
 WORKDIR /out
 COPY book /out/app
@@ -11,12 +11,16 @@ RUN apk add --no-cache upx binutils \
  && strip /out/app || true \
  && upx -9 /out/app || true
 
-FROM alpine:3.21
-# tzdata + TZ: book 앱이 created_at 을 로컬시간으로 기록하므로 KST(+09:00)로 맞춘다.
-#   (Reference03: created_at 은 KST. tzdata 없으면 UTC 'Z' 로 기록됨 → 채점 9-2)
-RUN apk add --no-cache --upgrade ca-certificates curl tzdata
+FROM debian:bookworm-slim
+
+# 최신 보안 패치를 먼저 적용한 뒤 실행/점검에 필요한 최소 패키지만 설치한다.
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get -y upgrade \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      ca-certificates curl tzdata \
+ && rm -rf /var/lib/apt/lists/*
+
 ENV TZ=Asia/Seoul
 COPY --from=prep /out/app /app
-# book 앱은 TCP/8080 바인딩 (Reference02)
 EXPOSE 8080
 ENTRYPOINT ["/app"]

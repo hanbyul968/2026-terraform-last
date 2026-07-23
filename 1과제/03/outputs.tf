@@ -26,3 +26,9 @@ output "alb_dns" {
 # (제거됨) bastion_public_ip — VPC 내부 배포용 bastion 은 외부 bastion/ 스테이지로
 # 대체되어 bastion.tf 가 bastion.tf.OLD-in-main 으로 비활성화되었다.
 
+
+
+output "cloudfront_distribution_id" {
+  description = "CloudFront 배포 ID (배포 완료 waiter 및 점검용)"
+  value       = try(aws_cloudfront_distribution.this[0].id, "")
+}

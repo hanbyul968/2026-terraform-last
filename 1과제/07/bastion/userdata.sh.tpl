@@ -52,18 +52,79 @@ cat > /opt/task1/terraform.tfvars <<TFVARS
 number = "${number}"
 TFVARS
 
-# ---- 6) 원클릭 실행 스크립트 ----
-cat > /opt/task1/run.sh <<'RUN'
+# ---- 6) 연결 독립형 Terraform worker + 원클릭 실행기 ----
+# SSM WebSocket이 끊겨도 systemd unit은 Bastion에서 계속 실행된다.
+cat > /opt/task1/terraform-apply-worker.sh <<'WORKER'
 #!/bin/bash
-# main(루트 1과제) 인프라를 한 번에 배포한다.
-#  - 변수는 /opt/task1/terraform.tfvars (number) 로 자동 로드된다.
-set -e
+set -Eeuo pipefail
 cd /opt/task1
+rm -f /opt/task1/TERRAFORM_APPLY_SUCCESS
+
 terraform init -input=false
-terraform apply -auto-approve
+
+# 이전 SSM 세션이 리소스 생성 도중 끊겨 state에 기록되지 않은 VPC Origin이
+# 이미 Deployed 상태라면 안전하게 import한 뒤 apply를 이어간다.
+TF_ADDRESS="module.CloudFront.aws_cloudfront_vpc_origin.alb"
+if ! terraform state show "$TF_ADDRESS" >/dev/null 2>&1; then
+  VPC_ORIGIN_ID=$(aws cloudfront list-vpc-origins \
+    --query "VpcOriginList.Items[?Name=='app-origin'].Id | [0]" \
+    --output text 2>/dev/null || true)
+
+  if [ -n "$VPC_ORIGIN_ID" ] && [ "$VPC_ORIGIN_ID" != "None" ]; then
+    echo "Found unmanaged VPC Origin: $VPC_ORIGIN_ID"
+    for i in $(seq 1 120); do
+      STATUS=$(aws cloudfront get-vpc-origin --id "$VPC_ORIGIN_ID" \
+        --query "VpcOrigin.Status" --output text 2>/dev/null || echo "Unknown")
+      echo "VPC Origin recovery status: $STATUS ($i/120)"
+      case "$STATUS" in
+        Deployed)
+          terraform import -input=false "$TF_ADDRESS" "$VPC_ORIGIN_ID"
+          break
+          ;;
+        Failed|Deleting|Unknown)
+          echo "Cannot safely import VPC Origin in status $STATUS." >&2
+          exit 1
+          ;;
+      esac
+      sleep 10
+    done
+
+    if ! terraform state show "$TF_ADDRESS" >/dev/null 2>&1; then
+      echo "VPC Origin did not become Deployed within 20 minutes; inspect it before retrying." >&2
+      exit 1
+    fi
+  fi
+fi
+
+terraform apply -input=false -auto-approve
+
 echo ""
 echo "================= OUTPUTS ================="
 terraform output || true
+touch /opt/task1/TERRAFORM_APPLY_SUCCESS
+WORKER
+chmod +x /opt/task1/terraform-apply-worker.sh
+
+cat > /opt/task1/run.sh <<'RUN'
+#!/bin/bash
+set -Eeuo pipefail
+UNIT="unicorn-task1-terraform"
+
+if sudo systemctl is-active --quiet "$UNIT"; then
+  echo "Terraform apply is already running in $UNIT. Following logs..."
+else
+  sudo systemctl reset-failed "$UNIT" 2>/dev/null || true
+  sudo systemd-run \
+    --unit="$UNIT" \
+    --collect \
+    --property=Type=exec \
+    --property=TimeoutStartSec=infinity \
+    /bin/bash /opt/task1/terraform-apply-worker.sh
+  echo "Started $UNIT. The apply will survive SSM disconnection."
+fi
+
+echo "Reconnect command: sudo journalctl -fu $UNIT"
+sudo journalctl -fu "$UNIT"
 RUN
 chmod +x /opt/task1/run.sh
 

@@ -72,47 +72,35 @@ sudo bash /opt/task2/deploy.sh <선수등번호>
 
 ---
 
-## 🚀 All-in-One 배포 (apply 한 번에 1~4 모듈 전부)
+## 🚀 All-in-One 배포 (Windows에서 apply 한 번에 1~4 모듈)
 
-> ℹ️ 이 루트 오케스트레이터(`main.tf`)는 `local-exec` 가 **`/bin/bash` 로 변환**되어 있어
-> **Linux Bastion 안**에서 실행하는 대안 경로입니다. 위 `deploy.sh` 와 동일한 순서/결과이며,
-> 표준 경로는 **`deploy.sh`** 입니다. (Windows 로컬에서 이 루트를 apply 하지 마세요.)
-
-최상위 디렉터리(`2과제/`)에 **오케스트레이터 루트**(`main.tf`)가 있습니다.
-여기서 `terraform apply` **한 번**이면 module1~4 를 순서대로 `init + apply` 하고,
-module4 는 `setup.sh`(이미지 빌드/Helm/대시보드)까지 자동 실행합니다.
+루트 `main.tf`는 Windows PowerShell에서 각 하위 Terraform 모듈을 실행합니다. 별도의 S3 backend나 import 없이 각 모듈 디렉터리의 로컬 state를 사용하므로 새 PC·새 AWS 계정에서 바로 실행할 수 있습니다. Module 3의 KEDA/Karpenter/App은 생성된 SSM Bastion에서 배포하며, Module 4의 `setup.sh`만 로컬 Git Bash와 Docker Desktop을 사용합니다.
 
 ```powershell
-# 최상위(2과제) 디렉터리에서
 cd "C:\Users\competitor\2026-terraform\2과제\07"
 terraform init
 terraform apply -var="competitor_number=<선수등번호>"
 ```
 
-- 내부 동작: `null_resource` + `local-exec` 가 각 모듈 디렉터리에서 `terraform -chdir=moduleN apply` 를 호출합니다.
-  각 모듈은 **자체 state 를 그대로 유지**하므로, 개별 `cd moduleN && terraform apply` 도 계속 가능합니다.
-- 실행 순서: module1 → module2 → module3 → module4 (docker/kubeconfig 충돌 방지를 위해 3·4는 순차).
-- **사전 조건**: docker 동작 환경 + `aws/terraform/kubectl/helm/jq/bash(Git Bash)`. CloudShell 불가.
+- 실행 순서: module1·module2 → module3(SSM 후처리 포함) → module4(Git Bash 후처리 포함)
+- `timestamp()` trigger와 destroy-time provisioner를 사용하지 않습니다. 평범한 재실행은 하위 인프라를 먼저 삭제하지 않으며, 입력 파일이 바뀐 모듈만 다시 apply합니다.
+- 사전 조건: `aws`, `terraform`, PowerShell, Git Bash, 실행 중인 Docker Desktop, `kubectl`, `helm`, `jq`
+- Docker Desktop이 꺼져 있으면 Module 4 시작 전에 명확한 오류로 중단됩니다. Docker Desktop을 시작한 뒤 같은 명령을 다시 실행하면 됩니다.
 
 | 변수 | 설명 | 기본값 |
 |------|------|--------|
 | `competitor_number` | 선수등번호 (필수) | — |
-| `git_bash_path` | module4 `setup.sh` 실행용 bash 경로 | `C:\Program Files\Git\bin\bash.exe` |
-| `run_module4_setup` | `false` 면 module4 의 setup.sh 자동 실행을 건너뜀 | `true` |
+| `git_bash_path` | module4 `setup.sh` 실행용 Bash 경로 | `C:\Program Files\Git\bin\bash.exe` |
+| `run_module3_setup` | `false`면 KEDA/Karpenter/App 후처리를 건너뜀 | `true` |
+| `run_module4_setup` | `false`면 Loki/Grafana/OTel 후처리를 건너뜀 | `true` |
 
 ```powershell
-# setup.sh 자동 실행을 끄고 인프라까지만 (setup.sh 는 수동으로 따로 실행)
-terraform apply -var="competitor_number=<번호>" -var="run_module4_setup=false"
+# 인프라만 적용하고 Kubernetes 후처리는 건너뛰는 예시
+terraform apply -var="competitor_number=<번호>" `
+  -var="run_module3_setup=false" -var="run_module4_setup=false"
 ```
 
-**전체 정리(역순 destroy)**:
-```powershell
-terraform destroy -var="competitor_number=<선수등번호>"
-# module4 Helm 릴리스 제거 → module4/3/2/1 순으로 각 모듈 destroy 까지 자동 수행
-```
-
-> ℹ️ 오케스트레이터는 매 apply 마다 각 모듈을 다시 호출(`timestamp()` 트리거)합니다.
-> 특정 모듈만 다시 돌리고 싶으면 아래 **개별 실행법**을 사용하세요.
+> **삭제 주의:** 루트 `terraform destroy`는 오케스트레이터의 null_resource만 제거하며 AWS 하위 리소스를 삭제하지 않습니다. 실제 전체 삭제는 이 문서 아래의 **리소스 정리(Teardown)** 절에 따라 module4 → module3 → module2 → module1 순서로 수행하세요.
 
 ---
 

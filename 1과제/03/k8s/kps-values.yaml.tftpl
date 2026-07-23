@@ -1,35 +1,46 @@
-# kube-prometheus-stack values  (과제 11)
-# Prometheus + Alertmanager + Grafana + node-exporter + kube-state-metrics
+# kube-prometheus-stack values (문제지 Reference02)
 
-# ── Prometheus ──
 prometheus:
   prometheusSpec:
     retention: 7d
+    evaluationInterval: 15s
     nodeSelector:
       wsc2026/node: addon
-    # 앱 Pod 의 /metrics 스크랩(있을 경우) 및 자기 자신
     podMonitorSelectorNilUsesHelmValues: false
     serviceMonitorSelectorNilUsesHelmValues: false
     ruleSelectorNilUsesHelmValues: false
+  additionalServiceMonitors:
+    - name: wsc2026-book
+      namespaceSelector:
+        matchNames:
+          - wsc2026
+      selector:
+        matchLabels:
+          app: wsc2026-book
+      endpoints:
+        - port: http
+          path: /metrics
+          interval: 15s
+          scrapeTimeout: 10s
 
-# ── Alertmanager ──
 alertmanager:
   enabled: true
   alertmanagerSpec:
     nodeSelector:
       wsc2026/node: addon
 
-# ── node-exporter (모든 노드 DaemonSet) ──
+prometheusOperator:
+  nodeSelector:
+    wsc2026/node: addon
+
 prometheus-node-exporter:
   tolerations:
     - operator: Exists
 
-# ── kube-state-metrics ──
 kube-state-metrics:
   nodeSelector:
     wsc2026/node: addon
 
-# ── Grafana ──
 grafana:
   adminUser: admin
   adminPassword: "${admin_password}"
@@ -44,7 +55,6 @@ grafana:
       service.beta.kubernetes.io/aws-load-balancer-type: external
       service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
       service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
-  # 기본 Prometheus 데이터소스 비활성화 -> 아래 셋을 소문자 이름으로 직접 등록
   sidecar:
     dashboards:
       enabled: true
@@ -55,17 +65,20 @@ grafana:
       defaultDatasourceEnabled: false
   additionalDataSources:
     - name: prometheus
+      uid: prometheus
       type: prometheus
       access: proxy
       url: http://kube-prometheus-stack-prometheus.observability.svc:9090
       isDefault: true
     - name: alertmanager
+      uid: alertmanager
       type: alertmanager
       access: proxy
       url: http://kube-prometheus-stack-alertmanager.observability.svc:9093
       jsonData:
         implementation: prometheus
     - name: cloudwatch
+      uid: cloudwatch
       type: cloudwatch
       access: proxy
       jsonData:
@@ -75,7 +88,6 @@ grafana:
           - arn: ""
             name: ${log_group}
 
-# ── Alert 규칙 (Reference02) ──
 additionalPrometheusRulesMap:
   wsc2026-rules:
     groups:
@@ -83,36 +95,59 @@ additionalPrometheusRulesMap:
         rules:
           - alert: PodHighCPU
             expr: |
-              sum(rate(container_cpu_usage_seconds_total{container!="",namespace="wsc2026"}[2m])) by (pod)
-                / sum(kube_pod_container_resource_limits{resource="cpu",namespace="wsc2026"}) by (pod) > 0.8
+              sum by (namespace, pod) (rate(container_cpu_usage_seconds_total{container!="",namespace="wsc2026"}[2m]))
+                / clamp_min(sum by (namespace, pod) (kube_pod_container_resource_limits{resource="cpu",namespace="wsc2026"}), 0.001) > 0.8
             for: 3m
-            labels: { severity: warning }
-            annotations: { summary: "Pod CPU 80% 초과 3분 이상" }
+            labels:
+              severity: warning
+            annotations:
+              summary: "Pod CPU usage exceeded 80% for 3 minutes"
+
           - alert: PodHighMemory
             expr: |
-              sum(container_memory_working_set_bytes{container!="",namespace="wsc2026"}) by (pod)
-                / sum(kube_pod_container_resource_limits{resource="memory",namespace="wsc2026"}) by (pod) > 0.9
+              sum by (namespace, pod) (container_memory_working_set_bytes{container!="",namespace="wsc2026"})
+                / clamp_min(sum by (namespace, pod) (kube_pod_container_resource_limits{resource="memory",namespace="wsc2026"}), 1) > 0.9
             for: 3m
-            labels: { severity: warning }
-            annotations: { summary: "Pod Memory 90% 초과 3분 이상" }
+            labels:
+              severity: warning
+            annotations:
+              summary: "Pod memory usage exceeded 90% for 3 minutes"
+
           - alert: PodNotReady
             expr: |
-              sum by (pod) (kube_pod_status_phase{namespace="wsc2026",phase=~"Pending|Unknown|Failed"}) > 0
-                or sum by (pod) (kube_pod_container_status_waiting_reason{namespace="wsc2026",reason="CrashLoopBackOff"}) > 0
+              kube_pod_status_ready{namespace="wsc2026",condition="true"} == 0
+                or kube_pod_container_status_waiting_reason{namespace="wsc2026",reason="CrashLoopBackOff"} == 1
             for: 3m
-            labels: { severity: critical }
-            annotations: { summary: "Pod CrashLoopBackOff 또는 3분 이상 NotReady" }
+            labels:
+              severity: critical
+            annotations:
+              summary: "Pod is in CrashLoopBackOff or has not been Ready for 3 minutes"
+
           - alert: HighErrorRate
             expr: |
-              (sum(rate(http_requests_total{namespace="wsc2026",status=~"5.."}[1m]))
-                / clamp_min(sum(rate(http_requests_total{namespace="wsc2026"}[1m])), 1)) > 0.05
+              sum(rate(http_requests_total{namespace="wsc2026",status=~"4..|5.."}[1m]))
+                / clamp_min(sum(rate(http_requests_total{namespace="wsc2026"}[1m])), 0.001) > 0.05
             for: 1m
-            labels: { severity: critical }
-            annotations: { summary: "5xx 비율 5% 초과 1분 이상" }
+            labels:
+              severity: critical
+            annotations:
+              summary: "HTTP 4xx/5xx ratio exceeded 5% for 1 minute"
+
           - alert: HighLatency
             expr: |
-              avg(rate(http_request_duration_seconds_sum{namespace="wsc2026"}[3m])
-                / clamp_min(rate(http_request_duration_seconds_count{namespace="wsc2026"}[3m]), 1)) > 3
+              sum(rate(http_request_duration_seconds_sum{namespace="wsc2026"}[1m]))
+                / clamp_min(sum(rate(http_request_duration_seconds_count{namespace="wsc2026"}[1m])), 0.001) > 3
             for: 3m
-            labels: { severity: warning }
-            annotations: { summary: "평균 응답시간 3초 초과 3분 이상" }
+            labels:
+              severity: warning
+            annotations:
+              summary: "Average response time exceeded 3 seconds for 3 minutes"
+
+          - alert: PodCrashLooping
+            expr: |
+              kube_pod_container_status_restarts_total{namespace="wsc2026"} > 3
+            for: 3m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Container restart count exceeded 3 for 3 minutes"

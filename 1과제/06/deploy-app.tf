@@ -7,11 +7,13 @@
 
 resource "null_resource" "deploy_app" {
   triggers = {
-    manifests  = sha1(join(",", [for f in fileset("${path.module}/k8s", "**") : filesha1("${path.module}/k8s/${f}")]))
-    dockerfile = filemd5("${path.module}/application/Dockerfile")
-    book_tg    = aws_lb_target_group.book.arn
-    grafana_tg = aws_lb_target_group.grafana.arn
-    cluster    = aws_eks_cluster.cluster.name
+    manifests   = sha1(join(",", [for f in fileset("${path.module}/k8s", "**") : filesha1("${path.module}/k8s/${f}")]))
+    script      = filesha1("${path.module}/deploy-app.sh.tpl")
+    dockerfile  = filemd5("${path.module}/application/Dockerfile")
+    book_binary = filesha1("${path.module}/application/book-linux-amd64_v1.0.1")
+    book_tg     = aws_lb_target_group.book.arn
+    grafana_tg  = aws_lb_target_group.grafana.arn
+    cluster     = aws_eks_cluster.cluster.name
   }
 
   provisioner "local-exec" {

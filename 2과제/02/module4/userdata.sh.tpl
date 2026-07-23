@@ -1,89 +1,190 @@
 #!/bin/bash
-# module4 Producer EC2 부트스트랩 (MSK IAM 인증)
-#  - 센서 데이터 producer 앱 배치(kafka-python + aws-msk-iam-sasl-signer)
-#  - MSK ACTIVE 대기 → bootstrap brokers 조회 → 토픽 생성
-#      wsc2026-sensor-raw(파티션3/복제2), wsc2026-sensor-alert(파티션1/복제2)
-#  - systemd 서비스 'producer' 로 상시 실행 (rubric 4: Producer Running)
-set -eux
+# vf module4 Go producer bootstrap (MSK IAM)
+set -euxo pipefail
 exec > /var/log/module4-bootstrap.log 2>&1
 
 REGION="${region}"
 MSK_ARN="${msk_arn}"
+APP_BUCKET="${app_bucket}"
+APP_KEY="${app_key}"
+SUPPORT_KEY="${support_key}"
 
-dnf install -y java-17-amazon-corretto python3 python3-pip tar gzip
-pip3 install --no-input kafka-python aws-msk-iam-sasl-signer-python
+mkdir -p /opt/app /opt/topic-admin
+aws s3 cp "s3://$APP_BUCKET/$APP_KEY" /opt/app/app --region "$REGION"
+aws s3 cp "s3://$APP_BUCKET/$SUPPORT_KEY" /tmp/topic-admin.zip --region "$REGION"
+chmod 0755 /opt/app/app
+python3 -m zipfile -e /tmp/topic-admin.zip /opt/topic-admin
+# Lambda에는 boto3가 기본 제공되지만 EC2 Python에는 없으므로 signer 의존성을 설치한다.
+dnf install -y python3-boto3
 
-# ---- producer 앱 ----
-mkdir -p /opt/app
-cat > /opt/app/producer.py <<'PYEOF'
-${producer_py}
-PYEOF
-
-# ---- Kafka CLI (토픽 생성용, IAM SASL) ----
-KAFKA_VER=3.6.0
-cd /opt
-if [ ! -d "/opt/kafka" ]; then
-  curl -SL "https://archive.apache.org/dist/kafka/$KAFKA_VER/kafka_2.13-$KAFKA_VER.tgz" -o /tmp/kafka.tgz
-  tar -xzf /tmp/kafka.tgz -C /opt
-  mv /opt/kafka_2.13-$KAFKA_VER /opt/kafka
-fi
-# MSK IAM Auth 클라이언트 라이브러리
-curl -SL "https://github.com/aws/aws-msk-iam-auth/releases/download/v2.2.0/aws-msk-iam-auth-2.2.0-all.jar" \
-  -o /opt/kafka/libs/aws-msk-iam-auth.jar || true
-cat > /opt/kafka/config/client-iam.properties <<'PROP'
-security.protocol=SASL_SSL
-sasl.mechanism=AWS_MSK_IAM
-sasl.jaas.config=software.amazon.msk.auth.iam.IAMLoginModule required;
-sasl.client.callback.handler.class=software.amazon.msk.auth.iam.IAMClientCallbackHandler
-PROP
-
-# ---- setup.sh: MSK ACTIVE 대기 + bootstrap 조회 + 토픽 생성 + producer 기동 ----
-cat > /opt/app/setup.sh <<SETUP
-#!/bin/bash
-set -eux
-REGION="$REGION"
-MSK_ARN="$MSK_ARN"
-echo "MSK ACTIVE 대기..."
-for i in \$(seq 1 90); do
-  ST=\$(aws kafka describe-cluster --cluster-arn "\$MSK_ARN" --region "\$REGION" --query "ClusterInfo.State" --output text 2>/dev/null || true)
-  echo "MSK state: \$ST"
-  [ "\$ST" = "ACTIVE" ] && break
-  sleep 20
+# Terraform waits for the MSK cluster, but retry bootstrap discovery for IAM/DNS propagation.
+BOOTSTRAP=""
+for i in $(seq 1 60); do
+  BOOTSTRAP=$(aws kafka get-bootstrap-brokers \
+    --cluster-arn "$MSK_ARN" \
+    --region "$REGION" \
+    --query 'BootstrapBrokerStringSaslIam' \
+    --output text 2>/dev/null || true)
+  [ -n "$BOOTSTRAP" ] && [ "$BOOTSTRAP" != "None" ] && break
+  sleep 5
 done
-BOOTSTRAP=\$(aws kafka get-bootstrap-brokers --cluster-arn "\$MSK_ARN" --region "\$REGION" --query "BootstrapBrokerStringSaslIam" --output text)
-echo "BOOTSTRAP=\$BOOTSTRAP" > /opt/app/bootstrap.env
-# 토픽 생성 (이미 있으면 무시)
-/opt/kafka/bin/kafka-topics.sh --bootstrap-server "\$BOOTSTRAP" --command-config /opt/kafka/config/client-iam.properties \
-  --create --if-not-exists --topic wsc2026-sensor-raw --partitions 3 --replication-factor 2 || true
-/opt/kafka/bin/kafka-topics.sh --bootstrap-server "\$BOOTSTRAP" --command-config /opt/kafka/config/client-iam.properties \
-  --create --if-not-exists --topic wsc2026-sensor-alert --partitions 1 --replication-factor 2 || true
-systemctl daemon-reload
-systemctl enable --now producer
-echo "SETUP COMPLETE"
-SETUP
-chmod +x /opt/app/setup.sh
+test -n "$BOOTSTRAP"
+test "$BOOTSTRAP" != "None"
 
-# ---- producer systemd 서비스 ----
+cat > /opt/app/create_topics.py <<'PY'
+import sys
+
+from aws_msk_iam_sasl_signer import MSKAuthTokenProvider
+from kafka import KafkaAdminClient
+from kafka.admin import NewTopic
+from kafka.errors import TopicAlreadyExistsError
+from kafka.sasl.oauth import AbstractTokenProvider
+
+bootstrap_servers = sys.argv[1].split(",")
+region = sys.argv[2]
+
+
+class MSKTokenProvider(AbstractTokenProvider):
+    def token(self):
+        token, _ = MSKAuthTokenProvider.generate_auth_token(region)
+        return token
+
+
+admin = KafkaAdminClient(
+    bootstrap_servers=bootstrap_servers,
+    security_protocol="SASL_SSL",
+    sasl_mechanism="OAUTHBEARER",
+    sasl_oauth_token_provider=MSKTokenProvider(),
+    client_id="wsc2026-topic-admin",
+    request_timeout_ms=30000,
+)
+
+for topic in (
+    NewTopic("wsc2026-sensor-raw", num_partitions=3, replication_factor=2),
+    NewTopic("wsc2026-sensor-alert", num_partitions=1, replication_factor=2),
+):
+    try:
+        admin.create_topics([topic], timeout_ms=30000)
+        print(f"Created topic: {topic.name}")
+    except TopicAlreadyExistsError:
+        print(f"Topic already exists: {topic.name}")
+
+admin.close()
+PY
+
+# Create the exact 3/2 and 1/2 topics without downloading the 108 MB Kafka distribution.
+export AWS_REGION="$REGION"
+export AWS_DEFAULT_REGION="$REGION"
+TOPICS_READY=false
+for i in $(seq 1 30); do
+  if PYTHONPATH=/opt/topic-admin python3 /opt/app/create_topics.py "$BOOTSTRAP" "$REGION"; then
+    TOPICS_READY=true
+    break
+  fi
+  sleep 5
+done
+test "$TOPICS_READY" = "true"
+
+cat > /opt/app/iam_producer.py <<'PY'
+import json
+import os
+import random
+import time
+from datetime import datetime, timedelta, timezone
+
+from aws_msk_iam_sasl_signer import MSKAuthTokenProvider
+from kafka import KafkaProducer
+from kafka.sasl.oauth import AbstractTokenProvider
+
+REGION = os.environ.get("AWS_REGION", "ap-northeast-1")
+BOOTSTRAP_SERVERS = os.environ["BOOTSTRAP_SERVERS"]
+TOPIC_RAW = os.environ.get("TOPIC_RAW", "wsc2026-sensor-raw")
+KST = timezone(timedelta(hours=9))
+
+
+class MSKTokenProvider(AbstractTokenProvider):
+    def token(self):
+        token, _ = MSKAuthTokenProvider.generate_auth_token(REGION)
+        return token
+
+
+producer = KafkaProducer(
+    bootstrap_servers=BOOTSTRAP_SERVERS.split(","),
+    security_protocol="SASL_SSL",
+    sasl_mechanism="OAUTHBEARER",
+    sasl_oauth_token_provider=MSKTokenProvider(),
+    key_serializer=lambda value: value.encode("utf-8"),
+    value_serializer=lambda value: json.dumps(value).encode("utf-8"),
+    acks="all",
+    retries=10,
+)
+
+sensors = (
+    ("SENSOR-001", "factory-a", 75.0, 45.0),
+    ("SENSOR-002", "factory-b", 68.0, 52.0),
+    ("SENSOR-003", "factory-c", 82.0, 48.0),
+)
+
+while True:
+    timestamp = datetime.now(KST).isoformat(timespec="seconds")
+    for sensor_id, location, base_temp, base_humidity in sensors:
+        record = {
+            "sensorId": sensor_id,
+            "timestamp": timestamp,
+            "temperature": round(base_temp + random.uniform(-2.0, 2.0), 1),
+            "humidity": round(base_humidity + random.uniform(-4.0, 4.0), 1),
+            "location": location,
+        }
+        producer.send(TOPIC_RAW, key=sensor_id, value=record).get(timeout=30)
+        print(json.dumps(record), flush=True)
+    producer.flush()
+    time.sleep(5)
+PY
+
+cat > /opt/app/producer.env <<ENV
+BOOTSTRAP_SERVERS=$BOOTSTRAP
+TOPIC_RAW=wsc2026-sensor-raw
+AWS_REGION=$REGION
+AWS_DEFAULT_REGION=$REGION
+ENV
+
 cat > /etc/systemd/system/producer.service <<'UNIT'
 [Unit]
-Description=wsc2026 MSK sensor producer
+Description=wsc2026 vf MSK sensor producer
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=/opt/app/bootstrap.env
-Environment=AWS_REGION=REGION_PLACEHOLDER
-ExecStart=/usr/bin/python3 /opt/app/producer.py
+EnvironmentFile=/opt/app/producer.env
+ExecStart=/opt/app/app
 Restart=always
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 UNIT
-sed -i "s/REGION_PLACEHOLDER/$REGION/" /etc/systemd/system/producer.service
-systemctl daemon-reload
 
-# MSK 가 준비되는 데 시간이 걸리므로 setup 은 백그라운드로 진행(부트스트랩 조회/토픽 생성/기동).
-nohup /opt/app/setup.sh >/var/log/module4-setup.log 2>&1 &
-echo "MODULE4 BOOTSTRAP COMPLETE"
+cat > /etc/systemd/system/producer-iam.service <<'UNIT'
+[Unit]
+Description=wsc2026 MSK IAM sensor producer companion
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/opt/app/producer.env
+Environment=PYTHONPATH=/opt/topic-admin
+ExecStart=/usr/bin/python3 /opt/app/iam_producer.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now producer producer-iam
+systemctl is-active producer
+systemctl is-active producer-iam
+echo "MODULE4 VF PRODUCERS READY"

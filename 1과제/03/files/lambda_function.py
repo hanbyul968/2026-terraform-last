@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 from datetime import datetime, timezone, timedelta
@@ -5,7 +6,11 @@ from datetime import datetime, timezone, timedelta
 import boto3
 from boto3.dynamodb.conditions import Key
 
-TABLE_NAME = os.environ["TABLE_NAME"]
+# TABLE_NAME에는 Terraform이 생성한 base64 KMS CiphertextBlob이 저장된다.
+kms = boto3.client("kms")
+TABLE_NAME = kms.decrypt(
+    CiphertextBlob=base64.b64decode(os.environ["TABLE_NAME"]),
+)["Plaintext"].decode("utf-8")
 INDEX_NAME = os.environ.get("INDEX_NAME", "booking_id-index")
 
 dynamodb = boto3.resource("dynamodb")

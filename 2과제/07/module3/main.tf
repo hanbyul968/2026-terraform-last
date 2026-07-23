@@ -1,8 +1,4 @@
 terraform {
-  # 원격 state(S3) — bucket/key/region 은 deploy.sh 가 -backend-config 로 주입.
-  # (단독: terraform init -backend-config="bucket=..." -backend-config="key=task2-06/module3.tfstate" -backend-config="region=ap-northeast-2")
-  backend "s3" {}
-
   required_providers {
     aws = {
       source  = "hashicorp/aws"
@@ -135,36 +131,10 @@ resource "aws_eks_cluster" "main" {
   depends_on = [aws_iam_role_policy_attachment.eks_cluster_policy]
 }
 
-# === 채점용: terraform을 실행한 IAM 주체에 EKS Cluster Admin 부여 ===
-# 대회 때 terraform을 apply한 계정(IAM User/Role)이 CloudShell에서 kubectl로
-# 채점할 수 있도록, 호출 주체에 AmazonEKSClusterAdminPolicy access entry를 연결한다.
-locals {
-  caller_arn = data.aws_caller_identity.current.arn
-  # STS assumed-role 세션 ARN(arn:aws:sts::...:assumed-role/ROLE/SESSION)을
-  # access entry가 요구하는 IAM Role ARN(arn:aws:iam::...:role/ROLE)으로 변환.
-  # IAM User ARN(arn:aws:iam::...:user/NAME)은 그대로 사용.
-  grader_principal_arn = can(regex(":assumed-role/", local.caller_arn)) ? format(
-    "arn:aws:iam::%s:role/%s",
-    data.aws_caller_identity.current.account_id,
-    element(split("/", local.caller_arn), 1)
-  ) : local.caller_arn
-}
-
-resource "aws_eks_access_entry" "creator" {
-  cluster_name  = aws_eks_cluster.main.name
-  principal_arn = local.grader_principal_arn
-  type          = "STANDARD"
-}
-
-resource "aws_eks_access_policy_association" "creator" {
-  cluster_name  = aws_eks_cluster.main.name
-  principal_arn = local.grader_principal_arn
-  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
-  access_scope {
-    type = "cluster"
-  }
-  depends_on = [aws_eks_access_entry.creator]
-}
+# === EKS Cluster Admin access entry 안내 ===
+# user(생성자/채점자) access entry 는 대회장에서 직접 등록하므로 여기서 만들지 않는다.
+# (bootstrap_cluster_creator_admin_permissions = false 이므로 자동 부여도 없음)
+# 배포에 필요한 bastion access entry 만 아래에서 생성한다.
 
 # Addon NodeGroup IAM Role
 resource "aws_iam_role" "addon_ng" {
@@ -513,8 +483,8 @@ resource "aws_s3_object" "m_keda" {
 # ※ replace(..., "\r", "") : main.tf 가 CRLF 로 저장돼 있어도 env.sh 는 LF 로 업로드.
 #   (CRLF 면 Linux 에서 source 시 REGION="...\r" 가 되어 aws/docker 가 깨짐)
 resource "aws_s3_object" "env_sh" {
-  bucket  = aws_s3_bucket.deploy.id
-  key     = "env.sh"
+  bucket = aws_s3_bucket.deploy.id
+  key    = "env.sh"
   content = replace(<<-EOT
     export REGION="${data.aws_region.current.name}"
     export ECR_REPO="${aws_ecr_repository.app.repository_url}"
@@ -613,6 +583,19 @@ resource "aws_security_group" "bastion" {
   tags = { Name = "skm-bastion-sg" }
 }
 
+# Bastion 은 skm-vpc 내부에 있어 클러스터 DNS 가 EKS private endpoint IP 를 반환한다.
+# EKS control plane 을 보호하는 cluster security group 에 bastion 의 443 inbound 를
+# 허용하지 않으면 kubectl/helm 이 i/o timeout 으로 실패한다. (deploy.sh 의 근본 오류)
+resource "aws_security_group_rule" "cluster_from_bastion" {
+  type                     = "ingress"
+  from_port                = 443
+  to_port                  = 443
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.bastion.id
+  security_group_id        = aws_eks_cluster.main.vpc_config[0].cluster_security_group_id
+  description              = "Allow bastion kubectl/helm to reach EKS API (private endpoint)"
+}
+
 resource "aws_instance" "bastion" {
   ami                         = data.aws_ami.al2023.id
   instance_type               = "t3.small"
@@ -649,7 +632,8 @@ EOF
 
   depends_on = [
     aws_eks_node_group.addon,
-    aws_eks_access_policy_association.creator,
+    aws_eks_access_policy_association.bastion,
+    aws_security_group_rule.cluster_from_bastion,
     aws_eks_addon.coredns,
     aws_s3_object.app_py,
     aws_s3_object.dockerfile,

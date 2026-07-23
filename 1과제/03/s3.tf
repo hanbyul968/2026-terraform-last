@@ -36,7 +36,7 @@ resource "aws_s3_object" "index" {
   bucket       = aws_s3_bucket.static.id
   key          = "static/index.html"
   source       = "${path.module}/files/index.html"
-  source_hash         = filemd5("${path.module}/files/index.html")
+  source_hash  = filemd5("${path.module}/files/index.html")
   content_type = "text/html"
   kms_key_id   = local.kms_bucket_arn
   depends_on   = [aws_s3_bucket_server_side_encryption_configuration.static]
@@ -46,7 +46,7 @@ resource "aws_s3_object" "main" {
   bucket       = aws_s3_bucket.static.id
   key          = "static/main.jpeg"
   source       = "${path.module}/files/main.jpeg"
-  source_hash         = filemd5("${path.module}/files/main.jpeg")
+  source_hash  = filemd5("${path.module}/files/main.jpeg")
   content_type = "image/jpeg"
   kms_key_id   = local.kms_bucket_arn
   depends_on   = [aws_s3_bucket_server_side_encryption_configuration.static]
@@ -69,4 +69,15 @@ resource "aws_s3_bucket_policy" "static" {
     }]
   })
   depends_on = [aws_s3_bucket_public_access_block.static]
+}
+
+
+# 채점 스크립트는 static/ 폴더 마커까지 head-object로 KMS 키를 확인한다.
+resource "aws_s3_object" "static_prefix" {
+  bucket       = aws_s3_bucket.static.id
+  key          = "static/"
+  content      = ""
+  content_type = "application/x-directory"
+  kms_key_id   = local.kms_bucket_arn
+  depends_on   = [aws_s3_bucket_server_side_encryption_configuration.static]
 }

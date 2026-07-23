@@ -50,6 +50,16 @@ echo "=== Approve kubelet-serving CSRs ==="
 kubectl get csr -o jsonpath='{range .items[?(@.spec.signerName=="kubernetes.io/kubelet-serving")]}{.metadata.name}{"\n"}{end}' \
   | xargs -r kubectl certificate approve || true
 
+# DaemonSet을 제외한 모든 addon은 addon NodeGroup에서만 실행되어야 한다.
+echo "=== Pin CoreDNS to addon nodes ==="
+for i in $(seq 1 60); do
+  kubectl get deployment coredns -n kube-system >/dev/null 2>&1 && break
+  sleep 5
+done
+kubectl patch deployment coredns -n kube-system --type merge \
+  -p '{"spec":{"template":{"spec":{"nodeSelector":{"role":"addon"}}}}}'
+kubectl rollout status deployment/coredns -n kube-system --timeout=300s
+
 echo "=== Mirror grafana / fluent-bit / LBC / nginx images to ECR ==="
 docker pull grafana/grafana:12.3.1
 docker tag grafana/grafana:12.3.1 "$REGISTRY/grafana:12.3.1"
@@ -102,15 +112,17 @@ helm repo update
 helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
   -n kube-system \
   --set clusterName="$CLUSTER_NAME" \
+  --set replicaCount=2 \
+  --set nodeSelector.role=addon \
   --set serviceAccount.create=false \
   --set serviceAccount.name=aws-load-balancer-controller \
   --set image.repository="$REGISTRY/aws-load-balancer-controller" \
   --set image.tag=v3.4.0 \
   --set enableServiceMutatorWebhook=false
-kubectl rollout status deployment/aws-load-balancer-controller -n kube-system --timeout=180s
+kubectl rollout status deployment/aws-load-balancer-controller -n kube-system --timeout=300s
 # 이전 실행에서 stale IRSA 로 떠 있던 LBC pod 의 credential 캐시를 비우기 위해 재시작
 kubectl -n kube-system rollout restart deployment/aws-load-balancer-controller
-kubectl rollout status deployment/aws-load-balancer-controller -n kube-system --timeout=180s
+kubectl rollout status deployment/aws-load-balancer-controller -n kube-system --timeout=300s
 
 echo "=== Wait for LBC webhook to respond ==="
 until [ -n "$(kubectl get endpoints aws-load-balancer-webhook-service -n kube-system -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null)" ]; do
@@ -129,6 +141,7 @@ kubectl create serviceaccount book-sa -n skills 2>/dev/null || true
 kubectl annotate serviceaccount book-sa -n skills \
   eks.amazonaws.com/role-arn=arn:aws:iam::$ACCOUNT_ID:role/gj2026-book-app-role --overwrite
 sed "s|PLACEHOLDER_ACCOUNT_ID|$ACCOUNT_ID|g" "$BASEDIR/k8s/book.yaml" | kubectl apply -f -
+kubectl rollout status deployment/book -n skills --timeout=300s
 
 echo "=== TargetGroupBindings (book / grafana) ==="
 sed -e "s|PLACEHOLDER_BOOK_TG|$BOOK_TG_ARN|g" -e "s|PLACEHOLDER_GRAFANA_TG|$GRAFANA_TG_ARN|g" \
@@ -139,6 +152,7 @@ kubectl apply -f "$BASEDIR/k8s/network-policy.yaml"
 
 echo "=== nginx pre-puller (4-5 nginx-test 이미지 모든 노드에 미리 캐싱) ==="
 sed "s|PLACEHOLDER_ACCOUNT_ID|$ACCOUNT_ID|g" "$BASEDIR/k8s/nginx-prepuller.yaml" | kubectl apply -f -
+kubectl rollout status daemonset/nginx-prepuller -n skills --timeout=300s
 
 echo "=== Grafana (IRSA + helm) ==="
 kubectl create serviceaccount grafana -n monitoring 2>/dev/null || true
@@ -149,6 +163,7 @@ helm repo update
 sed "s|PLACEHOLDER_ACCOUNT_ID|$ACCOUNT_ID|g" "$BASEDIR/k8s/grafana-values.yaml" > /tmp/grafana-values.yaml
 helm upgrade --install grafana grafana/grafana -n monitoring -f /tmp/grafana-values.yaml
 kubectl apply -f "$BASEDIR/k8s/grafana.yaml"
+kubectl rollout status deployment/grafana -n monitoring --timeout=300s
 
 echo "=== IRSA for Fluent Bit (10-1) ==="
 cat > /tmp/fb-trust.json <<TRUSTEOF
@@ -170,6 +185,7 @@ kubectl create serviceaccount fluent-bit-sa -n logging 2>/dev/null || true
 kubectl annotate serviceaccount fluent-bit-sa -n logging \
   eks.amazonaws.com/role-arn=arn:aws:iam::$ACCOUNT_ID:role/FluentBitRole --overwrite
 sed "s|PLACEHOLDER_ACCOUNT_ID|$ACCOUNT_ID|g" "$BASEDIR/k8s/fluentbit.yaml" | kubectl apply -f -
+kubectl rollout status daemonset/aws-for-fluent-bit -n logging --timeout=300s
 
 echo "=== Done. Pods: ==="
 kubectl get pods -A || true

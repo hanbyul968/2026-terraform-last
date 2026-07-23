@@ -22,14 +22,50 @@ resource "aws_cloudfront_vpc_origin" "alb" {
       quantity = 1
     }
   }
+
+  # AWS documents that VPC Origin deployment can take up to 15 minutes.
+  # Keep a wider provider timeout so a healthy deployment is not cancelled.
+  timeouts {
+    create = "30m"
+    update = "30m"
+    delete = "30m"
+  }
+}
+
+# CloudFront creates this service-managed SG when the first VPC Origin is
+# deployed. Add it as an ALB source before deploying the distribution.
+data "aws_security_group" "vpc_origin_service" {
+  filter {
+    name   = "group-name"
+    values = ["CloudFront-VPCOrigins-Service-SG"]
+  }
+
+  filter {
+    name   = "vpc-id"
+    values = [var.vpc_id]
+  }
+
+  depends_on = [aws_cloudfront_vpc_origin.alb]
+}
+
+resource "aws_security_group_rule" "alb_from_vpc_origin" {
+  type                     = "ingress"
+  security_group_id        = var.alb_sg_id
+  from_port                = 80
+  to_port                  = 80
+  protocol                 = "tcp"
+  source_security_group_id = data.aws_security_group.vpc_origin_service.id
+  description              = "Allow only the CloudFront VPC Origin service SG"
 }
 
 # CloudFront Distribution
 resource "aws_cloudfront_distribution" "this" {
-  comment             = var.distribution_comment
-  enabled             = true
-  price_class         = "PriceClass_All"
-  web_acl_id          = aws_wafv2_web_acl.this.arn
+  comment     = var.distribution_comment
+  enabled     = true
+  price_class = "PriceClass_All"
+  web_acl_id  = aws_wafv2_web_acl.this.arn
+
+  depends_on = [aws_security_group_rule.alb_from_vpc_origin]
 
   origin {
     domain_name              = "${var.s3_bucket_id}.s3.${data.aws_region.current.name}.amazonaws.com"

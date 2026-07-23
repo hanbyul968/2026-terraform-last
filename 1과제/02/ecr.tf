@@ -45,6 +45,7 @@ resource "null_resource" "build_push_book" {
     binary     = filemd5("${path.module}/files/book")
     repo       = aws_ecr_repository.book.repository_url
     tag        = local.image_tag
+    scan_logic = "v3-empty-map-and-severity-check"
   }
 
   # main 은 Linux Bastion 에서 apply 된다 (bastion/ 1단계 참고). bash + docker.
@@ -64,19 +65,60 @@ resource "null_resource" "build_push_book" {
       docker build --platform linux/amd64 --provenance=false -t "$IMAGE" "$CTX"
       docker push "$IMAGE"
 
-      # 스캔이 COMPLETE 될 때까지 대기. 스캔이 아직 없으면(SCAN_ON_PUSH 지연/미동작)
-      # start-image-scan 을 재시도한다. (채점 3-1 describe-image-scan-findings)
-      for i in $(seq 1 36); do
-        ST=$(aws ecr describe-image-scan-findings --repository-name "$REPO" \
+      # scanOnPush가 늦게 시작될 수 있으므로 상태를 확인하며 명시적 시작도 재시도한다.
+      # COMPLETE가 아니면 apply를 실패시켜 채점 시 빈 출력으로 넘어가지 않게 한다.
+      SCAN_STATUS="NOTFOUND"
+      for i in $(seq 1 60); do
+        SCAN_STATUS=$(aws ecr describe-image-scan-findings --repository-name "$REPO" \
           --image-id imageTag="$TAG" --region "$REGION" \
-          --query 'imageScanStatus.status' --output text 2>/dev/null || echo NOTFOUND)
-        if [ "$ST" = "COMPLETE" ]; then echo "ECR scan COMPLETE"; break; fi
-        if [ "$ST" = "NOTFOUND" ] || [ "$ST" = "FAILED" ]; then
-          aws ecr start-image-scan --repository-name "$REPO" --image-id imageTag="$TAG" \
-            --region "$REGION" >/dev/null 2>&1 || true
+          --query 'imageScanStatus.status' --output text 2>/dev/null || true)
+        [ -n "$SCAN_STATUS" ] || SCAN_STATUS="NOTFOUND"
+
+        if [ "$SCAN_STATUS" = "COMPLETE" ]; then
+          COUNTS=$(aws ecr describe-image-scan-findings --repository-name "$REPO" \
+            --image-id imageTag="$TAG" --region "$REGION" \
+            --query 'imageScanFindings.findingSeverityCounts' --output json)
+          # AWS CLI는 빈 map({})을 JMESPath로 직접 조회하면 출력하지 않을 수 있다.
+          [ -n "$COUNTS" ] || COUNTS='{}'
+
+          CRITICAL=$(aws ecr describe-image-scan-findings --repository-name "$REPO" \
+            --image-id imageTag="$TAG" --region "$REGION" \
+            --query 'imageScanFindings.findingSeverityCounts.CRITICAL || `0`' --output text)
+          HIGH=$(aws ecr describe-image-scan-findings --repository-name "$REPO" \
+            --image-id imageTag="$TAG" --region "$REGION" \
+            --query 'imageScanFindings.findingSeverityCounts.HIGH || `0`' --output text)
+
+          echo "ECR scan COMPLETE - findingSeverityCounts:"
+          echo "$COUNTS"
+          if [ "$COUNTS" = "{}" ]; then
+            echo "ECR scan rejected: findingSeverityCounts is empty" >&2
+            exit 1
+          fi
+          if [ "$CRITICAL" != "0" ] || [ "$HIGH" != "0" ]; then
+            echo "ECR scan rejected: CRITICAL=$CRITICAL, HIGH=$HIGH" >&2
+            exit 1
+          fi
+          echo "ECR scan accepted: CRITICAL=0, HIGH=0"
+          exit 0
         fi
-        echo "waiting ECR scan... ($ST)"; sleep 10
+
+        case "$SCAN_STATUS" in
+          FAILED|UNSUPPORTED_IMAGE|SCAN_ELIGIBILITY_EXPIRED|FINDINGS_UNAVAILABLE|LIMIT_EXCEEDED)
+            echo "ECR scan failed with terminal status: $SCAN_STATUS" >&2
+            exit 1
+            ;;
+          NOTFOUND|None)
+            aws ecr start-image-scan --repository-name "$REPO" --image-id imageTag="$TAG" \
+              --region "$REGION" >/dev/null 2>&1 || true
+            ;;
+        esac
+
+        echo "waiting ECR scan... ($SCAN_STATUS, $i/60)"
+        sleep 10
       done
+
+      echo "ECR scan did not complete within 10 minutes (last status: $SCAN_STATUS)" >&2
+      exit 1
     EOT
   }
 

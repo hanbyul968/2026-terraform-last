@@ -16,6 +16,19 @@ spec:
       serviceAccountName: book-sa
       nodeSelector:
         role: app
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: book
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: book
       containers:
         - name: book
           image: PLACEHOLDER_ACCOUNT_ID.dkr.ecr.ap-northeast-2.amazonaws.com/book:latest

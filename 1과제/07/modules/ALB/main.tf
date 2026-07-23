@@ -4,10 +4,10 @@ resource "aws_security_group" "alb" {
   description = "Security group for ALB"
   vpc_id      = var.vpc_id
 
-  # 인바운드는 CloudFront VPC Origin SG에서만 80 허용한다.
-  # (root main.tf의 aws_security_group_rule.alb_from_cloudfront 에서 부여)
-  # 과제지 10-1: CloudFront를 거치지 않는 모든(내부망 포함) 요청은 거절해야 하므로
-  # 0.0.0.0/0 직접 인바운드를 두지 않는다.
+  # 인바운드는 CloudFront 전용 소스만 허용한다.
+  # 생성 전에는 AWS-managed origin-facing prefix list를, 생성 후에는
+  # CloudFront-VPCOrigins-Service-SG를 허용하며 0.0.0.0/0은 사용하지 않는다.
+  # 과제지 10-1: CloudFront를 거치지 않는 모든(내부망 포함) 요청은 거절한다.
 
   egress {
     from_port   = 0
@@ -21,6 +21,24 @@ resource "aws_security_group" "alb" {
   }
 }
 
+# CloudFront VPC Origin prerequisite:
+# The origin-facing AWS-managed prefix list must be allowed before the VPC
+# origin is created. The VPC-origin service SG is added later by the
+# CloudFront module for tighter source-SG restriction.
+data "aws_ec2_managed_prefix_list" "cloudfront_origin_facing" {
+  name = "com.amazonaws.global.cloudfront.origin-facing"
+}
+
+resource "aws_security_group_rule" "cloudfront_origin_facing" {
+  type              = "ingress"
+  security_group_id = aws_security_group.alb.id
+  from_port         = 80
+  to_port           = 80
+  protocol          = "tcp"
+  prefix_list_ids   = [data.aws_ec2_managed_prefix_list.cloudfront_origin_facing.id]
+  description       = "Allow CloudFront origin-facing traffic for VPC Origin deployment"
+}
+
 # ALB (Internal)
 resource "aws_lb" "this" {
   name               = var.alb_name
@@ -28,6 +46,10 @@ resource "aws_lb" "this" {
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb.id]
   subnets            = var.private_subnet_ids
+
+  # Ensure the CloudFront prerequisite rule exists before the ALB ARN can be
+  # consumed by aws_cloudfront_vpc_origin in the caller.
+  depends_on = [aws_security_group_rule.cloudfront_origin_facing]
 
   tags = {
     Name = var.alb_name

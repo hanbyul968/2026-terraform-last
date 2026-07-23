@@ -46,3 +46,14 @@ data "aws_lb" "app" {
   count = var.deploy_cdn ? 1 : 0
   name  = local.alb_name
 }
+
+# shared backend SG를 사용하지 않으므로 ALB frontend SG에서 IP target(Pod) 포트로 직접 허용한다.
+# Managed NodeGroup/Pod ENI는 EKS가 생성한 cluster security group을 사용한다.
+resource "aws_vpc_security_group_ingress_rule" "alb_to_workload" {
+  security_group_id            = aws_eks_cluster.this.vpc_config[0].cluster_security_group_id
+  referenced_security_group_id = aws_security_group.alb.id
+  description                  = "Allow wsc2026 ALB to book IP targets"
+  ip_protocol                  = "tcp"
+  from_port                    = 8080
+  to_port                      = 8080
+}

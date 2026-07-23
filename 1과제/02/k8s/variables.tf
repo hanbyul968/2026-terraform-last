@@ -63,13 +63,21 @@ variable "kms_s3_alias" {
   default = "alias/wskorea26-s3-key"
 }
 
-# Grafana 관리자 (vf 채점 10-1: skills-<비번호>-admin / $korea26!!)
-variable "grafana_admin_user" {
-  type    = string
-  default = "skills-101-jang-admin"
+# root run.sh에서 입력받은 선수 비번호. Grafana 관리자 ID에 사용한다.
+variable "bi_number" {
+  description = "선수 비번호. Grafana 관리자 ID skills-<비번호>-admin 생성에 사용."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[0-9]+$", var.bi_number))
+    error_message = "bi_number는 숫자로만 입력해야 합니다."
+  }
 }
 
+# Grafana 관리자 (vf 채점 10-1: skills-<비번호>-admin / \$korea26!!)
 variable "grafana_admin_password" {
-  type    = string
-  default = "\\$korea26!!"
+  description = "Grafana 관리자 비밀번호. 백슬래시 1개가 실제 문자로 포함된다."
+  type        = string
+  default     = "\\$korea26!!"
+  sensitive   = true
 }

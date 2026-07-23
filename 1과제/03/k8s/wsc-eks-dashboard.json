@@ -1,99 +1,157 @@
 {
   "uid": "wsc2026-grafana-dashboard",
   "title": "wsc2026-grafana-dashboard",
-  "tags": ["wsc"],
+  "tags": ["wsc2026"],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
-  "refresh": "30s",
+  "version": 2,
+  "refresh": "15s",
   "time": { "from": "now-30m", "to": "now" },
   "panels": [
+    { "id": 100, "title": "Node", "type": "row", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }, "panels": [] },
     {
-      "id": 1,
-      "title": "TOTAL_NODE_GROUP_COUNT",
-      "type": "stat",
-      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+      "id": 1, "title": "All Node CPU", "type": "timeseries", "gridPos": { "h": 7, "w": 9, "x": 0, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [
-        { "refId": "A", "expr": "count(kube_node_info)" }
-      ]
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 60 }, { "color": "red", "value": 80 }] }, "color": { "mode": "thresholds" } }, "overrides": [] },
+      "targets": [{ "refId": "A", "expr": "100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m])))", "legendFormat": "{{instance}}" }]
     },
     {
-      "id": 2,
-      "title": "APP_POD_COUNT",
-      "type": "stat",
-      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
+      "id": 2, "title": "All Node Memory", "type": "timeseries", "gridPos": { "h": 7, "w": 9, "x": 9, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [
-        { "refId": "A", "expr": "count(kube_pod_labels{namespace=\"wsc2026\", label_app=\"wsc2026-book\"})" }
-      ]
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 60 }, { "color": "red", "value": 80 }] }, "color": { "mode": "thresholds" } }, "overrides": [] },
+      "targets": [{ "refId": "A", "expr": "100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)", "legendFormat": "{{instance}}" }]
     },
     {
-      "id": 3,
-      "title": "NODE_GROUP_CPU_USAGE",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "id": 3, "title": "All Available Nodes", "type": "stat", "gridPos": { "h": 7, "w": 6, "x": 18, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [
-        { "refId": "A", "expr": "sum by (instance) (rate(node_cpu_seconds_total{mode!=\"idle\"}[5m]))" }
-      ]
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "values": false } },
+      "targets": [{ "refId": "A", "expr": "sum(kube_node_status_condition{condition=\"Ready\",status=\"true\"}) or vector(0)", "instant": true }]
+    },
+
+    { "id": 101, "title": "Pod", "type": "row", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 8 }, "panels": [] },
+    {
+      "id": 4, "title": "All Pod CPU", "type": "timeseries", "gridPos": { "h": 7, "w": 8, "x": 0, "y": 9 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 60 }, { "color": "red", "value": 80 }] }, "color": { "mode": "thresholds" } }, "overrides": [] },
+      "targets": [{ "refId": "A", "expr": "100 * sum by (namespace, pod) (rate(container_cpu_usage_seconds_total{container!=\"\",image!=\"\"}[5m])) / clamp_min(sum by (namespace, pod) (kube_pod_container_resource_limits{resource=\"cpu\"}), 0.001)", "legendFormat": "{{namespace}}/{{pod}}" }]
     },
     {
-      "id": 4,
-      "title": "NODE_GROUP_MEMORY_USAGE",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "id": 5, "title": "All Pod Memory", "type": "timeseries", "gridPos": { "h": 7, "w": 8, "x": 8, "y": 9 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [
-        { "refId": "A", "expr": "sum by (instance) (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes)" }
-      ]
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 60 }, { "color": "red", "value": 80 }] }, "color": { "mode": "thresholds" } }, "overrides": [] },
+      "targets": [{ "refId": "A", "expr": "100 * sum by (namespace, pod) (container_memory_working_set_bytes{container!=\"\",image!=\"\"}) / clamp_min(sum by (namespace, pod) (kube_pod_container_resource_limits{resource=\"memory\"}), 1)", "legendFormat": "{{namespace}}/{{pod}}" }]
     },
     {
-      "id": 5,
-      "title": "APP_POD_CPU_USAGE",
-      "type": "bargauge",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "id": 6, "title": "All Pending Pods", "type": "stat", "gridPos": { "h": 7, "w": 4, "x": 16, "y": 9 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [
-        { "refId": "A", "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"wsc2026\", pod=~\"wsc2026-book-deploy.*\", container!=\"\"}[5m]))" }
-      ]
+      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] }, "color": { "mode": "thresholds" } }, "overrides": [] },
+      "targets": [{ "refId": "A", "expr": "sum(kube_pod_status_phase{phase=\"Pending\"} == 1) or vector(0)", "instant": true }]
     },
     {
-      "id": 6,
-      "title": "APP_POD_MEMORY_USAGE",
-      "type": "bargauge",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "id": 7, "title": "All Pod restarts", "type": "stat", "gridPos": { "h": 7, "w": 4, "x": 20, "y": 9 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [
-        { "refId": "A", "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=\"wsc2026\", pod=~\"wsc2026-book-deploy.*\", container!=\"\"})" }
-      ]
+      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 1 }] }, "color": { "mode": "thresholds" } }, "overrides": [] },
+      "targets": [{ "refId": "A", "expr": "sum(kube_pod_container_status_restarts_total) or vector(0)", "instant": true }]
+    },
+
+    { "id": 102, "title": "Application Pod", "type": "row", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 16 }, "panels": [] },
+    {
+      "id": 8, "title": "App Pod CPU", "type": "timeseries", "gridPos": { "h": 7, "w": 7, "x": 0, "y": 17 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 60 }, { "color": "red", "value": 80 }] }, "color": { "mode": "thresholds" } }, "overrides": [] },
+      "targets": [{ "refId": "A", "expr": "100 * sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"wsc2026\",pod=~\"wsc2026-book-deploy.*\",container!=\"\"}[5m])) / clamp_min(sum by (pod) (kube_pod_container_resource_limits{namespace=\"wsc2026\",pod=~\"wsc2026-book-deploy.*\",resource=\"cpu\"}), 0.001)", "legendFormat": "{{pod}}" }]
     },
     {
-      "id": 7,
-      "title": "Active Alerts",
-      "type": "table",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 22 },
+      "id": 9, "title": "App Pod Memory", "type": "timeseries", "gridPos": { "h": 7, "w": 7, "x": 7, "y": 17 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [
-        { "refId": "A", "expr": "ALERTS{alertstate=\"firing\"}", "instant": true, "format": "table" }
-      ]
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 60 }, { "color": "red", "value": 80 }] }, "color": { "mode": "thresholds" } }, "overrides": [] },
+      "targets": [{ "refId": "A", "expr": "100 * sum by (pod) (container_memory_working_set_bytes{namespace=\"wsc2026\",pod=~\"wsc2026-book-deploy.*\",container!=\"\"}) / clamp_min(sum by (pod) (kube_pod_container_resource_limits{namespace=\"wsc2026\",pod=~\"wsc2026-book-deploy.*\",resource=\"memory\"}), 1)", "legendFormat": "{{pod}}" }]
     },
     {
-      "id": 8,
-      "title": "Application Logs",
-      "type": "logs",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 30 },
+      "id": 10, "title": "App Running", "type": "stat", "gridPos": { "h": 7, "w": 3, "x": 14, "y": 17 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "sum(kube_pod_status_phase{namespace=\"wsc2026\",pod=~\"wsc2026-book-deploy.*\",phase=\"Running\"} == 1) or vector(0)", "instant": true }]
+    },
+    {
+      "id": 11, "title": "App restarts", "type": "stat", "gridPos": { "h": 7, "w": 4, "x": 17, "y": 17 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 1 }] }, "color": { "mode": "thresholds" } }, "overrides": [] },
+      "targets": [{ "refId": "A", "expr": "sum(kube_pod_container_status_restarts_total{namespace=\"wsc2026\",pod=~\"wsc2026-book-deploy.*\"}) or vector(0)", "instant": true }]
+    },
+    {
+      "id": 12, "title": "App Pending", "type": "stat", "gridPos": { "h": 7, "w": 3, "x": 21, "y": 17 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] }, "color": { "mode": "thresholds" } }, "overrides": [] },
+      "targets": [{ "refId": "A", "expr": "sum(kube_pod_status_phase{namespace=\"wsc2026\",pod=~\"wsc2026-book-deploy.*\",phase=\"Pending\"} == 1) or vector(0)", "instant": true }]
+    },
+
+    { "id": 103, "title": "Application Traffic", "type": "row", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 }, "panels": [] },
+    {
+      "id": 13, "title": "App Request Count", "type": "timeseries", "gridPos": { "h": 8, "w": 8, "x": 0, "y": 25 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "sum(rate(http_requests_total{namespace=\"wsc2026\"}[1m]))", "legendFormat": "requests/sec" }]
+    },
+    {
+      "id": 14, "title": "App Response Time", "type": "timeseries", "gridPos": { "h": 8, "w": 8, "x": 8, "y": 25 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [{ "refId": "A", "expr": "sum(rate(http_request_duration_seconds_sum{namespace=\"wsc2026\"}[1m])) / clamp_min(sum(rate(http_request_duration_seconds_count{namespace=\"wsc2026\"}[1m])), 0.001)", "legendFormat": "average" }]
+    },
+    {
+      "id": 15, "title": "App Status Code", "type": "timeseries", "gridPos": { "h": 8, "w": 8, "x": 16, "y": 25 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "sum by (status) (rate(http_requests_total{namespace=\"wsc2026\"}[1m]))", "legendFormat": "HTTP {{status}}" }]
+    },
+    {
+      "id": 16, "title": "App Application Logs", "type": "logs", "gridPos": { "h": 8, "w": 24, "x": 0, "y": 33 },
       "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
-      "options": { "showTime": true, "wrapLogMessage": true, "dedupStrategy": "none" },
-      "targets": [
-        {
-          "refId": "A",
-          "queryMode": "Logs",
-          "region": "ap-northeast-2",
-          "logGroupNames": ["/wsc2026/app/log"],
-          "expression": "fields @timestamp, @message | sort @timestamp desc | limit 100"
-        }
-      ]
+      "options": { "showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true },
+      "targets": [{ "refId": "A", "queryMode": "Logs", "region": "ap-northeast-2", "logGroupNames": ["/wsc2026/app/log"], "expression": "fields @timestamp, @message | filter @message not like /\\/health/ | sort @timestamp desc | limit 100" }]
+    },
+
+    { "id": 104, "title": "Alert", "type": "row", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 41 }, "panels": [] },
+    {
+      "id": 17, "title": "PodHighCPU", "type": "stat", "gridPos": { "h": 6, "w": 4, "x": 0, "y": 42 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "mappings": [{ "type": "value", "options": { "0": { "text": "Normal" }, "1": { "text": "Firing" } } }], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] }, "color": { "mode": "thresholds" } }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "values": false } },
+      "targets": [{ "refId": "A", "expr": "clamp_max(sum(ALERTS{alertname=\"PodHighCPU\",alertstate=\"firing\"}) or vector(0), 1)", "instant": true }]
+    },
+    {
+      "id": 18, "title": "PodHighMemory", "type": "stat", "gridPos": { "h": 6, "w": 4, "x": 4, "y": 42 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "mappings": [{ "type": "value", "options": { "0": { "text": "Normal" }, "1": { "text": "Firing" } } }], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] }, "color": { "mode": "thresholds" } }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "values": false } },
+      "targets": [{ "refId": "A", "expr": "clamp_max(sum(ALERTS{alertname=\"PodHighMemory\",alertstate=\"firing\"}) or vector(0), 1)", "instant": true }]
+    },
+    {
+      "id": 19, "title": "PodNotReady", "type": "stat", "gridPos": { "h": 6, "w": 4, "x": 8, "y": 42 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "mappings": [{ "type": "value", "options": { "0": { "text": "Normal" }, "1": { "text": "Firing" } } }], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] }, "color": { "mode": "thresholds" } }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "values": false } },
+      "targets": [{ "refId": "A", "expr": "clamp_max(sum(ALERTS{alertname=\"PodNotReady\",alertstate=\"firing\"}) or vector(0), 1)", "instant": true }]
+    },
+    {
+      "id": 20, "title": "HighErrorRate", "type": "stat", "gridPos": { "h": 6, "w": 4, "x": 12, "y": 42 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "mappings": [{ "type": "value", "options": { "0": { "text": "Normal" }, "1": { "text": "Firing" } } }], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] }, "color": { "mode": "thresholds" } }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "values": false } },
+      "targets": [{ "refId": "A", "expr": "clamp_max(sum(ALERTS{alertname=\"HighErrorRate\",alertstate=\"firing\"}) or vector(0), 1)", "instant": true }]
+    },
+    {
+      "id": 21, "title": "HighLatency", "type": "stat", "gridPos": { "h": 6, "w": 4, "x": 16, "y": 42 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "mappings": [{ "type": "value", "options": { "0": { "text": "Normal" }, "1": { "text": "Firing" } } }], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] }, "color": { "mode": "thresholds" } }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "values": false } },
+      "targets": [{ "refId": "A", "expr": "clamp_max(sum(ALERTS{alertname=\"HighLatency\",alertstate=\"firing\"}) or vector(0), 1)", "instant": true }]
+    },
+    {
+      "id": 22, "title": "PodCrashLooping", "type": "stat", "gridPos": { "h": 6, "w": 4, "x": 20, "y": 42 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "mappings": [{ "type": "value", "options": { "0": { "text": "Normal" }, "1": { "text": "Firing" } } }], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] }, "color": { "mode": "thresholds" } }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "values": false } },
+      "targets": [{ "refId": "A", "expr": "clamp_max(sum(ALERTS{alertname=\"PodCrashLooping\",alertstate=\"firing\"}) or vector(0), 1)", "instant": true }]
     }
   ]
 }

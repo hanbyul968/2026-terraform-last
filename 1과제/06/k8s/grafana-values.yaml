@@ -63,7 +63,7 @@ dashboards:
           "panels": [
             {
               "id": 1,
-              "title": "Lambda Invocations by Client ID",
+              "title": "Query Count Panel",
               "type": "timeseries",
               "gridPos": {"h": 9, "w": 24, "x": 0, "y": 0},
               "datasource": {"type": "cloudwatch", "uid": "cloudwatch"},

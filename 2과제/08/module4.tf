@@ -379,6 +379,19 @@ resource "aws_security_group" "m4_bastion" {
   tags = { Name = "skills-sqs-bastion-sg" }
 }
 
+# in-VPC bastion 은 (private endpoint 활성화 시) EKS API 를 프라이빗 IP 로 접근한다.
+# 클러스터 보안그룹이 bastion SG 로부터 443 인바운드를 허용해야 kubectl 이 붙는다.
+# (없으면 dial tcp 10.4.x.x:443 i/o timeout 발생)
+resource "aws_vpc_security_group_ingress_rule" "m4_cluster_from_bastion" {
+  provider                     = aws.oregon
+  security_group_id            = aws_eks_cluster.m4.vpc_config[0].cluster_security_group_id
+  referenced_security_group_id = aws_security_group.m4_bastion.id
+  from_port                    = 443
+  to_port                      = 443
+  ip_protocol                  = "tcp"
+  description                  = "bastion to EKS API (private endpoint)"
+}
+
 resource "aws_iam_role" "m4_bastion" {
   name = "skills-sqs-bastion-role"
   assume_role_policy = jsonencode({
@@ -453,6 +466,7 @@ resource "aws_instance" "m4_bastion" {
   depends_on = [
     aws_eks_fargate_profile.m4_karpenter,
     aws_eks_access_policy_association.m4_bastion,
+    aws_vpc_security_group_ingress_rule.m4_cluster_from_bastion,
     aws_nat_gateway.m4
   ]
 }

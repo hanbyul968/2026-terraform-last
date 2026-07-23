@@ -155,6 +155,8 @@ resource "aws_docdb_cluster_instance" "m1" {
 resource "aws_secretsmanager_secret" "m1" {
   provider = aws.seoul
   name     = "skills-nosql-docdb-secret"
+  # destroy 시 복구 윈도우 없이 즉시 삭제 → 재 apply 때 "scheduled for deletion" 이름 충돌 방지
+  recovery_window_in_days = 0
 }
 
 resource "aws_secretsmanager_secret_version" "m1" {

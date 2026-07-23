@@ -168,11 +168,22 @@ resource "aws_s3_bucket_policy" "m3_trail" {
 }
 
 resource "aws_cloudtrail" "m3" {
-  provider              = aws.singapore
-  name                  = "skills-ceh-cloudtrail"
-  s3_bucket_name        = aws_s3_bucket.m3_trail.id
-  is_multi_region_trail = false
-  depends_on            = [aws_s3_bucket_policy.m3_trail]
+  provider                      = aws.singapore
+  name                          = "skills-ceh-cloudtrail"
+  s3_bucket_name                = aws_s3_bucket.m3_trail.id
+  is_multi_region_trail         = false
+  enable_logging                = true
+  include_global_service_events = true
+
+  # AuthorizeSecurityGroupIngress 는 EC2 관리(write) 이벤트다.
+  # 이 이벤트가 CloudTrail 에 기록되어야 EventBridge 규칙이 트리거되어
+  # Lambda 자동 복구가 동작한다. 관리 이벤트 로깅을 명시적으로 고정한다.
+  event_selector {
+    read_write_type           = "All"
+    include_management_events = true
+  }
+
+  depends_on = [aws_s3_bucket_policy.m3_trail]
 }
 
 # EventBridge Rule

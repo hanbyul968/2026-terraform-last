@@ -19,7 +19,7 @@ resource "kubernetes_deployment" "user" {
     labels    = { app = "user" }
   }
   spec {
-    replicas = 2
+    replicas = 1
     selector { match_labels = { app = "user" } }
     strategy {
       type = "RollingUpdate"
@@ -101,7 +101,7 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "user" {
     namespace = kubernetes_namespace.app.metadata[0].name
   }
   spec {
-    min_replicas = 2
+    min_replicas = 1
     max_replicas = 10
     scale_target_ref {
       api_version = "apps/v1"
@@ -169,7 +169,7 @@ resource "kubernetes_deployment" "product" {
     labels    = { app = "product" }
   }
   spec {
-    replicas = 2
+    replicas = 1
     selector { match_labels = { app = "product" } }
     strategy {
       type = "RollingUpdate"
@@ -251,7 +251,7 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "product" {
     namespace = kubernetes_namespace.app.metadata[0].name
   }
   spec {
-    min_replicas = 2
+    min_replicas = 1
     max_replicas = 10
     scale_target_ref {
       api_version = "apps/v1"
@@ -316,7 +316,7 @@ resource "kubernetes_deployment" "stress" {
     labels    = { app = "stress" }
   }
   spec {
-    replicas = 2
+    replicas = 1
     selector { match_labels = { app = "stress" } }
     template {
       metadata { labels = { app = "stress" } }
@@ -378,7 +378,7 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "stress" {
     namespace = kubernetes_namespace.app.metadata[0].name
   }
   spec {
-    min_replicas = 2
+    min_replicas = 1
     max_replicas = 10
     scale_target_ref {
       api_version = "apps/v1"

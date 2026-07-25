@@ -1,9 +1,9 @@
 # Seed 덤프를 S3 에 올리고, db-init Job 의 initContainer 가 받아서 스트리밍 적재한다.
 # ConfigMap(1MB 한도) 대신 S3 라서 100만 줄(수십 MB) 덤프도 OK. 작은 덤프도 동일하게 동작.
 
-# 시드/아티팩트 전용 비공개 버킷 (random_id.bucket 은 s3.tf 에서 정의됨, 재사용)
+# 시드/아티팩트 전용 비공개 버킷 (고정 이름)
 resource "aws_s3_bucket" "artifacts" {
-  bucket        = "${local.name}-artifacts-${random_id.bucket.hex}"
+  bucket        = "${local.name}-artifacts"
   force_destroy = true
   tags          = { Name = "${local.name}-artifacts" }
 }

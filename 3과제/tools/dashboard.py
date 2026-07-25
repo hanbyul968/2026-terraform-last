@@ -171,7 +171,7 @@ function vCalc(){
   if(ch.length){
    var patch=JSON.stringify({spec:{minReplicas:rmn,maxReplicas:mx,metrics:[{type:"Resource",resource:{name:"cpu",target:{type:"Utilization",averageUtilization:rutil}}}]}});
    var c='kubectl -n app set resources deploy/'+n+' --requests=cpu='+rcpu+'m\n'
-    +'kubectl -n app patch hpa '+n+' --type=merge -p \''+patch+'\'\n'
+    +'kubectl -n app patch hpa '+n+' --type=merge -p \''+patch.replace(/"/g,'\\"')+'\'\n'
     +'kubectl -n app rollout status deploy/'+n;
    cmds='<div class=lbl style="margin-top:9px;margin-bottom:4px">즉시 적용 명령 (임시 · 재배포 시 사라짐)</div>'
     +'<pre style="margin:0;background:#f6f7f9;border:1px solid var(--line);border-radius:8px;padding:9px 11px;font-size:11.5px;white-space:pre-wrap;color:#1a1d23;overflow-x:auto">'+esc(c)+'</pre>';
@@ -206,10 +206,24 @@ function wafxParse(text){var rows=[];text.split('\n').forEach(function(ln){
   var f=ln.trim().split(/\s{2,}/);
   if(f.length>=6&&/^(ALLOW|BLOCK)$/i.test(f[1])){rows.push({verdict:f[0],waf:f[1].toUpperCase(),cnt:f[3],endpoint:f[4],header:f[5],value:f.slice(6).join(' ')});}
 });return rows;}
-function wafxClassify(r){ // 반환: null(정상/404) 또는 {type, header, value, why}
+function wafxDecodeQuery(v){var q=(v||'').replace(/\+/g,' ');for(var i=0;i<2;i++){try{var n=decodeURIComponent(q);if(n===q)break;q=n;}catch(e){break;}}return q;}
+function wafxQueryInfo(v){var q=wafxDecodeQuery(v),l=q.toLowerCase();
+  if(l.indexOf('/etc/passwd')>=0)return {token:'/etc/passwd',why:'OS 명령 주입 (/etc/passwd)'};
+  if(l.indexOf('/bin/bash')>=0)return {token:'/bin/bash',why:'OS 명령 주입 (/bin/bash)'};
+  if(l.indexOf('/bin/sh')>=0)return {token:'/bin/sh',why:'OS 명령 주입 (/bin/sh)'};
+  if(l.indexOf('; cat ')>=0||l.indexOf('| cat ')>=0||l.indexOf('&& cat ')>=0)return {token:'cat ',why:'OS 명령 주입 (cat)'};
+  if(l.indexOf('{{')>=0&&l.indexOf('}}')>=0)return {token:'{{',why:'서버 템플릿 인젝션 (SSTI)'};
+  if(l.indexOf('../')>=0||l.indexOf('..\\')>=0)return {token:'../',why:'경로 탐색 (Path Traversal)'};
+  var sql=[' union select ','sleep(','benchmark(',"' or 1=1",'" or 1=1'];for(var i=0;i<sql.length;i++)if(l.indexOf(sql[i])>=0)return {token:sql[i].trim(),why:'SQL 인젝션'};
+  if(l.indexOf('<script')>=0)return {token:'<script',why:'XSS'};
+  if(l.indexOf('javascript:')>=0)return {token:'javascript:',why:'XSS'};
+  var ns=['$where','$regex','$ne'];for(var j=0;j<ns.length;j++)if(l.indexOf(ns[j])>=0)return {token:ns[j],why:'NoSQL 인젝션'};
+  return null;}
+function wafxClassify(r){ // 반환: null(정상/404) 또는 차단 안내 객체
   if(!wafxValid(r.endpoint))return null;            // 경로 없음 → 404, 막지 않음
   if(r.waf==='BLOCK')return null;                   // 이미 막힘
   var hl=(r.header||'').toLowerCase(), val=r.value||'';
+  if(hl==='query-string'||hl==='querystring'){var qi=wafxQueryInfo(val);if(!qi)return null;return {type:'QUERY',header:'query-string',value:wafxDecodeQuery(val),token:qi.token,why:qi.why,endpoint:r.endpoint};}
   if((r.verdict||'').indexOf('403')===0){           // 스크립트가 이미 403대상으로 판정
     if(/uagent|ua/i.test(r.verdict)||hl==='user-agent')return {type:'UA',header:'user-agent',value:val,why:'악성 User-Agent'};
     if(/xff/i.test(r.verdict)||hl==='x-forwarded-for')return {type:'XFF',header:'x-forwarded-for',value:val,why:'X-Forwarded-For 위조'};
@@ -234,6 +248,9 @@ var WAFX_DEF_UA=['sqlmap','nikto','nmap','masscan','acunetix','havij','nuclei','
 var WAFX_DEF_HDR=['x-junk'];
 function wafxTfvars(list){return '['+list.map(function(x){return '"'+x+'"'}).join(', ')+']';}
 function wafxRule(f){
+  if(f.type==='QUERY')return {title:'비정상 쿼리스트링: '+esc(f.value),
+    note:'자동 적용하지 않음. 확인 후 terraform/terraform.tfvars 의 기존 목록과 병합:',
+    hcl:'waf_blocked_query_patterns = '+wafxTfvars([f.token])};
   if(f.type==='UA'){var tok=(f.value||'').toLowerCase().replace(/[^a-z0-9].*$/,'')||'badtool';
     var ua=WAFX_DEF_UA.slice();if(ua.indexOf(tok)<0)ua.push(tok);
     return {title:'악성 UA: '+esc(f.value),
@@ -248,9 +265,10 @@ function wafxRule(f){
     note:(WAFX_DEF_HDR.indexOf(f.header)>=0?'이미 기본값에 포함 — 덮어쓴 적 없다면 이미 차단 중.':'terraform/terraform.tfvars 에 (기본값+새 헤더 전체, 소문자):'),
     hcl:'waf_blocked_headers = '+wafxTfvars(hd)};}
 function wafxTest(f,ep){ep=ep||'http://<endpoint>';var q='/v1/user?email=x@x.org&requestid=1&uuid=7c5a3c6a-758f-4bc5-9bdf-3e573a0ad729';
-  if(f.type==='UA')return 'curl -s -o /dev/null -w "%{http_code}\\n" -H "User-Agent: '+f.value+'" "'+ep+q+'"   # 403';
-  if(f.type==='XFF')return 'curl -s -o /dev/null -w "%{http_code}\\n" -H "X-Forwarded-For: 10.0.0.1" "'+ep+q+'"   # 403';
-  return 'curl -s -o /dev/null -w "%{http_code}\\n" -H "'+f.header+': 1" "'+ep+q+'"   # 403';}
+  if(f.type==='QUERY')return 'curl.exe -s -o NUL -w "%{http_code}\\n" "'+ep+(f.endpoint||'/v1/product')+'?'+encodeURI(f.value)+'"   # 룰 적용 전 200, 적용 후 403';
+  if(f.type==='UA')return 'curl.exe -s -o NUL -w "%{http_code}\\n" -H "User-Agent: '+f.value+'" "'+ep+q+'"   # 403';
+  if(f.type==='XFF')return 'curl.exe -s -o NUL -w "%{http_code}\\n" -H "X-Forwarded-For: 10.0.0.1" "'+ep+q+'"   # 403';
+  return 'curl.exe -s -o NUL -w "%{http_code}\\n" -H "'+f.header+': 1" "'+ep+q+'"   # 403';}
 function wafxRun(){var text=document.getElementById('wafx_in').value;var ep=document.getElementById('wafx_ep').value.trim();
   var rows=wafxParse(text);
   if(!rows.length){document.getElementById('wafx_out').innerHTML='<div class=mut style="padding:10px">표 행을 못 읽었어요. waf_header_stats.py의 "전체" 표(또는 .csv)를 그대로 붙여넣어 주세요.</div>';return;}
@@ -260,9 +278,9 @@ function wafxRun(){var text=document.getElementById('wafx_in').value;var ep=docu
   var seen={},finds=[];
   rows.forEach(function(r){var f=wafxClassify(r);if(!f)return;
     if(blocked[f.header+'|'+(f.type==='UA'?(f.value||'').toLowerCase():'')])return;  // 이미 막히는 중
-    var key=f.type+'|'+f.header+'|'+(f.type==='HDR'?'':f.value);if(seen[key])return;seen[key]=1;finds.push(f);});
+    var kval=f.type==='HDR'?'':(f.type==='QUERY'?f.token:f.value);var key=f.type+'|'+f.header+'|'+kval;if(seen[key])return;seen[key]=1;finds.push(f);});
   if(!finds.length){document.getElementById('wafx_out').innerHTML='<div class="tip good"><h3>막을 게 없습니다 👍</h3><div class=why>유효 경로로 들어온 비정상 요청 중 안 막힌 게 없어요. (없는 경로는 404가 정답이라 무시)</div></div>';return;}
-  var out='<div class="tip warn"><h3>막아야 할 것 '+finds.length+'개</h3><div class=why>아래 변수 값을 terraform/terraform.tfvars 에 넣고 apply → 다시 분석. (waf.tf 는 안 고쳐도 됨)</div></div>';
+  var out='<div class="tip warn"><h3>검토할 차단 후보 '+finds.length+'개</h3><div class=why>헤더와 ALLOW 쿼리스트링을 분석해 설정 방법만 표시합니다. 자동 적용하지 않습니다. 적용하려면 사용자가 terraform/terraform.tfvars 에 병합 후 apply 하세요.</div></div>';
   finds.forEach(function(f){var ru=wafxRule(f);
     out+='<div class=card style="margin-bottom:12px"><div class=lbl>'+esc(f.why)+'</div>'
       +'<div style="font-size:12.5px;margin-bottom:7px">'+ru.title+'</div>'
@@ -270,7 +288,7 @@ function wafxRun(){var text=document.getElementById('wafx_in').value;var ep=docu
       +'<pre style="margin:0 0 9px;background:#f6f7f9;border:1px solid var(--line);border-radius:8px;padding:9px 11px;font-size:11.5px;white-space:pre-wrap;color:#1a1d23;overflow-x:auto">'+esc(ru.hcl)+'</pre>'
       +'<div class=mut style="font-size:12px;margin-bottom:4px">② 적용 후 테스트 (403 떠야 함)</div>'
       +'<pre style="margin:0;background:#f6f7f9;border:1px solid var(--line);border-radius:8px;padding:9px 11px;font-size:11.5px;white-space:pre-wrap;color:#1a1d23;overflow-x:auto">'+esc(wafxTest(f,ep))+'</pre></div>';});
-  out+='<div class="tip dim"><h3>적용 순서</h3><div class=why>1) 위 변수 줄들을 terraform/terraform.tfvars 에 추가·병합 (같은 변수는 한 줄로 합치기)\n2) cd terraform && terraform apply -auto-approve -var "k8s_provider_ready=true"\n3) 위 curl 로 403 확인, 없는 경로(/.env)는 404 확인\n4) waf_header_stats.py 다시 돌려 붙여넣고 「막을 게 없습니다」 나올 때까지 반복\n5) 대시보드 avail% 100% 유지(정상 오차단 없는지) — 오차단이면 그 변수만 되돌려 apply\n※ 확신 없으면 waf_custom_rule_action = "count" 로 먼저 관찰 (확인 후 반드시 "block" 복귀)</div></div>';
+  out+='<div class="tip dim"><h3>적용 순서</h3><div class=why>1) 위 변수 줄들을 terraform/terraform.tfvars 에 추가·병합 (같은 변수는 한 줄로 합치기)\n2) cd terraform; terraform apply -auto-approve\n3) 위 curl 로 403 확인, 없는 경로(/.env)는 404 확인\n4) waf_header_stats.py 다시 돌려 붙여넣고 「막을 게 없습니다」 나올 때까지 반복\n5) 대시보드 avail% 100% 유지(정상 오차단 없는지) — 오차단이면 그 변수만 되돌려 apply\n※ 확신 없으면 waf_custom_rule_action = "count" 로 먼저 관찰 (확인 후 반드시 "block" 복귀)</div></div>';
   document.getElementById('wafx_out').innerHTML=out;}
 // ---- 튜닝적용 탭: autotune 출력 붙여넣기 → 적용 명령(kubectl + k8s_apps.tf) ----
 // autotune.ps1 마지막 출력 예:
@@ -299,7 +317,7 @@ function tuneCmds(f){
   apps.forEach(function(n){
     var patch=JSON.stringify({spec:{minReplicas:mn,maxReplicas:mx,metrics:[{type:"Resource",resource:{name:"cpu",target:{type:"Utilization",averageUtilization:util}}}]}});
     var imm='kubectl -n app set resources deploy/'+n+' --requests=cpu='+cpu+'\n'
-      +'kubectl -n app patch hpa '+n+' --type=merge -p \''+patch+'\'\n'
+      +'kubectl -n app patch hpa '+n+' --type=merge -p \''+patch.replace(/"/g,'\\"')+'\'\n'
       +'kubectl -n app rollout status deploy/'+n;
     var tf='# terraform/k8s_apps.tf — '+n+'\n'
       +'resources { requests = { cpu = "'+cpu+'", memory = "128Mi" } }   # kubernetes_deployment.'+n+'\n'
@@ -325,8 +343,8 @@ function vTuneApply(){
    +'<div id=tune_out style="margin-top:15px"></div></div>';}
 
 function vWafAnalyze(){
-  return '<div class=card><h2>WAF분석 — 공격 로그 붙여넣고 막을 것 받기</h2>'
-   +'<div class=mut style="font-size:12px;margin-bottom:9px"><code>python waf_header_stats.py --log-group aws-waf-logs-&lt;project&gt; --region us-east-1 --hours 1</code> 의 <b>"전체" 표 출력</b>(또는 .csv)을 통째로 붙여넣고 [분석]. (그 스크립트의 「제안」 섹션도 같은 답을 줌 — 이 탭은 오프라인/시각화용)</div>'
+  return '<div class=card><h2>WAF분석 — 헤더·쿼리스트링 분석과 차단 방법 안내</h2>'
+   +'<div class=mut style="font-size:12px;margin-bottom:9px"><code>python waf_header_stats.py --log-group aws-waf-logs-&lt;project&gt; --region us-east-1 --hours 1</code> 출력을 통째로 붙여넣고 [분석]. 헤더와 <b>ALLOW 요청 쿼리스트링</b>을 함께 표시하고, 고위험 패턴의 Terraform 설정 방법만 안내합니다. 대시보드는 WAF를 자동 변경하지 않습니다.</div>'
    +'<div style="margin-bottom:8px">엔드포인트(테스트 명령용): <input id=wafx_ep type=text placeholder="http://xxxx.cloudfront.net" style="width:320px;background:var(--card2);color:var(--txt);border:1px solid var(--line);border-radius:7px;padding:6px 9px"></div>'
    +'<textarea id=wafx_in placeholder="여기에 waf_header_stats.py 출력 붙여넣기..." style="width:100%;height:200px;background:#f6f7f9;color:#1a1d23;border:1px solid var(--line);border-radius:8px;padding:10px;font-size:12px;font-family:monospace"></textarea>'
    +'<button onclick="wafxRun()" style="margin-top:10px">분석</button>'

@@ -261,7 +261,65 @@ resource "aws_wafv2_web_acl" "cloudfront" {
     }
   }
 
-  # (5) 비정상 body 패턴 — var.waf_blocked_body_patterns (패턴당 룰 1개).
+  # (5) 비정상 query string 패턴 — 관찰/대시보드 분석 후 변수에 추가할 때만 생성.
+  # URL 인코딩 우회를 막기 위해 URL_DECODE 후 LOWERCASE 변환을 적용한다.
+  dynamic "rule" {
+    for_each = { for i, p in var.waf_blocked_query_patterns : i => p }
+    content {
+      name     = "BlockedQueryPattern-${rule.key}"
+      priority = 100 + tonumber(rule.key)
+      action {
+        dynamic "block" {
+          for_each = var.waf_custom_rule_action == "block" ? [1] : []
+          content {}
+        }
+        dynamic "count" {
+          for_each = var.waf_custom_rule_action == "count" ? [1] : []
+          content {}
+        }
+      }
+      statement {
+        and_statement {
+          statement {
+            regex_match_statement {
+              regex_string = local.waf_block_scope_regex
+              field_to_match {
+                uri_path {}
+              }
+              text_transformation {
+                priority = 0
+                type     = "NONE"
+              }
+            }
+          }
+          statement {
+            byte_match_statement {
+              search_string         = lower(rule.value)
+              positional_constraint = "CONTAINS"
+              field_to_match {
+                query_string {}
+              }
+              text_transformation {
+                priority = 0
+                type     = "URL_DECODE"
+              }
+              text_transformation {
+                priority = 1
+                type     = "LOWERCASE"
+              }
+            }
+          }
+        }
+      }
+      visibility_config {
+        cloudwatch_metrics_enabled = true
+        metric_name                = "blocked-query-${rule.key}"
+        sampled_requests_enabled   = true
+      }
+    }
+  }
+
+  # (6) 비정상 body 패턴 — var.waf_blocked_body_patterns (패턴당 룰 1개).
   # 정상 요청 body 에 절대 없는 토큰만 넣을 것 (오탐 = 가용성 점수 하락).
   dynamic "rule" {
     for_each = { for i, p in var.waf_blocked_body_patterns : i => p }

@@ -111,7 +111,9 @@ resource "kubernetes_job" "db_init" {
               -e "SELECT COUNT(*) FROM \`$MYSQL_DBNAME\`.user")
             if [ "$CNT" = "0" ]; then
               echo "loading user seed dump..."
-              mysql -h"$MYSQL_HOST" -P"$MYSQL_PORT" -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DBNAME" < /seed/load_user.dump
+              # 덤프에 잘못된 대상 DB(USE `apdev`)가 박혀 있어도 무시하고,
+              # mysql CLI 인자로 지정한 올바른 DB($MYSQL_DBNAME)에 적재한다.
+              grep -vi '^[[:space:]]*USE[[:space:]]' /seed/load_user.dump | mysql -h"$MYSQL_HOST" -P"$MYSQL_PORT" -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DBNAME"
               echo "seed load done"
             else
               echo "user table already has $CNT rows; skipping seed"

@@ -13,7 +13,7 @@ variable "project" {
 # 에러 없이 진행됩니다. 클러스터가 생성된 뒤 true 로 바꿔 k8s 리소스를 apply 하세요.
 variable "k8s_provider_ready" {
   type    = bool
-  default = false
+  default = true
 }
 
 variable "vpc_cidr" {
@@ -38,7 +38,7 @@ variable "node_instance_type" {
 
 variable "node_desired_size" {
   type    = number
-  default = 2
+  default = 1
 }
 
 variable "node_max_size" {
@@ -48,7 +48,7 @@ variable "node_max_size" {
 
 variable "node_min_size" {
   type    = number
-  default = 2
+  default = 1
 }
 
 variable "db_name" {
@@ -142,6 +142,12 @@ variable "waf_blocked_header_values" {
   }))
   default     = []
   description = "특정 헤더 값에 문자열이 포함되면 403. 예: [{ header = \"referer\", value = \"evil.com\" }]"
+}
+
+variable "waf_blocked_query_patterns" {
+  type        = list(string)
+  default     = []
+  description = "쿼리스트링을 URL 디코딩/소문자화한 뒤 이 문자열이 포함되면 403. 관찰 후 고위험 토큰만 추가 (예: [\"/etc/passwd\", \"{{\"])."
 }
 
 variable "waf_blocked_body_patterns" {

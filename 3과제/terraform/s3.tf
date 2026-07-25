@@ -1,9 +1,5 @@
-resource "random_id" "bucket" {
-  byte_length = 4
-}
-
 resource "aws_s3_bucket" "images" {
-  bucket        = "${local.name}-images-${random_id.bucket.hex}"
+  bucket        = "${local.name}-images"
   force_destroy = true
   tags          = { Name = "${local.name}-images" }
 }
@@ -15,7 +11,7 @@ resource "aws_s3_bucket_public_access_block" "images" {
   ignore_public_acls      = true
   restrict_public_buckets = true
 }
-
+  
 resource "aws_s3_bucket_ownership_controls" "images" {
   bucket = aws_s3_bucket.images.id
   rule {

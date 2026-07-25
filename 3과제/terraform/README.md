@@ -47,30 +47,54 @@ RDS MySQL 8.0 Multi-AZ (db.t3.micro) ← RDS Proxy ← Pod
 
 ---
 
-## 2. 배포 (2단계)
+## 2. 배포
 
-사전: `winget install Hashicorp.Terraform Amazon.AWSCLI Docker.DockerDesktop Kubernetes.kubectl`
-→ 새 창 열기 → Docker Desktop **실행 상태** 확인(`docker version` 에 Server 표시) → `aws configure`.
+kubernetes/helm/kubectl provider 는 EKS 클러스터 엔드포인트에 의존한다. 클러스터가 **없을 때**
+provider 가 `https://localhost` 로 붙어 아래 에러가 난다:
 
-kubernetes/helm provider 는 EKS 가 있어야 초기화되므로 2단계로 apply 한다:
+```
+Error: ... dial tcp [::1]:443: ... the target machine actively refused it.
+Error: Kubernetes cluster unreachable ...
+```
+
+이를 피하려고 `var.k8s_provider_ready` 로 제어한다 (기본값 `true` = 평상시).
+
+### 평상시 (클러스터가 이미 있음) — 한 방
+
+```powershell
+cd C:\Users\competitor\2026-terraform\3과제\terraform
+terraform init
+terraform apply -auto-approve      # -target 안 써서 PowerShell 인자 쪼개짐 문제도 없음
+terraform output endpoint          # http://dXXXX.cloudfront.net ← 채점 플랫폼에 프로토콜+주소만 (경로 X)
+```
+
+### 최초 구축 / 클러스터를 새로 만들 때만 — 2단계
+
+클러스터가 없으면 provider 엔드포인트가 unknown 이라 위 localhost 에러가 난다. **먼저 클러스터만**
+만든 뒤(그때는 provider 를 더미로 두게 `k8s_provider_ready=false`), 클러스터가 생긴 다음 전체를 apply 한다.
 
 ```powershell
 cd C:\Users\competitor\2026-terraform\3과제\terraform
 terraform init
 
-# 1단계: VPC~EKS 노드그룹까지 (~15분; 의존성으로 네트워크 전부 포함)
-terraform apply -auto-approve "-target=aws_eks_node_group.main"
+# 1단계: 클러스터+노드그룹+애드온+OIDC 만 (~15분). PowerShell 이 -target 의 점(.)을
+#        쪼개지 않도록 반드시 --% (stop-parsing) 를 붙인다.
+terraform apply --% -var k8s_provider_ready=false -target=aws_eks_cluster.this -target=aws_eks_node_group.main -target=aws_iam_openid_connect_provider.eks -target=aws_eks_addon.coredns -target=aws_eks_addon.kube_proxy -target=aws_eks_addon.vpc_cni -target=aws_eks_addon.metrics_server
 
 # 2단계: kubeconfig + 나머지 전체 (앱 빌드·push, ALB, CloudFront, WAF, DB 시드까지 자동)
 aws eks update-kubeconfig --name wsi2026-cluster --region ap-northeast-2
-terraform apply -auto-approve -var "k8s_provider_ready=true"
-
-terraform output endpoint    # http://dXXXX.cloudfront.net ← 채점 플랫폼에 프로토콜+주소만 입력 (경로 X)
+terraform apply -auto-approve
 ```
+
+> **PowerShell 주의**: `terraform apply -target=aws_eks_cluster.this ...` 를 그냥 치면
+> `Error: Too many command line arguments` / `Invalid target "aws_eks_cluster"` 가 난다 (PowerShell 이 값을 쪼갬).
+> → `terraform apply --% -target=...` 처럼 **`--%` 를 apply 뒤에** 붙이면 이후 인자를 그대로 넘긴다.
 
 * `null_resource.build_push` 가 apply 안에서 ECR 로그인 + docker build + push 를 수행 (Docker Desktop 필수).
 * db-init Job 이 테이블 생성 + `load_user.dump` 적재 (user 테이블이 비어있을 때만 → 재실행 안전).
+  덤프 안의 잘못된 `USE <db>;` 줄은 적재 시 자동 제거된다.
 * 명명 프로파일 사용 시 매 apply 에 `-var aws_profile=<이름>` 추가.
+* **WAF 룰만 빠르게 바꿀 때**: `terraform apply --% -target=aws_wafv2_web_acl.cloudfront -auto-approve`
 
 ---
 
@@ -126,7 +150,9 @@ curl.exe -s -o NUL -w "%{http_code}`n" "$EP/.env"                               
 |---|---|---|
 | `waf_blocked_user_agents` | sqlmap, nikto, nmap, masscan, acunetix, havij, nuclei, wpscan, dirbuster, gobuster, attack | 스캐너/공격도구 UA |
 | `waf_blocked_headers` | `["x-junk"]` | 쓰레기 헤더가 존재하는 요청 |
+| `waf_blocked_header_values` | `[]` | 특정 헤더 값에 문자열 포함 시 (예: `content-type`=`multipart/form-data`) |
 | `waf_blocked_body_patterns` | `$ne` `$gt` `$where` `sleep(` `benchmark(` | 인젝션 body 토큰 |
+| `waf_blocked_query_patterns` | `[]` | 쿼리스트링(URL 디코딩+소문자 후) 포함 시 (예: `/etc/passwd`, `{{`) — 명령주입·SSTI·경로탐색 |
 | `waf_block_private_xff` | `true` | XFF 에 루프백/사설/169.254 IP (위조) |
 | AWS 관리형 룰 3종 | 항상 ON | SQLi/XSS/KnownBadInputs (유효 경로만 scope) |
 

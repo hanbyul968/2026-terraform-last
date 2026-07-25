@@ -25,6 +25,7 @@ import argparse
 import csv
 import sys
 import time
+from urllib.parse import unquote_plus
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
@@ -38,6 +39,18 @@ fields `httpRequest.headers.{i}.name`  as header_key,
        responseCodeSent as status
 | filter ispresent(header_key)
 | stats count(*) as cnt by header_key, header_value, endpoint, action, status
+| sort cnt desc
+| limit {limit}
+"""
+
+QUERY_ARGS_TEMPLATE = """\
+fields httpRequest.args as query_string,
+       httpRequest.uri as endpoint,
+       httpRequest.httpMethod as method,
+       action,
+       responseCodeSent as status
+| filter action = "ALLOW" and ispresent(query_string) and query_string != ""
+| stats count(*) as cnt by query_string, endpoint, method, action, status
 | sort cnt desc
 | limit {limit}
 """
@@ -72,6 +85,51 @@ def verdict(header_key, header_value, endpoint):
     if hk not in NORMAL_HEADERS:
         return "SUSPECT"      # 정상 트래픽에 없는 낯선 헤더 → 사람이 판단 후 차단 후보
     return "OK"               # 정상
+
+
+def decode_query(value):
+    """가독성과 우회 탐지를 위해 쿼리를 최대 2회 URL 디코딩한다."""
+    decoded = value or ""
+    for _ in range(2):
+        nxt = unquote_plus(decoded)
+        if nxt == decoded:
+            break
+        decoded = nxt
+    return decoded
+
+
+def query_verdict(value, endpoint):
+    """허용된 쿼리스트링 중 오탐 가능성이 낮은 공격 페이로드만 분류한다."""
+    ep = (endpoint or "").split("?")[0]
+    if not (ep in VALID_EP or ep.startswith(IMAGES_PREFIX)):
+        return "404"
+    q = decode_query(value).lower()
+    if any(x in q for x in ("/etc/passwd", "/bin/bash", "/bin/sh", "; cat ", "| cat ", "&& cat ")):
+        return "Q-CMD"
+    if ("{{" in q and "}}" in q) or "${7*7}" in q:
+        return "Q-SSTI"
+    if "../" in q or "..\\" in q:
+        return "Q-TRAV"
+    if any(x in q for x in (" union select ", "sleep(", "benchmark(", "' or 1=1", '" or 1=1')):
+        return "Q-SQLI"
+    if any(x in q for x in ("<script", "javascript:")):
+        return "Q-XSS"
+    if any(x in q for x in ("$ne", "$where", "$regex")):
+        return "Q-NOSQL"
+    return "OK"
+
+
+def query_block_token(value):
+    """전체 정상 쿼리를 막지 않도록 공격을 식별하는 최소 토큰만 제안한다."""
+    q = decode_query(value).lower()
+    for token in ("/etc/passwd", "/bin/bash", "/bin/sh", "{{", "../",
+                  " union select ", "sleep(", "benchmark(", "<script", "javascript:",
+                  "$where", "$regex", "$ne"):
+        if token in q:
+            return token.strip()
+    if "; cat " in q or "| cat " in q or "&& cat " in q:
+        return "cat "
+    return ""
 
 
 def suggest_tfvars(gaps):
@@ -111,6 +169,30 @@ def run_query(logs, log_group, start_ts, end_ts, index, limit, poll=2.0, timeout
             return res.get("results", [])
         if time.time() > deadline:
             print(f"[index {index}] 폴링 타임아웃, 쿼리 취소", file=sys.stderr)
+            try:
+                logs.stop_query(queryId=qid)
+            except Exception:
+                pass
+            return []
+        time.sleep(poll)
+
+
+def run_query_strings(logs, log_group, start_ts, end_ts, limit, poll=2.0, timeout=300):
+    """ALLOW 요청의 쿼리스트링을 요청 단위로 집계한다."""
+    q = QUERY_ARGS_TEMPLATE.format(limit=limit)
+    resp = logs.start_query(logGroupName=log_group, startTime=start_ts,
+                            endTime=end_ts, queryString=q)
+    qid = resp["queryId"]
+    deadline = time.time() + timeout
+    while True:
+        res = logs.get_query_results(queryId=qid)
+        status = res["status"]
+        if status in ("Complete", "Failed", "Cancelled", "Timeout"):
+            if status != "Complete":
+                print(f"[query-string] 쿼리 종료 상태: {status}", file=sys.stderr)
+            return res.get("results", [])
+        if time.time() > deadline:
+            print("[query-string] 폴링 타임아웃, 쿼리 취소", file=sys.stderr)
             try:
                 logs.stop_query(queryId=qid)
             except Exception:
@@ -179,6 +261,18 @@ def main():
         for fut in futures:
             all_rows.extend(fut.result())
 
+    query_rows = run_query_strings(logs, args.log_group, start_ts, end_ts, args.limit)
+    query_agg = defaultdict(int)
+    for row in query_rows:
+        d = row_to_dict(row)
+        key = (d.get("query_string", ""), d.get("endpoint", ""), d.get("method", ""),
+               d.get("action", ""), d.get("status", ""))
+        try:
+            query_agg[key] += int(d.get("cnt", 0))
+        except ValueError:
+            pass
+    query_merged = sorted(query_agg.items(), key=lambda kv: kv[1], reverse=True)
+
     # (header_key, header_value, endpoint, action, status) 합산
     agg = defaultdict(int)
     for row in all_rows:
@@ -199,7 +293,10 @@ def main():
             w.writerow(["verdict", "waf_action", "status", "cnt", "endpoint", "header_key", "header_value"])
             for (hk, hv, ep, act, st), cnt in merged:
                 w.writerow([verdict(hk, hv, ep), act, st, cnt, ep, hk, hv])
-        print(f"총 {len(merged)}행 -> {args.output} 저장 완료", file=sys.stderr)
+            for (qs, ep, method, act, st), cnt in query_merged:
+                w.writerow([query_verdict(qs, ep), act, st, cnt, ep,
+                            "query-string", decode_query(qs)])
+        print(f"총 {len(merged) + len(query_merged)}행 -> {args.output} 저장 완료", file=sys.stderr)
 
     # ---- 1) action 요약 ----
     act_sum = defaultdict(int)
@@ -229,9 +326,33 @@ def main():
             for line in sug:
                 print("  " + line)
             print("  # 오차단 걱정되면 먼저: waf_custom_rule_action = \"count\" 로 관찰 후 \"block\"")
-            print("  # 적용: cd ..\\terraform ; terraform apply -auto-approve -var \"k8s_provider_ready=true\"")
+            print("  # 적용: cd ..\\terraform ; terraform apply -auto-approve")
 
-    # ---- 3) 전체 표 ----
+    # ---- 3) ALLOW 요청 쿼리스트링 (헤더와 별도 집계: 요청 수가 중복되지 않음) ----
+    print("\n=== ALLOW 요청 쿼리스트링 (상위 %d) ===" % args.top)
+    print("판정 범례: Q-CMD=명령주입  Q-SSTI=템플릿주입  Q-TRAV=경로탐색  "
+          "Q-SQLI=SQLi  Q-XSS=XSS  Q-NOSQL=NoSQLi  OK=정상")
+    if not query_merged:
+        print("  쿼리스트링이 있는 ALLOW 요청 없음")
+    else:
+        qrows = [[query_verdict(qs, ep), act or "-", st or "-", cnt,
+                  _short(ep, 22), "query-string", _short(decode_query(qs), 70)]
+                 for (qs, ep, method, act, st), cnt in query_merged[: args.top]]
+        print(_table(qrows, ["판정", "WAF", "status", "cnt", "endpoint", "header", "value"]))
+
+    query_gaps = [((qs, ep, method, act, st), cnt)
+                  for (qs, ep, method, act, st), cnt in query_merged
+                  if query_verdict(qs, ep).startswith("Q-")]
+    if query_gaps:
+        tokens = sorted({query_block_token(qs) for (qs, ep, method, act, st), cnt in query_gaps
+                         if query_block_token(qs)})
+        print("\n=== 제안만 제공: 비정상 쿼리스트링 차단 방법 (자동 적용 안 함) ===")
+        print("  terraform/terraform.tfvars 에 기존 값과 병합:")
+        print('  waf_blocked_query_patterns = [' + ", ".join(repr(t) for t in tokens).replace("'", '"') + ']')
+        print("  # URL_DECODE + LOWERCASE 후 query string 포함 여부로 차단하도록 terraform 코드가 준비됨")
+        print("  # 적용 여부는 사용자가 판단해서 terraform apply (이 스크립트/대시보드는 적용하지 않음)")
+
+    # ---- 4) 전체 헤더 표 ----
     print("\n=== 전체 (상위 %d) ===" % args.top)
     print("판정 범례: 404=미정의경로(정상404)  403-UA=악성UA  403-XFF=XFF위조  SUSPECT=낯선헤더(판단필요)  OK=정상")
     rows = [[verdict(hk, hv, ep), act or "-", st or "-", cnt, _short(ep, 22), hk, _short(hv, 30)]

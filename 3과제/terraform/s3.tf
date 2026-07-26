@@ -1,7 +1,7 @@
 resource "aws_s3_bucket" "images" {
-  bucket        = "${local.name}-images"
+  bucket        = "${local.bucket_prefix}-images"
   force_destroy = true
-  tags          = { Name = "${local.name}-images" }
+  tags          = { Name = "${local.bucket_prefix}-images" }
 }
 
 resource "aws_s3_bucket_public_access_block" "images" {

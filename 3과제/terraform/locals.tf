@@ -1,5 +1,7 @@
 locals {
   name = var.project
+  # S3 버킷 이름 prefix — bucket_prefix 지정 시 그 값, 아니면 project. (전역 고유용)
+  bucket_prefix = var.bucket_prefix != "" ? var.bucket_prefix : var.project
   tags = {
     Project = var.project
   }

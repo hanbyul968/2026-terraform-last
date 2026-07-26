@@ -201,6 +201,7 @@ curl.exe -s -o NUL -w "%{http_code}`n" -H "X-새헤더: 1" "$EP/v1/user?email=x@
 | 컨테이너 포트 (8080 고정이지만 만약) | `container_port` | Deployment·probe·Service·TG·SG |
 | 이미지 경로 (`/images`) | `images_prefix` | CloudFront 캐시 + URI rewrite 함수 |
 | 리전/노드타입/EKS버전/노드수 | `region`+`azs` / `node_instance_type` / `eks_version` / `node_*_size` | |
+| S3 버킷명 (전역 고유·충돌 회피) | `bucket_prefix` | images/artifacts 버킷명 + `S3_BUCKET` env 자동 반영 |
 | 이름 충돌 시 새 배포 | `project` | 모든 리소스 이름 |
 
 변수로 안 되는 것 (직접 수정):
@@ -212,9 +213,30 @@ curl.exe -s -o NUL -w "%{http_code}`n" -H "X-새헤더: 1" "$EP/v1/user?email=x@
 | DB 유저 | `variables.tf` `db_username` |
 | 테이블 스키마 | `k8s_base.tf` db-init Job 의 `CREATE TABLE` |
 | 새 환경변수 요구 | `k8s_base.tf` ConfigMap/Secret (env_from 으로 자동 주입됨) |
-| S3 버킷명 지정 | `s3.tf` |
+| S3 버킷명 지정 | `bucket_prefix` 변수로 지정 (아래 참고) |
 
 > ⚠ terraform 변수를 바꿔도 **부하 도구(`tuning/config.ps1`, `부하/app.js`)의 URL·body 는 별도로** 새 스펙에 맞춰야 한다.
+
+### S3 버킷 이름 (전역 고유·충돌 회피)
+
+S3 버킷명은 **전 세계에서 유일**해야 한다. 기본값 `wsi2026-images`/`wsi2026-artifacts` 가 이미 존재해
+`BucketAlreadyExists` 가 나면 `bucket_prefix` 로 바꾼다.
+
+```powershell
+# 기본(지정 안 함): wsi2026-images / wsi2026-artifacts
+terraform apply -auto-approve
+# 충돌 시: <prefix>-images / <prefix>-artifacts  (소문자·숫자·하이픈, 3~63자)
+terraform apply --% -var bucket_prefix=myteam-1234 -auto-approve
+```
+
+- **`S3_BUCKET` env 는 따로 안 바꿔도 된다.** `s3-config` ConfigMap 이 `aws_s3_bucket.images.bucket`
+  을 참조하므로 새 버킷 이름을 자동으로 따라간다.
+- 단, apply 로 ConfigMap 이 바뀌어도 **이미 뜬 파드는 옛 값을 유지**하므로 롤링 재배포로 반영:
+  ```powershell
+  kubectl -n app rollout restart deploy/user deploy/product
+  ```
+- `bucket_prefix` 를 바꾸면 버킷 이름이 달라져 **버킷이 교체(destroy+create)** 된다. 둘 다 `force_destroy=true`
+  라 기존 객체는 삭제되고 seed 는 자동 재업로드된다. (운영 중 업로드된 이미지가 있으면 유실 주의)
 
 ### 환경변수 추가 (앱이 새 env 를 요구할 때)
 

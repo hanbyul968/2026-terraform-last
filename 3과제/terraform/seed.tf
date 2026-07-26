@@ -3,9 +3,9 @@
 
 # 시드/아티팩트 전용 비공개 버킷 (고정 이름)
 resource "aws_s3_bucket" "artifacts" {
-  bucket        = "${local.name}-artifacts"
+  bucket        = "${local.bucket_prefix}-artifacts"
   force_destroy = true
-  tags          = { Name = "${local.name}-artifacts" }
+  tags          = { Name = "${local.bucket_prefix}-artifacts" }
 }
 
 resource "aws_s3_bucket_public_access_block" "artifacts" {

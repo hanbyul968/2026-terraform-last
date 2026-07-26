@@ -216,6 +216,59 @@ curl.exe -s -o NUL -w "%{http_code}`n" -H "X-새헤더: 1" "$EP/v1/user?email=x@
 
 > ⚠ terraform 변수를 바꿔도 **부하 도구(`tuning/config.ps1`, `부하/app.js`)의 URL·body 는 별도로** 새 스펙에 맞춰야 한다.
 
+### 환경변수 추가 (앱이 새 env 를 요구할 때)
+
+앱 컨테이너는 값을 직접 박지 않고 **Secret/ConfigMap 을 `env_from` 으로 통째 주입**받는다.
+그래서 키만 추가하면 env 로 자동 노출된다. (파일: `k8s_base.tf`)
+
+| 종류 | 넣는 곳 (`k8s_base.tf`) | 리소스 |
+|---|---|---|
+| 비밀값 (비번·토큰·접속정보) | `kubernetes_secret.db` 의 `data` | Secret `db-credentials` |
+| 일반값 (엔드포인트·플래그·버킷 등) | `kubernetes_config_map.s3` 의 `data` | ConfigMap `s3-config` |
+
+```hcl
+# 예) 일반값 FOO 추가 — k8s_base.tf 의 ConfigMap
+resource "kubernetes_config_map" "s3" {
+  # ...
+  data = {
+    S3_BUCKET  = aws_s3_bucket.images.bucket
+    AWS_REGION = var.region
+    FOO        = "bar"          # ← 추가하면 user/product 에 자동 주입
+  }
+}
+```
+
+**주입 범위 주의** (`k8s_apps.tf`):
+- `user`, `product` Deployment 는 이미 `env_from { secret_ref = db-credentials }` + `env_from { config_map_ref = s3-config }` 라 위 키가 자동 반영된다.
+- `stress` Deployment 는 `env_from` 이 **없다**. stress 에도 필요하면 컨테이너에 추가:
+  ```hcl
+  container {
+    # ...
+    env_from {
+      config_map_ref { name = kubernetes_config_map.s3.metadata[0].name }
+    }
+  }
+  ```
+- 특정 컨테이너에 값 **하나만** 넣을 때(공유 불필요)는 `env` 로 직접:
+  ```hcl
+  container {
+    env {
+      name  = "FOO"
+      value = "bar"
+    }
+  }
+  ```
+
+**적용 + 반영 확인** — ConfigMap/Secret 을 바꿔도 이미 뜬 파드의 env 는 갱신되지 않으니 **롤링 재배포**가 필요하다:
+```powershell
+terraform apply -auto-approve
+kubectl -n app rollout restart deploy/user deploy/product   # env_from 은 재시작해야 반영
+kubectl -n app rollout status  deploy/user
+kubectl -n app exec deploy/user -- printenv | Select-String FOO   # 값 확인
+```
+
+> 민감값을 AWS Secrets Manager 로 관리하려면 `rds_proxy.tf`/`seed.tf` 의 IRSA + data source 패턴을 참고해 Secret 에 매핑한다.
+
 ---
 
 ## 7. 성능/비용 튜닝

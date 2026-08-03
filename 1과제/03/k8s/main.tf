@@ -316,6 +316,7 @@ resource "helm_release" "kps" {
     region         = var.region
     log_group      = var.app_log_group
     dashboard_name = var.dashboard_name
+    cluster_domain = var.cluster_dns_domain
   })]
 
   timeout = 900

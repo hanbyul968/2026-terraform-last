@@ -478,6 +478,53 @@ resource "aws_wafv2_web_acl" "cloudfront" {
     }
   }
 
+
+  # 재무쌤 과제 (lenth 5만 이상 막기)
+  rule {
+    name     = "StressBodyTooLarge"
+    priority = 71
+    action {
+      block {}
+    }
+    statement {
+      and_statement {
+        statement {
+          byte_match_statement {
+            search_string         = "/v1/stress"
+            positional_constraint = "EXACTLY"
+            field_to_match {
+              uri_path {}
+            }
+            text_transformation {
+              priority = 0
+              type     = "NONE"
+            }
+          }
+        }
+        statement {
+          regex_match_statement {
+            regex_string = "^([5-9][0-9]{4}|[0-9]{6,})$" # 50,000 이상의 숫자 (5자리 수 50,000~99,999 또는 6자리 이상의 수)
+            field_to_match {
+              single_header {
+                name = "content-length"
+              }
+            }
+            text_transformation {
+              priority = 0
+              type     = "NONE"
+            }
+          }
+        }
+      }
+    }
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "stress-body-too-large"
+      sampled_requests_enabled   = true
+    }
+  }
+
+
   visibility_config {
     cloudwatch_metrics_enabled = true
     metric_name                = "${local.name}-acl"

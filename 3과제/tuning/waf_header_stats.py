@@ -235,6 +235,8 @@ def main():
                     help="유효 API 경로 콤마 목록 (기본: /v1/user,/v1/product,/v1/stress,/healthcheck). "
                          "대회날 경로가 바뀌면 terraform var 와 동일하게 지정.")
     ap.add_argument("--images-prefix", default=None, help="이미지 경로 prefix (기본 /images/)")
+    ap.add_argument("--full-query", action="store_true",
+                    help="ALLOW 쿼리스트링을 자르지 않고 전문 출력 (기본은 70자에서 …)")
     args = ap.parse_args()
 
     global IMAGES_PREFIX
@@ -336,7 +338,8 @@ def main():
         print("  쿼리스트링이 있는 ALLOW 요청 없음")
     else:
         qrows = [[query_verdict(qs, ep), act or "-", st or "-", cnt,
-                  _short(ep, 22), "query-string", _short(decode_query(qs), 70)]
+                  _short(ep, 22), "query-string",
+                  decode_query(qs) if args.full_query else _short(decode_query(qs), 70)]
                  for (qs, ep, method, act, st), cnt in query_merged[: args.top]]
         print(_table(qrows, ["판정", "WAF", "status", "cnt", "endpoint", "header", "value"]))
 

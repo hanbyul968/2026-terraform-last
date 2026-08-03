@@ -95,13 +95,13 @@ resource "aws_iam_role_policy" "lambda" {
 
 data "archive_file" "score" {
   type        = "zip"
-  source_file = "${path.module}/src/score.py"
+  source_file = "${path.module}/src/index.py"
   output_path = "${path.module}/score.zip"
 }
 resource "aws_lambda_function" "score" {
   function_name    = "wsc2026-student-score-function"
   role             = aws_iam_role.lambda.arn
-  handler          = "score.handler"
+  handler          = "index.handler"
   runtime          = "python3.12"
   filename         = data.archive_file.score.output_path
   source_code_hash = data.archive_file.score.output_base64sha256

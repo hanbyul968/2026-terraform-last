@@ -68,13 +68,13 @@ grafana:
       uid: prometheus
       type: prometheus
       access: proxy
-      url: http://kube-prometheus-stack-prometheus.observability.svc:9090
+      url: http://kube-prometheus-stack-prometheus.observability.svc.${cluster_domain}:9090
       isDefault: true
     - name: alertmanager
       uid: alertmanager
       type: alertmanager
       access: proxy
-      url: http://kube-prometheus-stack-alertmanager.observability.svc:9093
+      url: http://kube-prometheus-stack-alertmanager.observability.svc.${cluster_domain}:9093
       jsonData:
         implementation: prometheus
     - name: cloudwatch

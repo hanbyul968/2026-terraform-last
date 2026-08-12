@@ -1,6 +1,6 @@
 # Karpenter — fast node autoscaling for traffic bursts.
 # Managed node group stays as the stable baseline (runs Karpenter itself);
-# Karpenter provisions extra t3.c5.large capacity on demand and consolidates
+# Karpenter provisions extra t3.medium capacity on demand and consolidates
 # it away when idle (cost ratio scoring).
 
 locals {
@@ -213,7 +213,7 @@ resource "kubectl_manifest" "karpenter_nodepool" {
             {
               key      = "node.kubernetes.io/instance-type"
               operator = "In"
-              values   = ["t3.c5.large"]
+              values   = ["t3.medium"]
             },
             {
               key      = "karpenter.sh/capacity-type"

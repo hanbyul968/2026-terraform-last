@@ -103,9 +103,24 @@ for PARN in $CALLER_ARN ${GRADER_ARNS:-}; do
 done
 
 # --- 5. kubectl apply ---
+# (5-1) namespace / ServiceAccount 를 먼저 생성 — Pod Identity association 대상 SA 가 존재해야 함
 kubectl apply -f namespace.yaml
 kubectl apply -f monitoring-ns.yaml
 kubectl apply -f serviceaccount.yaml
+
+# (5-2) Pod Identity Association 을 '워크로드 배포 전에' 생성한다.
+#   deployment/fluentd/fluent-bit 는 unicorn-book-app-sa 로 DynamoDB/KMS/CloudWatch 에 접근한다.
+#   association 이 유효해지기 전에 파드가 기동하면 자격증명 주입을 못 받고 IMDS(노드 인스턴스 롤)로
+#   폴백하여 dynamodb:PutItem 이 AccessDenied → 앱이 500("Failed to save data")을 반환한다.
+#   (파드 2개 중 일부만 슬립되면 ALB 라운드로빈으로 간헐 500 이 발생함)
+aws eks create-pod-identity-association \
+  --cluster-name unicorn-eks-cluster \
+  --namespace unicorn \
+  --service-account unicorn-book-app-sa \
+  --role-arn arn:aws:iam::$ACCOUNT:role/unicorn-book-app-role 2>/dev/null
+sleep 15   # association 이 pod-identity-agent 에 전파될 시간 확보
+
+# (5-3) 워크로드 배포 — 이 시점부터 파드는 기동과 동시에 Pod Identity 자격증명을 주입받는다
 kubectl apply -f deployment.yaml
 kubectl apply -f service.yaml
 kubectl apply -f fluentd.yaml
@@ -119,16 +134,12 @@ for id in $(kubectl get nodes -l unicorn=addon -o jsonpath='{.items[*].spec.prov
   aws ec2 create-tags --resources $id --tags Key=Name,Value=unicorn-k8snode-addon-node
 done
 
-# --- 7. Pod Identity Association ---
-aws eks create-pod-identity-association \
-  --cluster-name unicorn-eks-cluster \
-  --namespace unicorn \
-  --service-account unicorn-book-app-sa \
-  --role-arn arn:aws:iam::$ACCOUNT:role/unicorn-book-app-role 2>/dev/null
+# --- 7. (Pod Identity Association 은 5단계에서 배포 '전에' 생성함) ---
 
-# --- 8. Pod restart + ALB Target 등록 ---
-kubectl rollout restart deployment unicorn-book-app-deploy -n unicorn
-kubectl rollout status deployment/unicorn-book-app-deploy -n unicorn --timeout=120s
+# --- 8. Pod Ready 대기 + ALB Target 등록 ---
+#   association 을 배포 전에 만들었으므로 rollout restart 는 불필요하다
+#   (파드가 이미 올바른 Pod Identity 자격증명으로 기동함).
+kubectl rollout status deployment/unicorn-book-app-deploy -n unicorn --timeout=180s
 TG_ARN=$(aws elbv2 describe-target-groups --names unicorn-tg --query "TargetGroups[0].TargetGroupArn" --output text)
 for ip in $(kubectl get pods -n unicorn -l app=book -o jsonpath='{.items[*].status.podIP}'); do
   aws elbv2 register-targets --target-group-arn $TG_ARN --targets Id=$ip,Port=8080

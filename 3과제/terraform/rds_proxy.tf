@@ -96,9 +96,10 @@ resource "aws_db_proxy_default_target_group" "this" {
   db_proxy_name = aws_db_proxy.this.name
 
   connection_pool_config {
-    # RDS max_connections(파라미터그룹 300) 의 100%까지 풀링.
-    max_connections_percent      = 100
-    max_idle_connections_percent = 50
+    # t3.micro(1GB) 보호: 백엔드 커넥션 상한을 낮추고 유휴는 빠르게 회수.
+    # 프록시가 클라이언트 다수를 소수 백엔드 커넥션으로 멀티플렉싱하므로 낮아도 됨.
+    max_connections_percent      = 40
+    max_idle_connections_percent = 10
     connection_borrow_timeout    = 120
   }
 }

@@ -52,9 +52,11 @@ cat > /opt/task1/terraform.tfvars <<TFVARS
 number = "${number}"
 TFVARS
 
-# ---- 6) 연결 독립형 Terraform worker + 원클릭 실행기 ----
-# SSM WebSocket이 끊겨도 systemd unit은 Bastion에서 계속 실행된다.
-cat > /opt/task1/terraform-apply-worker.sh <<'WORKER'
+# ---- 6) 원클릭 실행기 (foreground) ----
+#   다른 과제(02/03)와 동일하게 terraform 을 foreground 로 실행한다.
+#   systemd-run/journalctl 래핑을 쓰지 않으므로 apply 진행 로그
+#   (예: module.VPC.aws_vpc.this: Creating...)가 저널 prefix 없이 그대로 출력된다.
+cat > /opt/task1/run.sh <<'RUN'
 #!/bin/bash
 set -Eeuo pipefail
 cd /opt/task1
@@ -102,29 +104,6 @@ echo ""
 echo "================= OUTPUTS ================="
 terraform output || true
 touch /opt/task1/TERRAFORM_APPLY_SUCCESS
-WORKER
-chmod +x /opt/task1/terraform-apply-worker.sh
-
-cat > /opt/task1/run.sh <<'RUN'
-#!/bin/bash
-set -Eeuo pipefail
-UNIT="unicorn-task1-terraform"
-
-if sudo systemctl is-active --quiet "$UNIT"; then
-  echo "Terraform apply is already running in $UNIT. Following logs..."
-else
-  sudo systemctl reset-failed "$UNIT" 2>/dev/null || true
-  sudo systemd-run \
-    --unit="$UNIT" \
-    --collect \
-    --property=Type=exec \
-    --property=TimeoutStartSec=infinity \
-    /bin/bash /opt/task1/terraform-apply-worker.sh
-  echo "Started $UNIT. The apply will survive SSM disconnection."
-fi
-
-echo "Reconnect command: sudo journalctl -fu $UNIT"
-sudo journalctl -fu "$UNIT"
 RUN
 chmod +x /opt/task1/run.sh
 

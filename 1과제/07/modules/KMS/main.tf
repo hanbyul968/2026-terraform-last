@@ -59,6 +59,25 @@ resource "aws_kms_key" "platform" {
         Principal = { Service = "logs.${data.aws_region.current.name}.amazonaws.com" }
         Action    = ["kms:Encrypt", "kms:Decrypt", "kms:GenerateDataKey*", "kms:DescribeKey"]
         Resource  = "*"
+      },
+      # EBS volume encryption for EKS managed node groups is performed by the
+      # EC2 Auto Scaling service-linked role. Without these two statements the
+      # ASG cannot create encrypted volumes and instances terminate with
+      # Client.InvalidKMSKey.InvalidState.
+      {
+        Sid       = "AllowAutoScalingSLRUseOfKey"
+        Effect    = "Allow"
+        Principal = { AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling" }
+        Action    = ["kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:DescribeKey"]
+        Resource  = "*"
+      },
+      {
+        Sid       = "AllowAutoScalingSLRCreateGrant"
+        Effect    = "Allow"
+        Principal = { AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling" }
+        Action    = "kms:CreateGrant"
+        Resource  = "*"
+        Condition = { Bool = { "kms:GrantIsForAWSResource" = "true" } }
       }
     ]
   })

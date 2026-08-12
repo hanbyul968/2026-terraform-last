@@ -44,7 +44,6 @@ resource "aws_lambda_function" "book_get" {
   }
 
   depends_on = [
-    aws_iam_role_policy_attachment.book_function_basic,
     aws_iam_role_policy_attachment.book_function,
   ]
 }

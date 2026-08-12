@@ -15,8 +15,10 @@ resource "kubernetes_secret" "db" {
   data = {
     MYSQL_USER     = var.db_username
     MYSQL_PASSWORD = random_password.db.result
-    # RDS Proxy와 Go mysql 드라이버 호환 이슈로 직접 RDS 엔드포인트 사용
-    MYSQL_HOST   = aws_db_instance.this.address
+    # 앱은 ProxySQL 경유(proxysql.tf). ProxySQL이 프론트엔드에 native 인증 제시(go-sql-driver 무관) +
+    # RDS 백엔드 커넥션을 소수로 상한 → t3.micro 보호. 엔진명이 아닌 DNS라 문제지 허용.
+    # db_init는 아래에서 MYSQL_HOST를 직결 RDS로 override하여 ALTER/스키마/시드를 직접 수행.
+    MYSQL_HOST   = "${kubernetes_service.proxysql.metadata[0].name}.${kubernetes_namespace.app.metadata[0].name}.svc.cluster.local"
     MYSQL_PORT   = "3306"
     MYSQL_DBNAME = var.db_name
   }
@@ -80,6 +82,9 @@ resource "kubernetes_job" "db_init" {
             until mysql -h"$MYSQL_HOST" -P"$MYSQL_PORT" -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" -e "SELECT 1"; do
               echo waiting for db; sleep 5
             done
+            # RDS Proxy는 caching_sha2_password + require_tls=false 조합에서 1045로 거부한다.
+            # 앱 유저를 native password로 바꿔 프록시 경유 인증이 되게 한다(비밀번호는 그대로 유지 → idempotent).
+            mysql -h"$MYSQL_HOST" -P"$MYSQL_PORT" -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" -e "ALTER USER '$MYSQL_USER'@'%' IDENTIFIED WITH mysql_native_password BY '$MYSQL_PASSWORD';"
             mysql -h"$MYSQL_HOST" -P"$MYSQL_PORT" -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DBNAME" <<'SQL'
             CREATE TABLE IF NOT EXISTS user (
               id VARCHAR(255) NOT NULL,
@@ -120,6 +125,12 @@ resource "kubernetes_job" "db_init" {
             fi
             EOT
           ]
+          # db_init는 프록시가 아니라 RDS에 직접 접속한다: 프록시 인증을 고치는 ALTER를
+          # 프록시 경유로는 실행할 수 없으므로(치킨-에그). 앱만 프록시(secret의 MYSQL_HOST)를 쓴다.
+          env {
+            name  = "MYSQL_HOST"
+            value = aws_db_instance.this.address
+          }
           env_from {
             secret_ref { name = kubernetes_secret.db.metadata[0].name }
           }

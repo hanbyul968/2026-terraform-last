@@ -35,7 +35,7 @@ locals {
   kms_admin_statement = {
     Sid       = "AllowKeyAdministrator"
     Effect    = "Allow"
-    Principal = { AWS = local.kms_admin_arn }
+    Principal = { AWS = "arn:${local.partition}:iam::${local.account_id}:role/wsc-task1-bastion-role" }
     Action    = local.kms_admin_actions
     Resource  = "*"
   }

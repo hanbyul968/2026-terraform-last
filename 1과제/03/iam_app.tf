@@ -52,11 +52,8 @@ resource "aws_iam_role" "book_function" {
   })
 }
 
-# CloudWatch 로그 기본 권한 (관리형)
-resource "aws_iam_role_policy_attachment" "book_function_basic" {
-  role       = aws_iam_role.book_function.name
-  policy_arn = "arn:${local.partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
-}
+# CloudWatch 로그 권한은 관리형(AWSLambdaBasicExecutionRole) 대신
+# wsc2026-book-function-policy 인라인에 포함(위 "Logs" Statement) → 7-2 예상출력과 동일하게 정책 1개만 부착.
 
 resource "aws_iam_policy" "book_function" {
   name = local.func_policy
@@ -74,6 +71,14 @@ resource "aws_iam_policy" "book_function" {
         Effect   = "Allow"
         Action   = ["kms:Decrypt"]
         Resource = local.kms_function_arn
+      },
+      {
+        # CloudWatch 로그 권한(관리형 AWSLambdaBasicExecutionRole 대신 인라인).
+        # 7-2 예상출력이 정책 1개(wsc2026-book-function-policy)만 나오도록 함.
+        Sid      = "Logs"
+        Effect   = "Allow"
+        Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
+        Resource = "arn:${local.partition}:logs:*:*:*"
       }
     ]
   })

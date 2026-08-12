@@ -89,19 +89,19 @@
     { "id": 103, "title": "Application Traffic", "type": "row", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 }, "panels": [] },
     {
       "id": 13, "title": "App Request Count", "type": "timeseries", "gridPos": { "h": 8, "w": 8, "x": 0, "y": 25 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [{ "refId": "A", "expr": "sum(rate(http_requests_total{namespace=\"wsc2026\"}[1m]))", "legendFormat": "requests/sec" }]
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "targets": [{ "refId": "A", "queryMode": "Logs", "region": "ap-northeast-2", "logGroupNames": ["/wsc2026/app/log"], "expression": "filter @message not like /health/ | stats count(*) as requests by bin(1m)" }]
     },
     {
       "id": 14, "title": "App Response Time", "type": "timeseries", "gridPos": { "h": 8, "w": 8, "x": 8, "y": 25 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
       "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
-      "targets": [{ "refId": "A", "expr": "sum(rate(http_request_duration_seconds_sum{namespace=\"wsc2026\"}[1m])) / clamp_min(sum(rate(http_request_duration_seconds_count{namespace=\"wsc2026\"}[1m])), 0.001)", "legendFormat": "average" }]
+      "targets": [{ "refId": "A", "queryMode": "Logs", "region": "ap-northeast-2", "logGroupNames": ["/wsc2026/app/log"], "expression": "parse @message /duration=(?<d>[0-9.]+)(?<u>[a-zµ]+)/ | filter @message not like /health/ | fields (u=\"µs\")*d/1000000 + (u=\"ms\")*d/1000 + (u=\"s\")*d as sec | stats avg(sec) as avg_seconds by bin(1m)" }]
     },
     {
       "id": 15, "title": "App Status Code", "type": "timeseries", "gridPos": { "h": 8, "w": 8, "x": 16, "y": 25 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [{ "refId": "A", "expr": "sum by (status) (rate(http_requests_total{namespace=\"wsc2026\"}[1m]))", "legendFormat": "HTTP {{status}}" }]
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "targets": [{ "refId": "A", "queryMode": "Logs", "region": "ap-northeast-2", "logGroupNames": ["/wsc2026/app/log"], "expression": "parse @message /status=(?<status>[0-9]+)/ | filter @message not like /health/ | stats count(*) by status, bin(1m)" }]
     },
     {
       "id": 16, "title": "App Application Logs", "type": "logs", "gridPos": { "h": 8, "w": 24, "x": 0, "y": 33 },
@@ -112,46 +112,8 @@
 
     { "id": 104, "title": "Alert", "type": "row", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 41 }, "panels": [] },
     {
-      "id": 17, "title": "PodHighCPU", "type": "stat", "gridPos": { "h": 6, "w": 4, "x": 0, "y": 42 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "mappings": [{ "type": "value", "options": { "0": { "text": "Normal" }, "1": { "text": "Firing" } } }], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] }, "color": { "mode": "thresholds" } }, "overrides": [] },
-      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "values": false } },
-      "targets": [{ "refId": "A", "expr": "clamp_max(sum(ALERTS{alertname=\"PodHighCPU\",alertstate=\"firing\"}) or vector(0), 1)", "instant": true }]
-    },
-    {
-      "id": 18, "title": "PodHighMemory", "type": "stat", "gridPos": { "h": 6, "w": 4, "x": 4, "y": 42 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "mappings": [{ "type": "value", "options": { "0": { "text": "Normal" }, "1": { "text": "Firing" } } }], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] }, "color": { "mode": "thresholds" } }, "overrides": [] },
-      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "values": false } },
-      "targets": [{ "refId": "A", "expr": "clamp_max(sum(ALERTS{alertname=\"PodHighMemory\",alertstate=\"firing\"}) or vector(0), 1)", "instant": true }]
-    },
-    {
-      "id": 19, "title": "PodNotReady", "type": "stat", "gridPos": { "h": 6, "w": 4, "x": 8, "y": 42 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "mappings": [{ "type": "value", "options": { "0": { "text": "Normal" }, "1": { "text": "Firing" } } }], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] }, "color": { "mode": "thresholds" } }, "overrides": [] },
-      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "values": false } },
-      "targets": [{ "refId": "A", "expr": "clamp_max(sum(ALERTS{alertname=\"PodNotReady\",alertstate=\"firing\"}) or vector(0), 1)", "instant": true }]
-    },
-    {
-      "id": 20, "title": "HighErrorRate", "type": "stat", "gridPos": { "h": 6, "w": 4, "x": 12, "y": 42 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "mappings": [{ "type": "value", "options": { "0": { "text": "Normal" }, "1": { "text": "Firing" } } }], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] }, "color": { "mode": "thresholds" } }, "overrides": [] },
-      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "values": false } },
-      "targets": [{ "refId": "A", "expr": "clamp_max(sum(ALERTS{alertname=\"HighErrorRate\",alertstate=\"firing\"}) or vector(0), 1)", "instant": true }]
-    },
-    {
-      "id": 21, "title": "HighLatency", "type": "stat", "gridPos": { "h": 6, "w": 4, "x": 16, "y": 42 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "mappings": [{ "type": "value", "options": { "0": { "text": "Normal" }, "1": { "text": "Firing" } } }], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] }, "color": { "mode": "thresholds" } }, "overrides": [] },
-      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "values": false } },
-      "targets": [{ "refId": "A", "expr": "clamp_max(sum(ALERTS{alertname=\"HighLatency\",alertstate=\"firing\"}) or vector(0), 1)", "instant": true }]
-    },
-    {
-      "id": 22, "title": "PodCrashLooping", "type": "stat", "gridPos": { "h": 6, "w": 4, "x": 20, "y": 42 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "mappings": [{ "type": "value", "options": { "0": { "text": "Normal" }, "1": { "text": "Firing" } } }], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] }, "color": { "mode": "thresholds" } }, "overrides": [] },
-      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "values": false } },
-      "targets": [{ "refId": "A", "expr": "clamp_max(sum(ALERTS{alertname=\"PodCrashLooping\",alertstate=\"firing\"}) or vector(0), 1)", "instant": true }]
+      "id": 17, "title": "Active Alerts", "type": "alertlist", "gridPos": { "h": 10, "w": 24, "x": 0, "y": 42 },
+      "options": { "viewMode": "list", "groupMode": "default", "maxItems": 20, "sortOrder": 3, "dashboardAlerts": false, "alertName": "", "alertInstanceLabelFilter": "", "datasource": "prometheus", "stateFilter": { "firing": true, "pending": false, "noData": false, "normal": false, "error": false } }
     }
   ]
 }

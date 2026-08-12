@@ -22,6 +22,7 @@ prometheus:
           path: /metrics
           interval: 15s
           scrapeTimeout: 10s
+          honorLabels: true
 
 alertmanager:
   enabled: true

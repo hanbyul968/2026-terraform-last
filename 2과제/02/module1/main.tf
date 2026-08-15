@@ -22,17 +22,15 @@ resource "aws_s3_bucket" "score" {
   bucket        = "wsc2026-student-score-bucket-${var.bibunho}"
   force_destroy = true
 }
+# input/ 폴더 placeholder 만 생성한다.
+#  - 1-1: 워크플로 실행 후 test.csv 는 input/->processed/ 로 이동해 input/ 이 비므로,
+#    'PRE input/' 표시를 위해 이 placeholder 가 필요하다.
+#  - processed/ · error/ 는 워크플로가 test.csv(→processed/)와 오류 json 4개(→error/)를
+#    만들어 자동으로 'PRE' 가 뜨므로 placeholder 를 두지 않는다.
+#    (placeholder 를 두면 1-5-A/1-5-B 에서 0바이트 라인이 추가로 출력돼 오답 위험)
 resource "aws_s3_object" "input_prefix" {
   bucket = aws_s3_bucket.score.id
   key    = "input/"
-}
-resource "aws_s3_object" "processed_prefix" {
-  bucket = aws_s3_bucket.score.id
-  key    = "processed/"
-}
-resource "aws_s3_object" "error_prefix" {
-  bucket = aws_s3_bucket.score.id
-  key    = "error/"
 }
 
 # ── DynamoDB (PK studentId, SK examDate) ─────────────────────────────
@@ -322,7 +320,8 @@ resource "aws_s3_bucket_notification" "eb" {
   depends_on = [aws_lambda_permission.s3_trigger]
 }
 
-# vf test.csv를 최초 한 번 업로드하고 비동기 Workflow 완료까지 확인한다.
+# test.csv 업로드 → 워크플로 완료 대기. S3 이벤트 알림 전파(최대 ~60초) + SFN 실행 시간을
+# 감안해 최대 5분(300초) 대기한다. 알림 등록 직후 전파 안정화를 위해 초기 30초 sleep.
 resource "terraform_data" "upload_test_csv" {
   triggers_replace = [
     filesha256("${path.module}/test.csv"),
@@ -338,15 +337,23 @@ resource "terraform_data" "upload_test_csv" {
     }
     command = <<-EOT
       set -euo pipefail
+      # S3 이벤트 알림이 완전히 전파될 때까지 대기 (최초 apply 시 필수)
+      echo "Waiting 30s for S3 event notification propagation..."
+      sleep 30
+      # 이전 실행 잔여물 정리 (재실행 시 idempotent)
+      aws s3 rm "s3://$BUCKET/processed/test.csv" --region "$REGION" 2>/dev/null || true
+      aws s3 rm "s3://$BUCKET/input/test.csv" --region "$REGION" 2>/dev/null || true
+      # 업로드 → 트리거 Lambda → Step Functions → processed/ 이동
       aws s3 cp "${path.module}/test.csv" "s3://$BUCKET/input/test.csv" --region "$REGION" --only-show-errors
-      for attempt in $(seq 1 36); do
+      echo "Uploaded test.csv, waiting for workflow completion (max 300s)..."
+      for attempt in $(seq 1 60); do
         if aws s3api head-object --bucket "$BUCKET" --key processed/test.csv --region "$REGION" >/dev/null 2>&1; then
           echo "Workflow completed: s3://$BUCKET/processed/test.csv"
           exit 0
         fi
         sleep 5
       done
-      echo "Workflow did not create processed/test.csv within 180 seconds" >&2
+      echo "Workflow did not create processed/test.csv within 300 seconds" >&2
       exit 1
     EOT
   }

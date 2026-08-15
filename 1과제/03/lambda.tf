@@ -39,7 +39,6 @@ resource "aws_lambda_function" "book_get" {
   environment {
     variables = {
       TABLE_NAME = data.aws_kms_ciphertext.table_name.ciphertext_blob
-      INDEX_NAME = "booking_id-index"
     }
   }
 

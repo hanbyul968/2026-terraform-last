@@ -5,6 +5,13 @@ terraform {
       version = "~> 5.0"
     }
   }
+
+  # 원격 state (S3). bucket/key/region 은 배포 스크립트가 -backend-config 로 주입한다.
+  #   bastion:  deploy.sh 의 tinit <module> 이 s3://<player_id>-task2-06-tfstate-<account>/state/<module>.tfstate 사용
+  #   로컬:     scripts/run-module.ps1 이 동일한 값을 전달
+  # Bastion 이 재생성되어 /opt/task2 가 새로 풀려도 state 가 유지되므로,
+  # 이미 존재하는 리소스를 다시 create 하려다 409/EntityAlreadyExists 로 실패하지 않는다.
+  backend "s3" {}
 }
 
 provider "aws" {

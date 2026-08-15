@@ -10,6 +10,12 @@ param(
     [ValidateSet("true", "false")]
     [string]$RunWorkloadSetup = "true",
 
+    # terraform 원격 state(S3). 미지정 시 "<PlayerId>-task2-06-tfstate-<account>" 를 사용한다.
+    # bastion 스택(07/bastion)이 만드는 버킷과 같은 이름이어야 state 가 공유된다.
+    [string]$StateBucket,
+    [string]$PlayerId = "wsc",
+    [string]$StateRegion = "ap-northeast-2",
+
     [string]$GitBashPath = "C:\Program Files\Git\bin\bash.exe"
 )
 
@@ -187,9 +193,21 @@ function Deploy-Module4Workloads {
 }
 
 Write-Host "=== Applying $Module ==="
-# 별도 backend/import 없이 새 PC의 module별 로컬 state를 사용한다.
+
+# module state 는 S3 원격 백엔드에 둔다(bastion/로컬 어디서 돌려도 동일 state 사용).
+# 로컬 state 를 쓰면 Bastion 재생성이나 PC 교체로 state 가 사라져, 이미 존재하는
+# 리소스를 다시 create 하려다 409/EntityAlreadyExists 로 실패한다.
+if (-not $StateBucket) {
+    $account = Invoke-NativeOutput "aws" @("sts", "get-caller-identity", "--query", "Account", "--output", "text")
+    $StateBucket = "$PlayerId-task2-06-tfstate-$account"
+}
+Write-Host "[state] s3://$StateBucket/state/$Module.tfstate ($StateRegion)"
+
 Invoke-Native "terraform" @(
-    "-chdir=$ModulePath", "init", "-reconfigure", "-input=false", "-no-color"
+    "-chdir=$ModulePath", "init", "-reconfigure", "-input=false", "-no-color",
+    "-backend-config=bucket=$StateBucket",
+    "-backend-config=key=state/$Module.tfstate",
+    "-backend-config=region=$StateRegion"
 )
 
 $applyArgs = @("-chdir=$ModulePath", "apply", "-auto-approve", "-input=false", "-no-color")

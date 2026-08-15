@@ -11,7 +11,7 @@ kms = boto3.client("kms")
 TABLE_NAME = kms.decrypt(
     CiphertextBlob=base64.b64decode(os.environ["TABLE_NAME"]),
 )["Plaintext"].decode("utf-8")
-INDEX_NAME = os.environ.get("INDEX_NAME", "booking_id-index")
+INDEX_NAME = "booking_id-index"
 
 dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table(TABLE_NAME)

@@ -5,6 +5,13 @@ terraform {
       version = "~> 5.0"
     }
   }
+
+  # 원격 state (S3). bucket/key/region 은 배포 스크립트가 -backend-config 로 주입한다.
+  #   bastion:  deploy.sh 의 tinit <module> 이 s3://<player_id>-task2-06-tfstate-<account>/state/<module>.tfstate 사용
+  #   로컬:     scripts/run-module.ps1 이 동일한 값을 전달
+  # Bastion 이 재생성되어 /opt/task2 가 새로 풀려도 state 가 유지되므로,
+  # 이미 존재하는 리소스를 다시 create 하려다 409/EntityAlreadyExists 로 실패하지 않는다.
+  backend "s3" {}
 }
 
 # Bastion 용 Amazon Linux 2023 AMI
@@ -124,17 +131,28 @@ resource "aws_eks_cluster" "main" {
   }
 
   access_config {
-    authentication_mode                         = "API_AND_CONFIG_MAP"
-    bootstrap_cluster_creator_admin_permissions = false
+    authentication_mode = "API_AND_CONFIG_MAP"
+    # terraform apply 를 실행한 주체(오케스트레이터 Bastion 의 wsc-task2-06-bastion-role,
+    # 또는 로컬 실행 시 해당 IAM 사용자)에게 cluster admin 을 자동 부여한다.
+    # false 로 두면 그 주체에 access entry 가 없어, 같은 스크립트가 이어서 실행하는
+    # deploy_k8s.sh 의 helm/kubectl 이 401
+    #   "Kubernetes cluster unreachable: the server has asked for the client to provide credentials"
+    # 로 실패한다. 아래 aws_eks_access_entry.bastion 은 module3 이 만드는 skm-bastion-role
+    # 전용이라 배포를 실행하는 주체를 커버하지 못한다. (module4 도 true 로 동일하게 처리)
+    bootstrap_cluster_creator_admin_permissions = true
   }
 
   depends_on = [aws_iam_role_policy_attachment.eks_cluster_policy]
 }
 
 # === EKS Cluster Admin access entry 안내 ===
-# user(생성자/채점자) access entry 는 대회장에서 직접 등록하므로 여기서 만들지 않는다.
-# (bootstrap_cluster_creator_admin_permissions = false 이므로 자동 부여도 없음)
-# 배포에 필요한 bastion access entry 만 아래에서 생성한다.
+# 채점자 access entry 는 대회장에서 직접 등록한다.
+# 배포를 실행하는 주체(오케스트레이터 Bastion 역할 / 로컬 IAM 사용자)는 위 access_config 의
+# bootstrap_cluster_creator_admin_permissions = true 로 EKS 가 자동 부여한다.
+# 아래 access entry 는 module3 이 만드는 skm-bastion-role(선택적 수동 작업용) 전용이다.
+#
+# 주의: access entry/정책 연결은 생성 직후 수분 지연될 수 있으므로 deploy 스크립트는
+# kubectl 인증이 통할 때까지 재시도한다. (deploy.sh / deploy_k8s.sh 의 "클러스터 인증 대기")
 
 # Addon NodeGroup IAM Role
 resource "aws_iam_role" "addon_ng" {

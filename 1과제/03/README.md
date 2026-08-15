@@ -127,7 +127,7 @@ terraform output cloudfront_domain   # 채점 진입점
 | 이미지 태그 (v1.0.0) | `locals.tf` | `image_tag` |
 | DynamoDB 테이블 이름 | `locals.tf` | `table_name` |
 | 테이블 PK (client_id) | `dynamodb.tf` | `hash_key` + `attribute` |
-| GSI 키 (booking_id) | `dynamodb.tf` | `global_secondary_index` (+ `iam_app.tf`, `lambda.tf` 의 index 이름) |
+| GSI 키 (booking_id) | `dynamodb.tf` | `global_secondary_index` (+ `iam_app.tf` 정책 ARN, `files/lambda_function.py` 의 `INDEX_NAME` 상수) |
 | S3 버킷 임의4자리/비번호 | `variables.tf` | `bucket_rand`, `bi_number` |
 
 ### 2-3. CMK 이름 (alias)

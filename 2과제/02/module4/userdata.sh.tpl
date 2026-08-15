@@ -15,7 +15,11 @@ aws s3 cp "s3://$APP_BUCKET/$SUPPORT_KEY" /tmp/topic-admin.zip --region "$REGION
 chmod 0755 /opt/app/app
 python3 -m zipfile -e /tmp/topic-admin.zip /opt/topic-admin
 # Lambda에는 boto3가 기본 제공되지만 EC2 Python에는 없으므로 signer 의존성을 설치한다.
-dnf install -y python3-boto3
+dnf install -y python3-boto3 python3-pip
+# kafka.sasl.oauth 를 제공하는 정확한 버전으로 고정한다.
+# (미고정 시 kafka 3.0.10 등이 섞여 create_topics/iam_producer 가
+#  ModuleNotFoundError: No module named 'kafka.sasl' 로 실패함 — Lambda 패키징과 동일 버전)
+pip3 install --target /opt/topic-admin --upgrade "kafka-python==2.2.15" aws-msk-iam-sasl-signer-python
 
 # Terraform waits for the MSK cluster, but retry bootstrap discovery for IAM/DNS propagation.
 BOOTSTRAP=""
@@ -184,7 +188,10 @@ WantedBy=multi-user.target
 UNIT
 
 systemctl daemon-reload
-systemctl enable --now producer producer-iam
-systemctl is-active producer
+# 제공된 Go 바이너리(/opt/app/app)는 이 MSK(SASL_SSL/IAM, 9098)에 TLS 없이 접속해 실패한다
+# ("failed to publish sensor readings: unexpected EOF: broker appears to be expecting TLS").
+# => producer.service 는 사용하지 않고, IAM 인증되는 Python producer-iam 만 실행한다.
+systemctl disable --now producer 2>/dev/null || true
+systemctl enable --now producer-iam
 systemctl is-active producer-iam
-echo "MODULE4 VF PRODUCERS READY"
+echo "MODULE4 VF PRODUCER (IAM) READY"

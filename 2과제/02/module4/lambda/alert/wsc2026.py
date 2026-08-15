@@ -21,7 +21,7 @@ def _records(event):
             yield json.loads(base64.b64decode(message["value"]).decode("utf-8"))
 
 
-def handler(event, context):
+def consumer_handler(event, context):
     records = list(_records(event))
     logger.info("Processing alert batch: %d messages", len(records))
 

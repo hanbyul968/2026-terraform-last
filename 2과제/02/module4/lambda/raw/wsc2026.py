@@ -59,7 +59,7 @@ def _alert_reason(temperature, humidity):
     return None
 
 
-def handler(event, context):
+def consumer_handler(event, context):
     records = list(_records(event))
     logger.info("Processing batch: %d messages", len(records))
     alert_producer = None

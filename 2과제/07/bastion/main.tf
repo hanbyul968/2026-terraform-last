@@ -119,6 +119,37 @@ resource "aws_s3_bucket_public_access_block" "bootstrap" {
   restrict_public_buckets = true
 }
 
+# =============================================================================
+# terraform state 버킷 (module1~4 원격 state)
+#  - Bastion 은 재생성될 때마다 /opt/task2 가 새로 풀리므로 로컬 state 가 사라진다.
+#    그 상태로 apply 하면 AWS 에 남아 있는 동일 이름 리소스와 충돌해
+#    409/EntityAlreadyExists(IAM Role, CloudFront OAC/KVS/Function/Policy 등) 로 실패한다.
+#    state 를 S3 에 두면 Bastion 을 다시 만들어도 terraform 이 기존 리소스를 인식해
+#    create 대신 no-op/update 로 처리한다.
+#  - bootstrap 버킷과 분리한다: bootstrap 은 force_destroy=true 라 destroy 시 state 까지
+#    날아가기 때문이다. 이 버킷은 force_destroy 를 두지 않아 실수로 지워지지 않는다.
+# =============================================================================
+resource "aws_s3_bucket" "tfstate" {
+  bucket = "${var.player_id}-task2-06-tfstate-${data.aws_caller_identity.current.account_id}"
+
+  tags = { Name = "${var.player_id}-task2-06-tfstate" }
+}
+
+resource "aws_s3_bucket_versioning" "tfstate" {
+  bucket = aws_s3_bucket.tfstate.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "tfstate" {
+  bucket                  = aws_s3_bucket.tfstate.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
 resource "aws_s3_object" "task2_bundle" {
   bucket = aws_s3_bucket.bootstrap.id
   key    = "task2-bundle.zip"
@@ -193,6 +224,7 @@ locals {
     deploy_key        = aws_s3_object.deploy_sh.key
     region            = var.region
     competitor_number = var.competitor_number
+    state_bucket      = aws_s3_bucket.tfstate.id
   })
 }
 

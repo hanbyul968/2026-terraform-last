@@ -45,7 +45,7 @@ resource "aws_subnet" "pub_b" {
   cidr_block              = "192.168.1.0/24"
   availability_zone       = "ap-northeast-1c"
   map_public_ip_on_launch = true
-  tags                    = { Name = "msk-pub-b" }
+  tags                    = { Name = "msk-pub-d" }
 }
 resource "aws_subnet" "priv_a" {
   vpc_id            = aws_vpc.main.id
@@ -57,7 +57,7 @@ resource "aws_subnet" "priv_b" {
   vpc_id            = aws_vpc.main.id
   cidr_block        = "192.168.11.0/24"
   availability_zone = "ap-northeast-1c"
-  tags              = { Name = "msk-priv-b" }
+  tags              = { Name = "msk-priv-d" }
 }
 resource "aws_eip" "nat" { domain = "vpc" }
 resource "aws_nat_gateway" "main" {
@@ -88,7 +88,7 @@ resource "aws_route_table" "priv_b" {
     cidr_block     = "0.0.0.0/0"
     nat_gateway_id = aws_nat_gateway.main.id
   }
-  tags = { Name = "msk-priv-b-rtb" }
+  tags = { Name = "msk-priv-d-rtb" }
 }
 resource "aws_route_table_association" "pub_a" {
   subnet_id      = aws_subnet.pub_a.id
@@ -380,7 +380,7 @@ resource "aws_security_group" "lambda" {
 resource "aws_lambda_function" "raw" {
   function_name    = "wsc2026-sensor-consumer"
   role             = aws_iam_role.lambda.arn
-  handler          = "index.handler"
+  handler          = "wsc2026.consumer_handler"
   runtime          = "python3.14"
   filename         = data.archive_file.raw_lambda.output_path
   source_code_hash = data.archive_file.raw_lambda.output_base64sha256
@@ -400,7 +400,7 @@ resource "aws_lambda_function" "raw" {
 resource "aws_lambda_function" "alert" {
   function_name    = "wsc2026-sensor-alert-consumer"
   role             = aws_iam_role.lambda.arn
-  handler          = "index.handler"
+  handler          = "wsc2026.consumer_handler"
   runtime          = "python3.14"
   filename         = data.archive_file.alert_lambda.output_path
   source_code_hash = data.archive_file.alert_lambda.output_base64sha256

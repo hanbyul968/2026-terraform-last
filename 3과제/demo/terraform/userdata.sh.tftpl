@@ -1,0 +1,88 @@
+#!/bin/bash
+# color 앱 부팅 스크립트 (Amazon Linux 2023)
+#  - 제공된 color 바이너리를 S3 에서 내려받아 systemd 로 실행
+#  - CloudWatch Agent 로 앱 로그/지표를 CloudWatch 로 전송
+#
+# 이스케이프 규칙(주석에 리터럴 달러-중괄호를 쓰지 않도록 서술):
+#   - Terraform 변수는 달러+중괄호(var) 형태로 치환된다.
+#   - 달러 두 개+중괄호는 Terraform 이 리터럴 달러+중괄호로 출력한다
+#     (= CloudWatch Agent 의 aws placeholder 를 그대로 파일에 쓰기 위함).
+#   - heredoc 은 모두 'QUOTED' 라 bash 는 본문을 확장하지 않는다(치환은 Terraform 만 수행).
+#
+# artifact_hash=${artifact_hash}   # 바이너리 변경 시 user-data 도 바뀌어 롤링 교체가 트리거됨
+set -euo pipefail
+exec > >(tee -a /var/log/user-data.log) 2>&1
+echo "[user-data] start"
+
+install -d -m 0755 /var/log/color
+
+# 제공된 color 바이너리 다운로드(AL2023 기본 aws-cli v2 + S3 게이트웨이 엔드포인트)
+for i in 1 2 3 4 5; do
+  if aws s3 cp "s3://${artifact_bucket}/${artifact_key}" /usr/local/bin/color --region "${region}"; then
+    break
+  fi
+  echo "[user-data] s3 download retry $i"; sleep 5
+done
+chmod 0755 /usr/local/bin/color
+
+cat > /etc/systemd/system/color.service <<'UNIT'
+[Unit]
+Description=color app
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Environment=PORT=${container_port}
+ExecStart=/usr/local/bin/color
+Restart=always
+RestartSec=2
+# access log 를 파일로 저장(문제지: stdout/stderr) -> CloudWatch Agent 가 수집
+StandardOutput=append:/var/log/color/app.log
+StandardError=append:/var/log/color/app.log
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now color.service
+
+# CloudWatch Agent 설정: 앱 로그 파일 + 기본 시스템 지표(mem/disk) 전송
+dnf install -y amazon-cloudwatch-agent
+
+cat > /opt/aws/amazon-cloudwatch-agent/etc/config.json <<'CWA'
+{
+  "agent": { "run_as_user": "root" },
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {
+            "file_path": "/var/log/color/app.log",
+            "log_group_name": "${log_group}",
+            "log_stream_name": "{instance_id}",
+            "retention_in_days": ${log_retention_days}
+          }
+        ]
+      }
+    }
+  },
+  "metrics": {
+    "namespace": "${metrics_namespace}",
+    "append_dimensions": {
+      "AutoScalingGroupName": "$${aws:AutoScalingGroupName}",
+      "InstanceId": "$${aws:InstanceId}"
+    },
+    "aggregation_dimensions": [["AutoScalingGroupName"]],
+    "metrics_collected": {
+      "mem": { "measurement": ["mem_used_percent"] },
+      "disk": { "measurement": ["used_percent"], "resources": ["/"] }
+    }
+  }
+}
+CWA
+
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+  -a fetch-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/config.json
+
+echo "[user-data] done"

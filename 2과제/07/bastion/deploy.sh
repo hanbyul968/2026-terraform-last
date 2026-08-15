@@ -30,11 +30,37 @@ fi
 
 echo "===== [Task2-06] deploy start (competitor_number=${COMPETITOR_NUMBER}) ====="
 
-# 새 계정 단일 배포용: 각 module 디렉터리의 로컬 state를 사용한다.
+# 새 계정 단일 배포용: module state 는 S3 에 둔다(Bastion 재생성 시 유실 방지).
 ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
 
+# ---- terraform 원격 state 위치 (user_data 가 기록) ----
+STATE_BUCKET="${STATE_BUCKET:-}"
+if [ -z "${STATE_BUCKET}" ] && [ -f "${ROOT}/.state_bucket" ]; then
+  STATE_BUCKET="$(tr -d ' \r\n' < "${ROOT}/.state_bucket")"
+fi
+STATE_REGION="${STATE_REGION:-}"
+if [ -z "${STATE_REGION}" ] && [ -f "${ROOT}/.state_region" ]; then
+  STATE_REGION="$(tr -d ' \r\n' < "${ROOT}/.state_region")"
+fi
+STATE_REGION="${STATE_REGION:-ap-northeast-2}"
+
+if [ -z "${STATE_BUCKET}" ]; then
+  echo "ERROR: state 버킷을 알 수 없습니다." >&2
+  echo "  bastion 스택을 최신 코드로 apply 했는지 확인하거나, 다음처럼 지정하세요:" >&2
+  echo "  STATE_BUCKET=<player_id>-task2-06-tfstate-${ACCOUNT} sudo -E bash $0 ${COMPETITOR_NUMBER}" >&2
+  exit 1
+fi
+echo "state: s3://${STATE_BUCKET} (region ${STATE_REGION})"
+
+# module 별로 S3 원격 state 를 붙여 init 한다.
+# 로컬 state 를 쓰면 Bastion 재생성 시 state 가 사라져, 이미 존재하는 리소스를
+# 다시 create 하려다 409/EntityAlreadyExists 로 실패한다.
 tinit() {
-  terraform init -input=false -no-color -reconfigure
+  local mod="$1"
+  terraform init -input=false -no-color -reconfigure \
+    -backend-config="bucket=${STATE_BUCKET}" \
+    -backend-config="key=state/${mod}.tfstate" \
+    -backend-config="region=${STATE_REGION}"
 }
 
 # -----------------------------------------------------------------------------

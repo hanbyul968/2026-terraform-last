@@ -47,6 +47,10 @@ for _ in 1 2 3 4 5; do
 done
 
 echo "${competitor_number}" > /opt/task2/.competitor_number
+# terraform 원격 state(S3) 위치 — deploy.sh 의 tinit 이 -backend-config 로 사용한다.
+# Bastion 재생성으로 로컬 state 가 사라져도 기존 리소스를 인식하게 만드는 핵심 값.
+echo "${state_bucket}" > /opt/task2/.state_bucket
+echo "${region}" > /opt/task2/.state_region
 chmod +x /opt/task2/deploy.sh 2>/dev/null || true
 chmod +x /opt/task2/module3/deploy_k8s.sh 2>/dev/null || true
 chmod +x /opt/task2/module3/deploy.sh 2>/dev/null || true

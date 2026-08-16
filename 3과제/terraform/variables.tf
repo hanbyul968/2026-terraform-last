@@ -42,19 +42,32 @@ variable "node_instance_type" {
   default = "t3.medium"
 }
 
+# 관리형 NG 를 2 노드로 고정한다. 1 로 두면 안 되는 이유:
+#   (a) 베이스라인 요청이 1노드에 물리적으로 안 들어간다.
+#       user 2x200 + product 2x200 + stress 2x500 = 1800m, 시스템 약 180m
+#       -> 1980m > t3.medium 할당가능 1930m. 결국 Karpenter 가 2번째 노드를 띄운다.
+#       즉 1 로 시작해도 정상 상태는 2노드이므로 2 로 고정해도 비용은 같다.
+#   (b) 1노드로 시작하면 앱이 배포되는 순간 노드가 1개뿐이라 같은 앱의 두 레플리카가
+#       한 노드에 몰린다. topology spread 는 ScheduleAnyway(선호)라 막지 못하고,
+#       쿠버네티스는 나중에 노드가 늘어도 재배치하지 않는다.
+#       실측: stress 2개가 NG 노드에, user/product 4개가 Karpenter 노드에 몰려
+#       그 노드 하나가 사라지면 두 API 가 동시에 죽는 상태가 됐다.
+#       2노드로 시작하면 배포 시점에 이미 도메인이 2개라 앱마다 1개씩 분산된다.
 variable "node_desired_size" {
   type    = number
-  default = 1
+  default = 2
 }
 
+# NG 는 2노드 고정. 부하에 따른 증설은 Karpenter 가 담당한다.
 variable "node_max_size" {
   type    = number
   default = 2
 }
 
+# desired 와 같게 둔다. 낮추면 NG 가 1노드로 줄어들 수 있어 (b) 의 몰림이 재발한다.
 variable "node_min_size" {
   type    = number
-  default = 1
+  default = 2
 }
 
 variable "db_name" {

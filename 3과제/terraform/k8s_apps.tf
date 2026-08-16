@@ -39,6 +39,18 @@ resource "kubernetes_deployment" "user" {
       spec {
         termination_grace_period_seconds = 35
         service_account_name             = kubernetes_service_account.user.metadata[0].name
+        # AZ 분산은 '선호'로 둔다. DoNotSchedule 로 강제하면 안 되는 이유(실측):
+        #   (a) 한쪽 AZ 노드가 꽉 차면 반대쪽으로 못 가고 Pending 으로 대기한다
+        #       -> 가용성 점수(2xx 비율)를 직접 깎는다. 채점상 AZ 장애는 측정하지 않으므로
+        #          Pending 위험을 감수할 이유가 없다.
+        #   (b) 강제해도 롤링 업데이트 후 균형이 깨진다. 제약은 스케줄 시점에만 평가되는데,
+        #       구 파드가 한쪽 AZ 에 있으면 신 파드가 전부 반대쪽으로 밀리고, 구 파드가
+        #       종료되면 그 쪽에 2개가 남는다. 쿠버네티스는 사후 재배치를 하지 않는다.
+        #       (실측: 6개 파드가 전부 2a 로 몰려 skew=2 위반 상태로 굳었다)
+        # 노드 단위 몰림은 제약이 아니라 node_desired_size=2 로 막는다. 배포 시점에
+        # Ready 노드가 이미 2개(AZ 당 1개) 있으면, 선호 제약만으로도 스케줄러가 빈 노드를
+        # 우선 골라 앱마다 1개씩 나뉜다. 몰림의 진짜 원인은 제약이 약해서가 아니라
+        # '파드가 배포될 때 노드가 1개뿐'이었던 것이다.
         topology_spread_constraint {
           max_skew           = 1
           topology_key       = "topology.kubernetes.io/zone"
@@ -46,10 +58,15 @@ resource "kubernetes_deployment" "user" {
           label_selector { match_labels = { app = "user" } }
         }
         # 노드 단위 분산. zone 만으로는 같은 AZ 안에서 한 노드에 다 몰릴 수 있고,
-        # 그 노드가 Karpenter 에 회수되면 앱이 통째로 끊긴다(실측: 앱 파드 3개가 한 노드 집중).
-        # ScheduleAnyway 라 노드가 부족할 때 스케줄을 막지는 않는다(가용성 우선).
+        # 그 노드가 Karpenter 에 회수되면 앱이 통째로 끊긴다.
+        # maxSkew=2 인 이유: 1 은 노드당 1개만 허용해 Karpenter 가 노드를 회수하지 못하게
+        # 막아 평균 노드 수가 4.8 까지 올라갔고(비용 6/12), 3 은 편차를 너무 허용해
+        # 분산 압력이 사라졌다(실측: user/product 4개가 한 노드에 몰림).
+        # 2 면 스케줄러가 빈 노드를 선호해 베이스라인 2레플리카는 1개씩 나뉘면서도,
+        # 노드당 2개까지 허용하므로 consolidation 을 막지 않는다.
+        # 전제: node_desired_size=2 로 배포 시점에 이미 노드가 2개 존재해야 한다.
         topology_spread_constraint {
-          max_skew           = 3
+          max_skew           = 2
           topology_key       = "kubernetes.io/hostname"
           when_unsatisfiable = "ScheduleAnyway"
           label_selector { match_labels = { app = "user" } }
@@ -206,6 +223,18 @@ resource "kubernetes_deployment" "product" {
       spec {
         termination_grace_period_seconds = 35
         service_account_name             = kubernetes_service_account.product.metadata[0].name
+        # AZ 분산은 '선호'로 둔다. DoNotSchedule 로 강제하면 안 되는 이유(실측):
+        #   (a) 한쪽 AZ 노드가 꽉 차면 반대쪽으로 못 가고 Pending 으로 대기한다
+        #       -> 가용성 점수(2xx 비율)를 직접 깎는다. 채점상 AZ 장애는 측정하지 않으므로
+        #          Pending 위험을 감수할 이유가 없다.
+        #   (b) 강제해도 롤링 업데이트 후 균형이 깨진다. 제약은 스케줄 시점에만 평가되는데,
+        #       구 파드가 한쪽 AZ 에 있으면 신 파드가 전부 반대쪽으로 밀리고, 구 파드가
+        #       종료되면 그 쪽에 2개가 남는다. 쿠버네티스는 사후 재배치를 하지 않는다.
+        #       (실측: 6개 파드가 전부 2a 로 몰려 skew=2 위반 상태로 굳었다)
+        # 노드 단위 몰림은 제약이 아니라 node_desired_size=2 로 막는다. 배포 시점에
+        # Ready 노드가 이미 2개(AZ 당 1개) 있으면, 선호 제약만으로도 스케줄러가 빈 노드를
+        # 우선 골라 앱마다 1개씩 나뉜다. 몰림의 진짜 원인은 제약이 약해서가 아니라
+        # '파드가 배포될 때 노드가 1개뿐'이었던 것이다.
         topology_spread_constraint {
           max_skew           = 1
           topology_key       = "topology.kubernetes.io/zone"
@@ -213,10 +242,15 @@ resource "kubernetes_deployment" "product" {
           label_selector { match_labels = { app = "product" } }
         }
         # 노드 단위 분산. zone 만으로는 같은 AZ 안에서 한 노드에 다 몰릴 수 있고,
-        # 그 노드가 Karpenter 에 회수되면 앱이 통째로 끊긴다(실측: 앱 파드 3개가 한 노드 집중).
-        # ScheduleAnyway 라 노드가 부족할 때 스케줄을 막지는 않는다(가용성 우선).
+        # 그 노드가 Karpenter 에 회수되면 앱이 통째로 끊긴다.
+        # maxSkew=2 인 이유: 1 은 노드당 1개만 허용해 Karpenter 가 노드를 회수하지 못하게
+        # 막아 평균 노드 수가 4.8 까지 올라갔고(비용 6/12), 3 은 편차를 너무 허용해
+        # 분산 압력이 사라졌다(실측: user/product 4개가 한 노드에 몰림).
+        # 2 면 스케줄러가 빈 노드를 선호해 베이스라인 2레플리카는 1개씩 나뉘면서도,
+        # 노드당 2개까지 허용하므로 consolidation 을 막지 않는다.
+        # 전제: node_desired_size=2 로 배포 시점에 이미 노드가 2개 존재해야 한다.
         topology_spread_constraint {
-          max_skew           = 3
+          max_skew           = 2
           topology_key       = "kubernetes.io/hostname"
           when_unsatisfiable = "ScheduleAnyway"
           label_selector { match_labels = { app = "product" } }
@@ -359,6 +393,18 @@ resource "kubernetes_deployment" "stress" {
       spec {
         termination_grace_period_seconds = 35
         service_account_name             = kubernetes_service_account.stress.metadata[0].name
+        # AZ 분산은 '선호'로 둔다. DoNotSchedule 로 강제하면 안 되는 이유(실측):
+        #   (a) 한쪽 AZ 노드가 꽉 차면 반대쪽으로 못 가고 Pending 으로 대기한다
+        #       -> 가용성 점수(2xx 비율)를 직접 깎는다. 채점상 AZ 장애는 측정하지 않으므로
+        #          Pending 위험을 감수할 이유가 없다.
+        #   (b) 강제해도 롤링 업데이트 후 균형이 깨진다. 제약은 스케줄 시점에만 평가되는데,
+        #       구 파드가 한쪽 AZ 에 있으면 신 파드가 전부 반대쪽으로 밀리고, 구 파드가
+        #       종료되면 그 쪽에 2개가 남는다. 쿠버네티스는 사후 재배치를 하지 않는다.
+        #       (실측: 6개 파드가 전부 2a 로 몰려 skew=2 위반 상태로 굳었다)
+        # 노드 단위 몰림은 제약이 아니라 node_desired_size=2 로 막는다. 배포 시점에
+        # Ready 노드가 이미 2개(AZ 당 1개) 있으면, 선호 제약만으로도 스케줄러가 빈 노드를
+        # 우선 골라 앱마다 1개씩 나뉜다. 몰림의 진짜 원인은 제약이 약해서가 아니라
+        # '파드가 배포될 때 노드가 1개뿐'이었던 것이다.
         topology_spread_constraint {
           max_skew           = 1
           topology_key       = "topology.kubernetes.io/zone"
@@ -366,10 +412,15 @@ resource "kubernetes_deployment" "stress" {
           label_selector { match_labels = { app = "stress" } }
         }
         # 노드 단위 분산. zone 만으로는 같은 AZ 안에서 한 노드에 다 몰릴 수 있고,
-        # 그 노드가 Karpenter 에 회수되면 앱이 통째로 끊긴다(실측: 앱 파드 3개가 한 노드 집중).
-        # ScheduleAnyway 라 노드가 부족할 때 스케줄을 막지는 않는다(가용성 우선).
+        # 그 노드가 Karpenter 에 회수되면 앱이 통째로 끊긴다.
+        # maxSkew=2 인 이유: 1 은 노드당 1개만 허용해 Karpenter 가 노드를 회수하지 못하게
+        # 막아 평균 노드 수가 4.8 까지 올라갔고(비용 6/12), 3 은 편차를 너무 허용해
+        # 분산 압력이 사라졌다(실측: user/product 4개가 한 노드에 몰림).
+        # 2 면 스케줄러가 빈 노드를 선호해 베이스라인 2레플리카는 1개씩 나뉘면서도,
+        # 노드당 2개까지 허용하므로 consolidation 을 막지 않는다.
+        # 전제: node_desired_size=2 로 배포 시점에 이미 노드가 2개 존재해야 한다.
         topology_spread_constraint {
-          max_skew           = 3
+          max_skew           = 2
           topology_key       = "kubernetes.io/hostname"
           when_unsatisfiable = "ScheduleAnyway"
           label_selector { match_labels = { app = "stress" } }

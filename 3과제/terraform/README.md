@@ -103,14 +103,18 @@ kubectl -n app rollout restart deploy/user deploy/product
 
 ### 최초 구축 (state가 비어 있을 때) — 2단계
 
+1단계에 **느린 AWS 리소스를 모두 몰아넣어 동시에 만든다.** EKS(~12분)·RDS Multi-AZ(~15분)·
+CloudFront(~18분)는 서로 의존이 없어 병렬로 뜬다. RDS를 2단계로 미루면 EKS가 끝난 뒤에야
+시작해서 그만큼 총 시간이 늘어난다.
+
 ```powershell
 cd C:\Users\competitor\2026-terraform\3과제\terraform
 terraform init
 
-# 1단계: 클러스터만 (~15분). PowerShell이 -target의 점을 쪼개지 않게 --% 필수
-terraform apply --% -var k8s_provider_ready=false -target=aws_eks_cluster.this -target=aws_eks_node_group.main -target=aws_iam_openid_connect_provider.eks -target=aws_eks_addon.coredns -target=aws_eks_addon.kube_proxy -target=aws_eks_addon.vpc_cni -target=aws_eks_addon.metrics_server
+# 1단계: 느린 것 전부 병렬 (~18분). PowerShell이 -target의 점을 쪼개지 않게 --% 필수
+terraform apply --% -auto-approve -var k8s_provider_ready=false -target=aws_eks_cluster.this -target=aws_eks_node_group.main -target=aws_iam_openid_connect_provider.eks -target=aws_eks_addon.coredns -target=aws_eks_addon.kube_proxy -target=aws_eks_addon.vpc_cni -target=aws_eks_addon.metrics_server -target=aws_db_instance.this -target=aws_db_proxy.this -target=aws_db_proxy_target.this -target=aws_cloudfront_distribution.this -target=aws_lb.this
 
-# 2단계: 나머지 전체 (이미지 빌드/push, ALB, CloudFront, WAF, DB 시드까지 자동)
+# 2단계: 나머지 전체 (이미지 빌드/push, WAF, k8s 배포, DB 시드까지 자동)
 #   클러스터 이름을 외우지 않는다 — output 이 정확한 명령을 그대로 준다
 #   (project 변수를 바꿨어도 항상 맞는 이름이 나온다)
 Invoke-Expression (terraform output -raw kubeconfig_cmd)
@@ -118,6 +122,14 @@ terraform apply -auto-approve
 
 terraform output endpoint     # ← 채점 플랫폼에 제출 (프로토콜+주소만, 경로 X)
 ```
+
+> **1단계 target 목록에 무엇을 넣는가**: k8s provider(`kubernetes`/`helm`/`kubectl`)를 쓰지 않는
+> 리소스는 전부 넣어도 된다. terraform이 의존성(VPC·서브넷·SG·IAM·S3·ECR·시크릿)을 자동으로
+> 끌어오므로 위 12개만 지정하면 충분하다. 반대로 `kubernetes_*`·`helm_release`·`kubectl_manifest`는
+> 클러스터가 없으면 만들 수 없으니 2단계로 남긴다.
+>
+> 확인된 사실: `rds.tf`/`rds_proxy.tf`에는 EKS·k8s 참조가 없다(주석 제외). 즉 RDS는 EKS와
+> 독립이고 병렬 생성이 안전하다. 프록시 엔드포인트를 읽는 쪽은 `kubernetes_secret.db`(2단계)다.
 
 ### 클러스터가 이미 있을 때
 

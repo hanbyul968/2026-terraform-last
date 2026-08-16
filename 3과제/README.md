@@ -111,7 +111,9 @@ bucket_prefix = "wsi2026-608"   # 608 = 본인 비번호. 전역에서 겹치지
 terraform init
 ```
 
-이후 최초 구축은 provider 의존성 때문에 **2단계**다 (클러스터 → 나머지 전체).
+이후 최초 구축은 provider 의존성 때문에 **2단계**다.
+1단계에 **EKS·RDS·CloudFront를 함께 넣어 병렬로** 띄운다(서로 의존이 없다). RDS를 2단계로
+미루면 EKS가 끝난 뒤에야 시작해서 총 시간이 그만큼 길어진다.
 그대로 복사해 쓸 명령은 [terraform/README "2. 배포"](terraform/README.md#2-배포)에 있다.
 끝나면 `terraform output endpoint` 값을 채점 플랫폼에 제출한다.
 

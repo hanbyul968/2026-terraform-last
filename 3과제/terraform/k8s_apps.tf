@@ -555,10 +555,13 @@ resource "kubernetes_deployment" "stress" {
             # request 는 노드 예약량이라 실사용보다 크게 잡으면 노드 수가 그대로 늘어난다.
             # 실측 사용량(부하 중) 기준으로 맞춘 값: user 100~138m / product 53~80m / stress 137~264m
             requests = { cpu = "300m", memory = "128Mi" }
-            # cpu limit: stress 는 CPU 를 무제한 태워 같은 노드의 user/product 를 굶긴다.
-            # (노드 CPU 89~97% / RDS 5~10% → 지연 원인은 노드 CPU 경쟁)
-            # stress SLO 1000ms 는 느슨하므로 여기를 캡해 user 200ms 를 지킨다.
-            limits = { cpu = "1000m", memory = "512Mi" }
+            # cpu limit 을 걸지 않는다. 한때 이웃(user/product) 보호를 위해 1000m 캡을
+            # 씌웠는데 정반대 결과가 나왔다 — stress 는 CPU 를 태우는 앱이라 캡이 걸리면
+            # CFS throttling 으로 꼬리지연이 폭발한다.
+            #   실측(tune-after-opt): cpu limit 1000m 상태에서
+            #     stress perf 77.3% -> 39.8%,  p95 3.976s (SLO 1.0s),  avail 99.1% -> 97.78%
+            # 이웃 보호는 limit 이 아니라 request(=cpu.shares)와 노드 분산으로 한다.
+            limits = { memory = "512Mi" }
           }
           readiness_probe {
             http_get {

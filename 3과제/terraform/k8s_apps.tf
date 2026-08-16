@@ -91,6 +91,7 @@ resource "kubernetes_deployment" "user" {
           max_skew           = 1
           topology_key       = "topology.kubernetes.io/zone"
           when_unsatisfiable = "ScheduleAnyway"
+          match_label_keys   = ["pod-template-hash"]
           label_selector { match_labels = { app = "user" } }
         }
         # 노드 단위 분산. zone 만으로는 같은 AZ 안에서 한 노드에 다 몰릴 수 있고,
@@ -102,9 +103,19 @@ resource "kubernetes_deployment" "user" {
         # 노드당 2개까지 허용하므로 consolidation 을 막지 않는다.
         # 전제: node_desired_size=2 로 배포 시점에 이미 노드가 2개 존재해야 한다.
         topology_spread_constraint {
-          max_skew           = 2
+          max_skew           = 1
           topology_key       = "kubernetes.io/hostname"
           when_unsatisfiable = "ScheduleAnyway"
+          # match_label_keys 가 이 제약을 실제로 쓸 수 있게 만든다.
+          # 원래 topology spread 는 label_selector 에 맞는 '모든' 파드를 센다. 그래서
+          # 롤링 업데이트 중에는 아직 종료되지 않은 구 파드까지 계산에 들어가고,
+          # 신 파드가 엉뚱한 쪽으로 밀린 뒤 구 파드가 사라지면 분산이 깨진 채로 굳는다
+          # (실측: 구 파드가 2b 에 있어 신 파드 6개가 전부 2a 로 몰림. k8s 는 사후 재배치 안 함).
+          # pod-template-hash 를 넣으면 '같은 ReplicaSet 의 파드끼리만' 비교하므로
+          # 신 파드는 자기들끼리 균등 분산되고 구 파드의 위치에 영향받지 않는다.
+          # 그래서 maxSkew=1(가장 엄격) 을 쓰면서도 DoNotSchedule 없이 균등해진다
+          # -> Pending 위험(가용성 손실) 없이 분산을 얻는다.
+          match_label_keys = ["pod-template-hash"]
           label_selector { match_labels = { app = "user" } }
         }
         container {
@@ -313,6 +324,7 @@ resource "kubernetes_deployment" "product" {
           max_skew           = 1
           topology_key       = "topology.kubernetes.io/zone"
           when_unsatisfiable = "ScheduleAnyway"
+          match_label_keys   = ["pod-template-hash"]
           label_selector { match_labels = { app = "product" } }
         }
         # 노드 단위 분산. zone 만으로는 같은 AZ 안에서 한 노드에 다 몰릴 수 있고,
@@ -324,9 +336,19 @@ resource "kubernetes_deployment" "product" {
         # 노드당 2개까지 허용하므로 consolidation 을 막지 않는다.
         # 전제: node_desired_size=2 로 배포 시점에 이미 노드가 2개 존재해야 한다.
         topology_spread_constraint {
-          max_skew           = 2
+          max_skew           = 1
           topology_key       = "kubernetes.io/hostname"
           when_unsatisfiable = "ScheduleAnyway"
+          # match_label_keys 가 이 제약을 실제로 쓸 수 있게 만든다.
+          # 원래 topology spread 는 label_selector 에 맞는 '모든' 파드를 센다. 그래서
+          # 롤링 업데이트 중에는 아직 종료되지 않은 구 파드까지 계산에 들어가고,
+          # 신 파드가 엉뚱한 쪽으로 밀린 뒤 구 파드가 사라지면 분산이 깨진 채로 굳는다
+          # (실측: 구 파드가 2b 에 있어 신 파드 6개가 전부 2a 로 몰림. k8s 는 사후 재배치 안 함).
+          # pod-template-hash 를 넣으면 '같은 ReplicaSet 의 파드끼리만' 비교하므로
+          # 신 파드는 자기들끼리 균등 분산되고 구 파드의 위치에 영향받지 않는다.
+          # 그래서 maxSkew=1(가장 엄격) 을 쓰면서도 DoNotSchedule 없이 균등해진다
+          # -> Pending 위험(가용성 손실) 없이 분산을 얻는다.
+          match_label_keys = ["pod-template-hash"]
           label_selector { match_labels = { app = "product" } }
         }
         container {
@@ -528,6 +550,7 @@ resource "kubernetes_deployment" "stress" {
           max_skew           = 1
           topology_key       = "topology.kubernetes.io/zone"
           when_unsatisfiable = "ScheduleAnyway"
+          match_label_keys   = ["pod-template-hash"]
           label_selector { match_labels = { app = "stress" } }
         }
         # 노드 단위 분산. zone 만으로는 같은 AZ 안에서 한 노드에 다 몰릴 수 있고,
@@ -539,9 +562,19 @@ resource "kubernetes_deployment" "stress" {
         # 노드당 2개까지 허용하므로 consolidation 을 막지 않는다.
         # 전제: node_desired_size=2 로 배포 시점에 이미 노드가 2개 존재해야 한다.
         topology_spread_constraint {
-          max_skew           = 2
+          max_skew           = 1
           topology_key       = "kubernetes.io/hostname"
           when_unsatisfiable = "ScheduleAnyway"
+          # match_label_keys 가 이 제약을 실제로 쓸 수 있게 만든다.
+          # 원래 topology spread 는 label_selector 에 맞는 '모든' 파드를 센다. 그래서
+          # 롤링 업데이트 중에는 아직 종료되지 않은 구 파드까지 계산에 들어가고,
+          # 신 파드가 엉뚱한 쪽으로 밀린 뒤 구 파드가 사라지면 분산이 깨진 채로 굳는다
+          # (실측: 구 파드가 2b 에 있어 신 파드 6개가 전부 2a 로 몰림. k8s 는 사후 재배치 안 함).
+          # pod-template-hash 를 넣으면 '같은 ReplicaSet 의 파드끼리만' 비교하므로
+          # 신 파드는 자기들끼리 균등 분산되고 구 파드의 위치에 영향받지 않는다.
+          # 그래서 maxSkew=1(가장 엄격) 을 쓰면서도 DoNotSchedule 없이 균등해진다
+          # -> Pending 위험(가용성 손실) 없이 분산을 얻는다.
+          match_label_keys = ["pod-template-hash"]
           label_selector { match_labels = { app = "stress" } }
         }
         container {

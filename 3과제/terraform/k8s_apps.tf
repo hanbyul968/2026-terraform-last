@@ -103,7 +103,7 @@ resource "kubernetes_deployment" "user" {
         # 노드당 2개까지 허용하므로 consolidation 을 막지 않는다.
         # 전제: node_desired_size=2 로 배포 시점에 이미 노드가 2개 존재해야 한다.
         topology_spread_constraint {
-          max_skew           = 1
+          max_skew           = 2
           topology_key       = "kubernetes.io/hostname"
           when_unsatisfiable = "ScheduleAnyway"
           # match_label_keys 가 이 제약을 실제로 쓸 수 있게 만든다.
@@ -113,8 +113,18 @@ resource "kubernetes_deployment" "user" {
           # (실측: 구 파드가 2b 에 있어 신 파드 6개가 전부 2a 로 몰림. k8s 는 사후 재배치 안 함).
           # pod-template-hash 를 넣으면 '같은 ReplicaSet 의 파드끼리만' 비교하므로
           # 신 파드는 자기들끼리 균등 분산되고 구 파드의 위치에 영향받지 않는다.
-          # 그래서 maxSkew=1(가장 엄격) 을 쓰면서도 DoNotSchedule 없이 균등해진다
-          # -> Pending 위험(가용성 손실) 없이 분산을 얻는다.
+          #
+          # maxSkew 는 1 이 아니라 2 다. 1 로 두면 Karpenter 가 노드를 통합하지 못한다:
+          # 빈 노드를 없애려면 그 위의 파드를 남은 노드로 옮겨야 하는데, 그러면 노드당
+          # 같은 앱 파드가 2개가 되어 skew=1 을 위반하므로 통합 계획 자체가 세워지지 않는다.
+          #   실측 로그: "pod(s) have a preferred TopologySpreadConstraint which can
+          #   prevent consolidation" 이 반복되며, DaemonSet 만 남은 빈 노드 2대가
+          #   회수되지 않고 5대가 유지됐다(비용 지표는 평균 노드 수).
+          # match_label_keys 는 '롤아웃 중 구 파드 오염'만 해결하고 이 문제는 못 막는다.
+          # 2 로 두면 통합이 가능해지고, 균등 배치는 다른 수단으로 이미 보장된다:
+          #   node_desired_size=2 로 배포 시점에 노드가 2대 있고, NG 선호 affinity 로
+          #   기본 파드가 그 2대에 앉으며, 스케줄러 점수 계산이 빈 노드를 선호한다.
+          # 즉 maxSkew=1 의 추가 이득은 '강제' 뿐인데 대가가 비용이라 손해다.
           match_label_keys = ["pod-template-hash"]
           label_selector { match_labels = { app = "user" } }
         }
@@ -336,7 +346,7 @@ resource "kubernetes_deployment" "product" {
         # 노드당 2개까지 허용하므로 consolidation 을 막지 않는다.
         # 전제: node_desired_size=2 로 배포 시점에 이미 노드가 2개 존재해야 한다.
         topology_spread_constraint {
-          max_skew           = 1
+          max_skew           = 2
           topology_key       = "kubernetes.io/hostname"
           when_unsatisfiable = "ScheduleAnyway"
           # match_label_keys 가 이 제약을 실제로 쓸 수 있게 만든다.
@@ -346,8 +356,18 @@ resource "kubernetes_deployment" "product" {
           # (실측: 구 파드가 2b 에 있어 신 파드 6개가 전부 2a 로 몰림. k8s 는 사후 재배치 안 함).
           # pod-template-hash 를 넣으면 '같은 ReplicaSet 의 파드끼리만' 비교하므로
           # 신 파드는 자기들끼리 균등 분산되고 구 파드의 위치에 영향받지 않는다.
-          # 그래서 maxSkew=1(가장 엄격) 을 쓰면서도 DoNotSchedule 없이 균등해진다
-          # -> Pending 위험(가용성 손실) 없이 분산을 얻는다.
+          #
+          # maxSkew 는 1 이 아니라 2 다. 1 로 두면 Karpenter 가 노드를 통합하지 못한다:
+          # 빈 노드를 없애려면 그 위의 파드를 남은 노드로 옮겨야 하는데, 그러면 노드당
+          # 같은 앱 파드가 2개가 되어 skew=1 을 위반하므로 통합 계획 자체가 세워지지 않는다.
+          #   실측 로그: "pod(s) have a preferred TopologySpreadConstraint which can
+          #   prevent consolidation" 이 반복되며, DaemonSet 만 남은 빈 노드 2대가
+          #   회수되지 않고 5대가 유지됐다(비용 지표는 평균 노드 수).
+          # match_label_keys 는 '롤아웃 중 구 파드 오염'만 해결하고 이 문제는 못 막는다.
+          # 2 로 두면 통합이 가능해지고, 균등 배치는 다른 수단으로 이미 보장된다:
+          #   node_desired_size=2 로 배포 시점에 노드가 2대 있고, NG 선호 affinity 로
+          #   기본 파드가 그 2대에 앉으며, 스케줄러 점수 계산이 빈 노드를 선호한다.
+          # 즉 maxSkew=1 의 추가 이득은 '강제' 뿐인데 대가가 비용이라 손해다.
           match_label_keys = ["pod-template-hash"]
           label_selector { match_labels = { app = "product" } }
         }
@@ -562,7 +582,7 @@ resource "kubernetes_deployment" "stress" {
         # 노드당 2개까지 허용하므로 consolidation 을 막지 않는다.
         # 전제: node_desired_size=2 로 배포 시점에 이미 노드가 2개 존재해야 한다.
         topology_spread_constraint {
-          max_skew           = 1
+          max_skew           = 2
           topology_key       = "kubernetes.io/hostname"
           when_unsatisfiable = "ScheduleAnyway"
           # match_label_keys 가 이 제약을 실제로 쓸 수 있게 만든다.
@@ -572,8 +592,18 @@ resource "kubernetes_deployment" "stress" {
           # (실측: 구 파드가 2b 에 있어 신 파드 6개가 전부 2a 로 몰림. k8s 는 사후 재배치 안 함).
           # pod-template-hash 를 넣으면 '같은 ReplicaSet 의 파드끼리만' 비교하므로
           # 신 파드는 자기들끼리 균등 분산되고 구 파드의 위치에 영향받지 않는다.
-          # 그래서 maxSkew=1(가장 엄격) 을 쓰면서도 DoNotSchedule 없이 균등해진다
-          # -> Pending 위험(가용성 손실) 없이 분산을 얻는다.
+          #
+          # maxSkew 는 1 이 아니라 2 다. 1 로 두면 Karpenter 가 노드를 통합하지 못한다:
+          # 빈 노드를 없애려면 그 위의 파드를 남은 노드로 옮겨야 하는데, 그러면 노드당
+          # 같은 앱 파드가 2개가 되어 skew=1 을 위반하므로 통합 계획 자체가 세워지지 않는다.
+          #   실측 로그: "pod(s) have a preferred TopologySpreadConstraint which can
+          #   prevent consolidation" 이 반복되며, DaemonSet 만 남은 빈 노드 2대가
+          #   회수되지 않고 5대가 유지됐다(비용 지표는 평균 노드 수).
+          # match_label_keys 는 '롤아웃 중 구 파드 오염'만 해결하고 이 문제는 못 막는다.
+          # 2 로 두면 통합이 가능해지고, 균등 배치는 다른 수단으로 이미 보장된다:
+          #   node_desired_size=2 로 배포 시점에 노드가 2대 있고, NG 선호 affinity 로
+          #   기본 파드가 그 2대에 앉으며, 스케줄러 점수 계산이 빈 노드를 선호한다.
+          # 즉 maxSkew=1 의 추가 이득은 '강제' 뿐인데 대가가 비용이라 손해다.
           match_label_keys = ["pod-template-hash"]
           label_selector { match_labels = { app = "stress" } }
         }

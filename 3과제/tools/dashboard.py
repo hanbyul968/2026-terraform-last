@@ -295,40 +295,87 @@ function wafxRun(){var text=document.getElementById('wafx_in').value;var ep=docu
 //   ### terraform/k8s_apps.tf 반영값 (stress 만):
 //     requests.cpu = "300m",  HPA averageUtilization = 45,  min=3 max=12
 function tuneParse(text){
-  var f={};
-  var cpu=text.match(/requests\.cpu\s*=\s*"?(\d+)m"?/i);       if(cpu)f.cpu=cpu[1]+'m';
-  var util=text.match(/averageUtilization\s*=\s*(\d+)/i);      if(util)f.util=+util[1];
-  var mn=text.match(/min\s*=\s*(\d+)/i);                        if(mn)f.min=+mn[1];
-  var mx=text.match(/max\s*=\s*(\d+)/i);                        if(mx)f.max=+mx[1];
-  // 대상 앱: "반영값 (stress 만)" / "(모든 앱..." 파싱
-  var scope=text.match(/반영값\s*\(([^)]*)\)/);
-  var apps=(D&&D.apps?D.apps.map(function(a){return a.app}):['user','product','stress']);
-  if(scope){
-    if(/모든\s*앱|all/i.test(scope[1])) f.apps=apps;
-    else { var w=scope[1].trim().split(/[\s,]+/)[0]; f.apps=apps.indexOf(w)>=0?[w]:[w]; }
+  // advise.py / autotune.ps1 어느 출력이든 그대로 붙여넣으면 되게 파싱한다.
+  //  - advise.py  : "[user] ... 권장: cpu=300m util=50% min=1 max=10"  (앱별 서로 다른 값)
+  //  - advise.py  : "user   : requests.cpu = "300m"  average_utilization = 50  min_replicas = 2"
+  //  - autotune   : "반영값 (stress 만):" + "requests.cpu = "300m", HPA averageUtilization = 45, min=3 max=12"
+  var known=(D&&D.apps?D.apps.map(function(a){return a.app}):['user','product','stress']);
+  var items=[], m;
+
+  // 1) advise.py 앱별 블록 — "[앱]" 헤더로 쪼개고 "권장:" 줄에서 값 추출
+  var re1=/\[([a-z0-9][a-z0-9-]*)\]([\s\S]*?)(?=\n\s*\[[a-z0-9][a-z0-9-]*\]|$)/gi;
+  while((m=re1.exec(text))!==null){
+    var app=m[1], body=m[2];
+    if(/변경\s*없음/.test(body)) continue;              // 유지 판정은 건너뜀
+    var rec=body.match(/권장\s*:\s*cpu\s*=\s*(\d+)m\s+util\s*=\s*(\d+)%?\s+min\s*=\s*(\d+)(?:\s+max\s*=\s*(\d+))?/i);
+    if(rec) items.push({app:app,cpu:rec[1]+'m',util:+rec[2],min:+rec[3],max:rec[4]?+rec[4]:null});
   }
-  return f;
+  if(items.length) return {items:items};
+
+  // 2) advise.py 하단 terraform 반영 줄 (앱별)
+  var re2=/^[\s#]*([a-z0-9][a-z0-9-]*)\s*:\s*requests\.cpu\s*=\s*"?(\d+)m"?[^\n]*?average_utilization\s*=\s*(\d+)[^\n]*?min_replicas\s*=\s*(\d+)/gim;
+  while((m=re2.exec(text))!==null) items.push({app:m[1],cpu:m[2]+'m',util:+m[3],min:+m[4],max:null});
+  if(items.length) return {items:items};
+
+  // 3) autotune 형식 — 값 하나 + 대상 앱 목록
+  var cpu =text.match(/requests\.cpu\s*=\s*"?(\d+)m"?/i) || text.match(/\bcpu\s*=\s*(\d+)m/i);
+  var util=text.match(/average_?utilization\s*=\s*(\d+)/i) || text.match(/\butil\s*=\s*(\d+)/i);
+  var mn  =text.match(/min_?replicas\s*=\s*(\d+)/i)       || text.match(/\bmin\s*=\s*(\d+)/i);
+  var mx  =text.match(/max_?replicas\s*=\s*(\d+)/i)       || text.match(/\bmax\s*=\s*(\d+)/i);
+  if(!cpu&&!util&&!mn) return {items:[]};
+
+  var apps=[];
+  var scope=text.match(/반영값\s*\(([^)]*)\)/);
+  if(scope){
+    if(/모든\s*앱|all/i.test(scope[1])) apps=known.slice();
+    else { var w=scope[1].trim().split(/[\s,]+/)[0]; if(w) apps=[w]; }
+  }
+  if(!apps.length){                                    // "deploy/<앱>" 에서 유추
+    var seen={}, re3=/deploy\/([a-z0-9][a-z0-9-]*)/gi;
+    while((m=re3.exec(text))!==null) seen[m[1]]=1;
+    apps=Object.keys(seen);
+  }
+  if(!apps.length) apps=known.slice();                 // 그래도 없으면 알려진 앱 전체
+  apps.forEach(function(a){
+    items.push({app:a, cpu:cpu?cpu[1]+'m':null, util:util?+util[1]:null,
+                min:mn?+mn[1]:null, max:mx?+mx[1]:null});
+  });
+  return {items:items};
 }
 function tuneCmds(f){
-  if(!f.cpu&&!f.util&&!f.min){return '<div class="tip warn"><h3>값을 못 읽었어요</h3><div class=why>autotune.ps1 의 마지막 "반영값" 줄(예: <code>requests.cpu = "300m", HPA averageUtilization = 45, min=3 max=12</code>)을 통째로 붙여넣어 주세요.</div></div>';}
-  var apps=f.apps&&f.apps.length?f.apps:['<앱>'];
-  var mn=f.min||2, mx=f.max||10, util=f.util||60, cpu=f.cpu||'?m';
-  var out='<div class="tip good"><h3>적용 대상: '+apps.join(', ')+'</h3><div class=why>cpu='+cpu+' · util='+util+'% · min='+mn+' · max='+mx+'</div></div>';
-  apps.forEach(function(n){
+  var items=(f&&f.items)?f.items:[];
+  if(!items.length){
+    return '<div class="tip warn"><h3>값을 못 읽었어요</h3><div class=why>'
+      +'advise.py 의 <code>권장: cpu=300m util=50% min=1 max=10</code> 줄이나, '
+      +'autotune.ps1 의 <code>requests.cpu = "300m", HPA averageUtilization = 45, min=3 max=12</code> 줄이 '
+      +'포함되도록 붙여넣어 주세요. (판정이 「유지 / 변경 없음」인 앱은 건너뜁니다)</div></div>';
+  }
+  var out='<div class="tip good"><h3>적용 대상: '+items.map(function(x){return x.app}).join(', ')+'</h3>'
+    +'<div class=why>'+items.map(function(x){
+        return x.app+' → cpu='+(x.cpu||'유지')+' util='+(x.util!=null?x.util+'%':'유지')
+             +' min='+(x.min!=null?x.min:'유지')+' max='+(x.max!=null?x.max:'유지');
+      }).join('\n')+'</div></div>';
+
+  items.forEach(function(x){
+    var n=x.app, mn=(x.min!=null?x.min:2), mx=(x.max!=null?x.max:10),
+        util=(x.util!=null?x.util:60), cpu=x.cpu||'200m';
     var patch=JSON.stringify({spec:{minReplicas:mn,maxReplicas:mx,metrics:[{type:"Resource",resource:{name:"cpu",target:{type:"Utilization",averageUtilization:util}}}]}});
+    // PowerShell 은 네이티브 exe 에 큰따옴표를 벗겨 넘겨서 -p '{"spec":...}' 가 깨진다
+    // (kubectl: invalid character 's'). \" 로 이스케이프해야 그대로 전달된다.
     var imm='kubectl -n app set resources deploy/'+n+' --requests=cpu='+cpu+'\n'
       +'kubectl -n app patch hpa '+n+' --type=merge -p \''+patch.replace(/"/g,'\\"')+'\'\n'
       +'kubectl -n app rollout status deploy/'+n;
-    var tf='# terraform/k8s_apps.tf — '+n+'\n'
-      +'resources { requests = { cpu = "'+cpu+'", memory = "128Mi" } }   # kubernetes_deployment.'+n+'\n'
-      +'min_replicas = '+mn+'\nmax_replicas = '+mx+'\naverage_utilization = '+util+'   # HPA.'+n;
+    var tf='# terraform/k8s_apps.tf — kubernetes_deployment.'+n+'\n'
+      +'resources { requests = { cpu = "'+cpu+'", memory = "128Mi" } }\n'
+      +'# kubernetes_horizontal_pod_autoscaler_v2.'+n+'\n'
+      +'min_replicas = '+mn+'\nmax_replicas = '+mx+'\naverage_utilization = '+util;
     out+='<div class=card style="margin-bottom:12px"><div class=lbl>'+n+'</div>'
       +'<div class=mut style="font-size:12px;margin:6px 0 4px">① 즉시 적용 (임시 — 재배포 시 사라짐)</div>'
       +'<pre style="margin:0 0 9px;background:#f6f7f9;border:1px solid var(--line);border-radius:8px;padding:9px 11px;font-size:11.5px;white-space:pre-wrap;color:#1a1d23;overflow-x:auto">'+esc(imm)+'</pre>'
       +'<div class=mut style="font-size:12px;margin-bottom:4px">② 영구 반영 (k8s_apps.tf 수정 후 apply)</div>'
       +'<pre style="margin:0;background:#f6f7f9;border:1px solid var(--line);border-radius:8px;padding:9px 11px;font-size:11.5px;white-space:pre-wrap;color:#1a1d23;overflow-x:auto">'+esc(tf)+'</pre></div>';
   });
-  out+='<div class="tip dim"><h3>순서</h3><div class=why>① kubectl 로 즉시 적용해 효과 확인 (loadtest 재측정) → 좋으면 ② k8s_apps.tf 에 박고 <code>terraform apply -auto-approve -var "k8s_provider_ready=true"</code>.\n한 번에 한 앱만. avail% 99% 는 사수.</div></div>';
+  out+='<div class="tip dim"><h3>순서</h3><div class=why>① kubectl 로 즉시 적용해 효과 확인 (loadtest 재측정) → 좋으면 ② k8s_apps.tf 에 박고 <code>terraform apply -auto-approve</code>.\n한 번에 한 앱만. avail% 99% 는 사수.</div></div>';
   return out;
 }
 function tuneRun(){

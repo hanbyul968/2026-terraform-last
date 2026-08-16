@@ -134,8 +134,12 @@ foreach ($c in $COMBOS) {
   Write-Host ">>> combo=$($c.name)  cpu=$($c.cpu) util=$($c.util) replicas=$($c.min)-$($c.max)"
   Invoke-PatchAll $c.cpu $c.util $c.min $c.max
   $startNodes = Invoke-Drain
-  & (Join-Path $Here 'loadtest.ps1') -Url $EP -Duration $Duration -Label $c.name *> $null
-  $r = Get-TrialScore $c.name
+  # 라벨에 'at-' 접두사를 붙인다. 조합 이름(baseline, lean-cpu, ...)을 그대로 쓰면
+  # 사용자가 수동으로 돌린 '-Label baseline' 결과 폴더와 같은 경로가 되어 결과가 섞인다.
+  # (loadtest 가 폴더를 비우도록 고쳤지만, 애초에 겹치지 않게 하는 것이 안전하다)
+  $lbl = "at-$($c.name)"
+  & (Join-Path $Here 'loadtest.ps1') -Url $EP -Duration $Duration -Label $lbl *> $null
+  $r = Get-TrialScore -Label $lbl
   $ap, $ma, $na, $sc = $r[0], $r[1], $r[2], $r[3]
   Write-Host ("    perf_avg={0} avail_min={1} nodes_avg={2} SCORE={3}" -f $ap, $ma, $na, $sc)
   "$($c.name),$ap,$ma,$na,$sc" | Add-Content -Path $Results

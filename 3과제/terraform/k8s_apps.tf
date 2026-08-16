@@ -19,7 +19,7 @@ resource "kubernetes_deployment" "user" {
     labels    = { app = "user" }
   }
   spec {
-    replicas = 1
+    replicas = 2
     selector { match_labels = { app = "user" } }
     strategy {
       type = "RollingUpdate"
@@ -42,6 +42,15 @@ resource "kubernetes_deployment" "user" {
         topology_spread_constraint {
           max_skew           = 1
           topology_key       = "topology.kubernetes.io/zone"
+          when_unsatisfiable = "ScheduleAnyway"
+          label_selector { match_labels = { app = "user" } }
+        }
+        # 노드 단위 분산. zone 만으로는 같은 AZ 안에서 한 노드에 다 몰릴 수 있고,
+        # 그 노드가 Karpenter 에 회수되면 앱이 통째로 끊긴다(실측: 앱 파드 3개가 한 노드 집중).
+        # ScheduleAnyway 라 노드가 부족할 때 스케줄을 막지는 않는다(가용성 우선).
+        topology_spread_constraint {
+          max_skew           = 1
+          topology_key       = "kubernetes.io/hostname"
           when_unsatisfiable = "ScheduleAnyway"
           label_selector { match_labels = { app = "user" } }
         }
@@ -107,7 +116,11 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "user" {
     namespace = kubernetes_namespace.app.metadata[0].name
   }
   spec {
-    min_replicas = 1
+    # PDB(minAvailable=1) 와 짝. replica 가 1 이면 PDB 가 evict 를 전면 차단해
+    # Karpenter 가 그 노드를 영구히 회수하지 못하고(비용↑), 노드가 강제 종료되면
+    # 대체 파드가 뜨는 동안 서비스가 끊긴다. 2 이면 hostname spread 로 두 노드에 나뉘어
+    # 한 노드가 빠져도 무중단이고 consolidation 도 정상 동작한다.
+    min_replicas = 2
     max_replicas = 10
     scale_target_ref {
       api_version = "apps/v1"
@@ -175,7 +188,7 @@ resource "kubernetes_deployment" "product" {
     labels    = { app = "product" }
   }
   spec {
-    replicas = 1
+    replicas = 2
     selector { match_labels = { app = "product" } }
     strategy {
       type = "RollingUpdate"
@@ -196,6 +209,15 @@ resource "kubernetes_deployment" "product" {
         topology_spread_constraint {
           max_skew           = 1
           topology_key       = "topology.kubernetes.io/zone"
+          when_unsatisfiable = "ScheduleAnyway"
+          label_selector { match_labels = { app = "product" } }
+        }
+        # 노드 단위 분산. zone 만으로는 같은 AZ 안에서 한 노드에 다 몰릴 수 있고,
+        # 그 노드가 Karpenter 에 회수되면 앱이 통째로 끊긴다(실측: 앱 파드 3개가 한 노드 집중).
+        # ScheduleAnyway 라 노드가 부족할 때 스케줄을 막지는 않는다(가용성 우선).
+        topology_spread_constraint {
+          max_skew           = 1
+          topology_key       = "kubernetes.io/hostname"
           when_unsatisfiable = "ScheduleAnyway"
           label_selector { match_labels = { app = "product" } }
         }
@@ -261,7 +283,11 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "product" {
     namespace = kubernetes_namespace.app.metadata[0].name
   }
   spec {
-    min_replicas = 1
+    # PDB(minAvailable=1) 와 짝. replica 가 1 이면 PDB 가 evict 를 전면 차단해
+    # Karpenter 가 그 노드를 영구히 회수하지 못하고(비용↑), 노드가 강제 종료되면
+    # 대체 파드가 뜨는 동안 서비스가 끊긴다. 2 이면 hostname spread 로 두 노드에 나뉘어
+    # 한 노드가 빠져도 무중단이고 consolidation 도 정상 동작한다.
+    min_replicas = 2
     max_replicas = 10
     scale_target_ref {
       api_version = "apps/v1"
@@ -326,7 +352,7 @@ resource "kubernetes_deployment" "stress" {
     labels    = { app = "stress" }
   }
   spec {
-    replicas = 1
+    replicas = 2
     selector { match_labels = { app = "stress" } }
     template {
       metadata { labels = { app = "stress" } }
@@ -336,6 +362,15 @@ resource "kubernetes_deployment" "stress" {
         topology_spread_constraint {
           max_skew           = 1
           topology_key       = "topology.kubernetes.io/zone"
+          when_unsatisfiable = "ScheduleAnyway"
+          label_selector { match_labels = { app = "stress" } }
+        }
+        # 노드 단위 분산. zone 만으로는 같은 AZ 안에서 한 노드에 다 몰릴 수 있고,
+        # 그 노드가 Karpenter 에 회수되면 앱이 통째로 끊긴다(실측: 앱 파드 3개가 한 노드 집중).
+        # ScheduleAnyway 라 노드가 부족할 때 스케줄을 막지는 않는다(가용성 우선).
+        topology_spread_constraint {
+          max_skew           = 1
+          topology_key       = "kubernetes.io/hostname"
           when_unsatisfiable = "ScheduleAnyway"
           label_selector { match_labels = { app = "stress" } }
         }
@@ -394,7 +429,11 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "stress" {
     namespace = kubernetes_namespace.app.metadata[0].name
   }
   spec {
-    min_replicas = 1
+    # PDB(minAvailable=1) 와 짝. replica 가 1 이면 PDB 가 evict 를 전면 차단해
+    # Karpenter 가 그 노드를 영구히 회수하지 못하고(비용↑), 노드가 강제 종료되면
+    # 대체 파드가 뜨는 동안 서비스가 끊긴다. 2 이면 hostname spread 로 두 노드에 나뉘어
+    # 한 노드가 빠져도 무중단이고 consolidation 도 정상 동작한다.
+    min_replicas = 2
     max_replicas = 10
     scale_target_ref {
       api_version = "apps/v1"

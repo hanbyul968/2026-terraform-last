@@ -86,15 +86,22 @@ def pct_nearest(sorted_vals, q):
     return sorted_vals[idx]
 
 
-def right_size(peak_m):
-    """권장 request = 실사용 피크 x 1.3, 25m 단위 상향, 하한 50m.
+def right_size(base_m):
+    """권장 request = 기준 사용량 x 1.2, 25m 단위 상향, 하한 50m.
 
-    임의 배수(x1.4 등)가 아니라 실측 피크에 헤드룸만 얹는다. request 는 예약량이라
-    실사용보다 크게 잡을수록 노드가 그만큼 늘어난다(비용).
+    기준값으로 p95 를 쓰지 않는 이유(실측):
+      stress 의 분포가 p50 382m / p95 1064m / max 1343m 로 꼬리가 두꺼웠다.
+      p95x1.3 = 1400m 을 권고하면 파드 하나가 t3.medium 의 70% 를 예약해 노드가 폭증한다.
+      p95 는 개별 파드가 어쩌다 도달하는 값이고 모든 파드가 동시에 그 값을 쓰지 않는다
+      (동시 총사용량 실측: stress 10파드 합계 3.6코어 = 파드당 평균 360m).
+    HPA 가 있으면 총 예약량은 '총실사용 / target%' 로 수렴하므로 request 는 노드 수를
+    좌우하지 않고 '파드 크기'만 정한다. 그래서 전형값(p90)에 얇은 헤드룸만 얹는다.
+    request 가 실사용보다 지나치게 작을 때만 문제가 되는데(사용률이 수백 % 로 튀어
+    HPA 가 max 에 붙어 평형에 도달하지 못한다), p90x1.2 면 그 구간을 피한다.
     """
-    if not peak_m:
+    if not base_m:
         return None
-    return max(50, -(-int(peak_m * 1.3) // 25) * 25)
+    return max(50, -(-int(base_m * 1.2) // 25) * 25)
 
 
 # ---------- 측정값 (loadtest CSV) ----------
@@ -177,8 +184,12 @@ def load_nodes(outdir):
 
 
 # ---------- 라이브 상태 (kubectl) ----------
-def usage_from_window(outdir):
-    """{앱: {p95, max, n}} — loadtest 가 부하 중 5초마다 남긴 podcpu.csv 에서 계산.
+def usage_from_window(outdir, apps=None):
+    """{앱: {p50, p90, p95, max, n}} — 부하 중 5초마다 남긴 podcpu.csv 에서 계산.
+
+    apps 를 주면 그 목록에 있는 앱만 집계한다. podcpu.csv 는 네임스페이스의 '모든' 파드를
+    담기 때문에, 진단용으로 띄운 파드까지 앱으로 잡힌다(실측: latprobe 라는 앱이 생겼다).
+    대회날에도 디버그 파드·Job·사이드카가 있으면 같은 오염이 생긴다.
 
     request 권장값의 근거는 반드시 '부하 창 전체' 여야 한다. 부하가 끝난 뒤 kubectl top 을
     한 번 찍는 방식은 찍히는 순간에 따라 값이 요동친다:
@@ -195,6 +206,8 @@ def usage_from_window(outdir):
             if len(c) < 3:
                 continue
             app = c[1].rsplit("-", 2)[0]
+            if apps is not None and app not in apps:
+                continue  # 측정 대상 앱이 아닌 파드(진단용 등)는 버린다
             try:
                 v = int(c[2])
             except ValueError:
@@ -205,7 +218,8 @@ def usage_from_window(outdir):
     out = {}
     for app, vals in per.items():
         vals.sort()
-        out[app] = {"p95": pct_nearest(vals, 95), "max": vals[-1], "n": len(vals)}
+        out[app] = {"p50": pct_nearest(vals, 50), "p90": pct_nearest(vals, 90),
+                    "p95": pct_nearest(vals, 95), "max": vals[-1], "n": len(vals)}
     return out
 
 
@@ -340,7 +354,11 @@ def judge(m, cur, peak_m=None, node_cpu=None):
     if bad_avail:
         # 가용성 실패는 보통 파드 수 부족/롤아웃이지 request 부족이 아니다 -> request 유지
         if at_max:
-            return ("늘려", "파드 상한 도달", cpu, util, mn, mx + 2,
+            # 상한이 병목이면 +2 로는 부족한 경우가 많다. 50% 증량(최소 +2).
+            # HPA 는 '총실사용/target%' 로 평형을 찾는데 max 에 막히면 평형에 도달하지 못해
+            # 파드마다 과부하가 걸린 채로 지연이 난다. 여유를 충분히 줘야 평형이 잡힌다.
+            newmx = max(mx + 2, int(mx * 1.5))
+            return ("늘려", "파드 상한 도달", cpu, util, mn, newmx,
                     f"avail {m['avail']:.1f}% < 99 이고 파드가 상한 {mx}개에 붙었다. 더 못 늘려 실패한 것",
                     "부하 중 롤아웃이 있었는지도 확인(롤아웃 자체가 504 를 만든다)")
         return ("늘려", "파드 부족/스케일 지연", cpu, max(40, util - 10), mn + 1, mx,
@@ -349,7 +367,11 @@ def judge(m, cur, peak_m=None, node_cpu=None):
 
     if bad_perf:
         if at_max:
-            return ("늘려", "파드 상한 도달", cpu, util, mn, mx + 2,
+            # 상한이 병목이면 +2 로는 부족한 경우가 많다. 50% 증량(최소 +2).
+            # HPA 는 '총실사용/target%' 로 평형을 찾는데 max 에 막히면 평형에 도달하지 못해
+            # 파드마다 과부하가 걸린 채로 지연이 난다. 여유를 충분히 줘야 평형이 잡힌다.
+            newmx = max(mx + 2, int(mx * 1.5))
+            return ("늘려", "파드 상한 도달", cpu, util, mn, newmx,
                     f"p95 {m['p95']:.3f}s > SLO {m['slo']}s 인데 파드가 상한 {mx}개다. request 를 올리면 사용률이 낮아져 스케일이 더 늦어진다",
                     "")
         if nc >= 80:
@@ -408,10 +430,11 @@ def main():
     live = live_state(a.ns)
     # request 산정 근거: 부하 창 전체(podcpu.csv) 를 1순위로 쓴다. 순간값은 스파이크에
     # 끌려가 과대/과소 권고를 만든다(실측: 132m 를 400m 로 읽어 request 300m 권고).
-    win = usage_from_window(outdir)
+    win = usage_from_window(outdir, set(apps))
     if win:
-        peaks = {k: v["p95"] for k, v in win.items()}
-        basis = "부하 창 p95 (podcpu.csv)"
+        # 기준은 p90. p95/max 는 참고로만 보여준다(꼬리 1회에 권고가 끌려가지 않게).
+        peaks = {k: v["p90"] for k, v in win.items()}
+        basis = "부하 창 p90 (podcpu.csv, 앱 파드만)"
     else:
         peaks = pod_usage_live(a.ns)
         basis = "지금 순간값 1회 [!] 근거 약함"
@@ -450,8 +473,9 @@ def main():
               + (f" 파드={cur.get('replicas')}" if cur.get("replicas") else ""))
         w = win.get(api)
         if w:
-            print(f"  실사용: p95 {w['p95']}m · 최대 {w['max']}m · 표본 {w['n']}개"
-                  + (f" · 적정 request {right_size(peak)}m" if peak else ""))
+            print(f"  실사용: p50 {w['p50']}m · p90 {w['p90']}m · p95 {w['p95']}m · 최대 {w['max']}m"
+                  f" · 표본 {w['n']}개"
+                  + (f" · 적정 request {right_size(peak)}m (p90x1.2)" if peak else ""))
         else:
             print(f"  실사용: {peak if peak is not None else '-'}m (순간값)"
                   + (f" · 적정 request {right_size(peak)}m" if peak else ""))

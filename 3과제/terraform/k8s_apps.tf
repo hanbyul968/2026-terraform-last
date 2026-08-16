@@ -21,11 +21,20 @@ resource "kubernetes_deployment" "user" {
   spec {
     replicas = 2
     selector { match_labels = { app = "user" } }
+    # 롤링 업데이트가 '분산된 상태로' 수렴하게 만드는 설정.
+    # max_surge=1(25%) 이면 신 파드를 먼저 띄운 뒤 구 파드를 지우는데, 어느 구 파드를
+    # 지울지는 ReplicaSet 의 삭제 순서가 정하고 topology spread 를 고려하지 않는다.
+    # 그래서 롤 결과가 운에 좌우된다(실측: user/product 는 1개씩 나뉘었는데 stress 는
+    # 두 개가 한 노드에 몰렸다. 쿠버네티스는 사후 재배치를 하지 않아 그대로 굳는다).
+    # max_surge=0 / max_unavailable=1 이면 '지우고 -> 빈 자리에 새로 스케줄' 순서가 되어
+    # 매번 남은 파드가 없는 노드가 선택되고 1개씩 분산으로 수렴한다.
+    # 대가: 롤 도중 순간적으로 파드가 1개가 된다. 바이너리 교체는 트래픽 주입(T+1h) 전에
+    # 끝내므로 가용성 점수에 영향이 없다. 트래픽 중 롤은 피한다.
     strategy {
       type = "RollingUpdate"
       rolling_update {
-        max_surge       = "25%"
-        max_unavailable = "0"
+        max_surge       = "0"
+        max_unavailable = "1"
       }
     }
     template {
@@ -39,6 +48,30 @@ resource "kubernetes_deployment" "user" {
       spec {
         termination_grace_period_seconds = 35
         service_account_name             = kubernetes_service_account.user.metadata[0].name
+        # 기본 파드는 '관리형 NG 노드'에 앉힌다.
+        # 이유: Karpenter 노드는 consolidation 회수 대상이라 언제든 사라진다. 베이스라인
+        # 레플리카가 그 위에 있으면 노드 회수마다 서비스가 흔들린다. 관리형 NG 노드는
+        # desired=2 로 고정되어 Karpenter 가 건드리지 못하므로 기본 파드의 정착지로 맞다.
+        # (실측: NG 노드 2대가 텅 비고 앱 6개가 Karpenter 노드 2대에 올라가 있었다)
+        #
+        # preferred(선호)로 두는 이유: required 로 강제하면 스케일아웃 파드가 NG 2노드에
+        # 못 들어갈 때 Pending 이 되어 가용성을 깎는다. preferred 면
+        #   베이스라인 -> NG 노드(자리 있음), 스케일아웃 초과분 -> Karpenter 노드
+        # 로 자연히 나뉘고, Karpenter 회수는 초과분 파드만 건드린다.
+        # operator=Exists 로 노드그룹 이름에 결합하지 않는다.
+        affinity {
+          node_affinity {
+            preferred_during_scheduling_ignored_during_execution {
+              weight = 100
+              preference {
+                match_expressions {
+                  key      = "eks.amazonaws.com/nodegroup"
+                  operator = "Exists"
+                }
+              }
+            }
+          }
+        }
         # AZ 분산은 '선호'로 둔다. DoNotSchedule 로 강제하면 안 되는 이유(실측):
         #   (a) 한쪽 AZ 노드가 꽉 차면 반대쪽으로 못 가고 Pending 으로 대기한다
         #       -> 가용성 점수(2xx 비율)를 직접 깎는다. 채점상 AZ 장애는 측정하지 않으므로
@@ -207,11 +240,20 @@ resource "kubernetes_deployment" "product" {
   spec {
     replicas = 2
     selector { match_labels = { app = "product" } }
+    # 롤링 업데이트가 '분산된 상태로' 수렴하게 만드는 설정.
+    # max_surge=1(25%) 이면 신 파드를 먼저 띄운 뒤 구 파드를 지우는데, 어느 구 파드를
+    # 지울지는 ReplicaSet 의 삭제 순서가 정하고 topology spread 를 고려하지 않는다.
+    # 그래서 롤 결과가 운에 좌우된다(실측: user/product 는 1개씩 나뉘었는데 stress 는
+    # 두 개가 한 노드에 몰렸다. 쿠버네티스는 사후 재배치를 하지 않아 그대로 굳는다).
+    # max_surge=0 / max_unavailable=1 이면 '지우고 -> 빈 자리에 새로 스케줄' 순서가 되어
+    # 매번 남은 파드가 없는 노드가 선택되고 1개씩 분산으로 수렴한다.
+    # 대가: 롤 도중 순간적으로 파드가 1개가 된다. 바이너리 교체는 트래픽 주입(T+1h) 전에
+    # 끝내므로 가용성 점수에 영향이 없다. 트래픽 중 롤은 피한다.
     strategy {
       type = "RollingUpdate"
       rolling_update {
-        max_surge       = "25%"
-        max_unavailable = "0"
+        max_surge       = "0"
+        max_unavailable = "1"
       }
     }
     template {
@@ -223,6 +265,30 @@ resource "kubernetes_deployment" "product" {
       spec {
         termination_grace_period_seconds = 35
         service_account_name             = kubernetes_service_account.product.metadata[0].name
+        # 기본 파드는 '관리형 NG 노드'에 앉힌다.
+        # 이유: Karpenter 노드는 consolidation 회수 대상이라 언제든 사라진다. 베이스라인
+        # 레플리카가 그 위에 있으면 노드 회수마다 서비스가 흔들린다. 관리형 NG 노드는
+        # desired=2 로 고정되어 Karpenter 가 건드리지 못하므로 기본 파드의 정착지로 맞다.
+        # (실측: NG 노드 2대가 텅 비고 앱 6개가 Karpenter 노드 2대에 올라가 있었다)
+        #
+        # preferred(선호)로 두는 이유: required 로 강제하면 스케일아웃 파드가 NG 2노드에
+        # 못 들어갈 때 Pending 이 되어 가용성을 깎는다. preferred 면
+        #   베이스라인 -> NG 노드(자리 있음), 스케일아웃 초과분 -> Karpenter 노드
+        # 로 자연히 나뉘고, Karpenter 회수는 초과분 파드만 건드린다.
+        # operator=Exists 로 노드그룹 이름에 결합하지 않는다.
+        affinity {
+          node_affinity {
+            preferred_during_scheduling_ignored_during_execution {
+              weight = 100
+              preference {
+                match_expressions {
+                  key      = "eks.amazonaws.com/nodegroup"
+                  operator = "Exists"
+                }
+              }
+            }
+          }
+        }
         # AZ 분산은 '선호'로 둔다. DoNotSchedule 로 강제하면 안 되는 이유(실측):
         #   (a) 한쪽 AZ 노드가 꽉 차면 반대쪽으로 못 가고 Pending 으로 대기한다
         #       -> 가용성 점수(2xx 비율)를 직접 깎는다. 채점상 AZ 장애는 측정하지 않으므로
@@ -388,11 +454,51 @@ resource "kubernetes_deployment" "stress" {
   spec {
     replicas = 2
     selector { match_labels = { app = "stress" } }
+    # 롤링 업데이트가 '분산된 상태로' 수렴하게 만드는 설정.
+    # max_surge=1(25%) 이면 신 파드를 먼저 띄운 뒤 구 파드를 지우는데, 어느 구 파드를
+    # 지울지는 ReplicaSet 의 삭제 순서가 정하고 topology spread 를 고려하지 않는다.
+    # 그래서 롤 결과가 운에 좌우된다(실측: user/product 는 1개씩 나뉘었는데 stress 는
+    # 두 개가 한 노드에 몰렸다. 쿠버네티스는 사후 재배치를 하지 않아 그대로 굳는다).
+    # max_surge=0 / max_unavailable=1 이면 '지우고 -> 빈 자리에 새로 스케줄' 순서가 되어
+    # 매번 남은 파드가 없는 노드가 선택되고 1개씩 분산으로 수렴한다.
+    # 대가: 롤 도중 순간적으로 파드가 1개가 된다. 바이너리 교체는 트래픽 주입(T+1h) 전에
+    # 끝내므로 가용성 점수에 영향이 없다. 트래픽 중 롤은 피한다.
+    strategy {
+      type = "RollingUpdate"
+      rolling_update {
+        max_surge       = "0"
+        max_unavailable = "1"
+      }
+    }
     template {
       metadata { labels = { app = "stress" } }
       spec {
         termination_grace_period_seconds = 35
         service_account_name             = kubernetes_service_account.stress.metadata[0].name
+        # 기본 파드는 '관리형 NG 노드'에 앉힌다.
+        # 이유: Karpenter 노드는 consolidation 회수 대상이라 언제든 사라진다. 베이스라인
+        # 레플리카가 그 위에 있으면 노드 회수마다 서비스가 흔들린다. 관리형 NG 노드는
+        # desired=2 로 고정되어 Karpenter 가 건드리지 못하므로 기본 파드의 정착지로 맞다.
+        # (실측: NG 노드 2대가 텅 비고 앱 6개가 Karpenter 노드 2대에 올라가 있었다)
+        #
+        # preferred(선호)로 두는 이유: required 로 강제하면 스케일아웃 파드가 NG 2노드에
+        # 못 들어갈 때 Pending 이 되어 가용성을 깎는다. preferred 면
+        #   베이스라인 -> NG 노드(자리 있음), 스케일아웃 초과분 -> Karpenter 노드
+        # 로 자연히 나뉘고, Karpenter 회수는 초과분 파드만 건드린다.
+        # operator=Exists 로 노드그룹 이름에 결합하지 않는다.
+        affinity {
+          node_affinity {
+            preferred_during_scheduling_ignored_during_execution {
+              weight = 100
+              preference {
+                match_expressions {
+                  key      = "eks.amazonaws.com/nodegroup"
+                  operator = "Exists"
+                }
+              }
+            }
+          }
+        }
         # AZ 분산은 '선호'로 둔다. DoNotSchedule 로 강제하면 안 되는 이유(실측):
         #   (a) 한쪽 AZ 노드가 꽉 차면 반대쪽으로 못 가고 Pending 으로 대기한다
         #       -> 가용성 점수(2xx 비율)를 직접 깎는다. 채점상 AZ 장애는 측정하지 않으므로

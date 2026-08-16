@@ -98,25 +98,47 @@ def right_size(peak_m):
 
 
 # ---------- 측정값 (loadtest CSV) ----------
+# 결과 폴더의 CSV 중 '앱 측정 결과가 아닌' 파일들. 앱으로 오인하면 안 된다.
+#   nodes.csv  : 노드/파드 수 타임라인
+#   podcpu.csv : 파드 CPU 실사용 타임라인
+# 실측 사고: podcpu.csv 를 추가했더니 앱 이름 'podcpu' 로 잡혀 load_measures 가
+# hey CSV 로 읽다가 KeyError: 'response-time' 로 죽었다.
+META_CSV = {"nodes", "podcpu"}
+
+
+def is_app_csv(path):
+    """hey 결과 CSV 인지 헤더로 판별. 이름 규칙에만 의존하지 않는 2차 방어.
+
+    앞으로 어떤 메타 CSV 가 추가돼도 헤더에 response-time 이 없으면 앱으로 보지 않는다.
+    """
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            head = f.readline()
+    except OSError:
+        return False
+    return "response-time" in head
+
+
 def discover_apps(outdir, slos):
-    """결과 폴더의 <앱>.csv 로 앱 목록을 만든다 (nodes.csv 제외).
+    """결과 폴더의 <앱>.csv 로 앱 목록을 만든다 (메타 CSV 제외).
 
     대회날 앱 이름/개수가 바뀌어도 코드를 고치지 않아도 되게 하드코딩하지 않는다.
     --slos 에 없는 앱은 DEFAULT_SLO 를 쓰고 호출부에서 경고를 낸다.
     """
     apps, assumed = [], []
     try:
-        names = sorted(
-            os.path.splitext(f)[0]
-            for f in os.listdir(outdir)
-            if f.endswith(".csv") and os.path.splitext(f)[0] != "nodes"
-        )
+        files = sorted(f for f in os.listdir(outdir) if f.endswith(".csv"))
     except OSError:
-        names = []
-    for n in names:
-        apps.append(n)
-        if n not in slos:
-            assumed.append(n)
+        files = []
+    for f in files:
+        name = os.path.splitext(f)[0]
+        if name in META_CSV:
+            continue
+        if not is_app_csv(os.path.join(outdir, f)):
+            continue
+        apps.append(name)
+        if name not in slos:
+            assumed.append(name)
     # CSV 가 없으면 --slos 에 적힌 앱이라도 시도
     if not apps:
         apps = list(slos.keys())
@@ -131,6 +153,10 @@ def load_measures(outdir, slos):
         except FileNotFoundError:
             rows = []
         if not rows:
+            out[api] = None
+            continue
+        if rows and "response-time" not in rows[0]:
+            # 앱 CSV 가 아니다(메타 파일 등). 죽지 말고 측정 없음으로 넘긴다.
             out[api] = None
             continue
         lat = [float(r["response-time"]) for r in rows]

@@ -29,13 +29,7 @@ resource "kubernetes_deployment" "user" {
       }
     }
     template {
-      metadata {
-        labels = { app = "user" }
-        # DB 엔드포인트가 바뀌면 파드 템플릿이 바뀌어 롤링 재배포된다.
-        # env_from(Secret) 은 실행 중 파드에 자동 반영되지 않아, 이 어노테이션이 없으면
-        # apply 후에도 옛 MYSQL_HOST 를 계속 써서 DNS 실패로 500 을 쏟는다.
-        annotations = { "wsi/db-host" = aws_db_proxy.this.endpoint }
-      }
+      metadata { labels = { app = "user" } }
       spec {
         termination_grace_period_seconds = 35
         service_account_name             = kubernetes_service_account.user.metadata[0].name
@@ -185,11 +179,7 @@ resource "kubernetes_deployment" "product" {
       }
     }
     template {
-      metadata {
-        labels = { app = "product" }
-        # DB 엔드포인트 변경 시 롤링 재배포 유도 (user 와 동일한 이유)
-        annotations = { "wsi/db-host" = aws_db_proxy.this.endpoint }
-      }
+      metadata { labels = { app = "product" } }
       spec {
         termination_grace_period_seconds = 35
         service_account_name             = kubernetes_service_account.product.metadata[0].name

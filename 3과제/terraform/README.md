@@ -103,33 +103,52 @@ kubectl -n app rollout restart deploy/user deploy/product
 
 ### 최초 구축 (state가 비어 있을 때) — 2단계
 
-1단계에 **느린 AWS 리소스를 모두 몰아넣어 동시에 만든다.** EKS(~12분)·RDS Multi-AZ(~15분)·
-CloudFront(~18분)는 서로 의존이 없어 병렬로 뜬다. RDS를 2단계로 미루면 EKS가 끝난 뒤에야
-시작해서 그만큼 총 시간이 늘어난다.
+**1단계에 클러스터가 필요 없는 것을 전부 몰아넣어 병렬로 돌린다.** 특히 `db-init` Job의
+선행조건 5개(`aws_db_instance` · `aws_db_proxy_target` · `null_resource.proxy_client_auth` ·
+`aws_eks_node_group` · `aws_s3_object.seed`)를 1단계에서 끝내면, 2단계 시작과 동시에
+DB 시드가 돌기 시작한다. 이미지 빌드(`build_push`)도 ECR만 필요하므로 1단계로 보낸다.
 
 ```powershell
 cd C:\Users\competitor\2026-terraform\3과제\terraform
 terraform init
 
-# 1단계: 느린 것 전부 병렬 (~18분). PowerShell이 -target의 점을 쪼개지 않게 --% 필수
-terraform apply --% -auto-approve -var k8s_provider_ready=false -target=aws_eks_cluster.this -target=aws_eks_node_group.main -target=aws_iam_openid_connect_provider.eks -target=aws_eks_addon.coredns -target=aws_eks_addon.kube_proxy -target=aws_eks_addon.vpc_cni -target=aws_eks_addon.metrics_server -target=aws_db_instance.this -target=aws_db_proxy.this -target=aws_db_proxy_target.this -target=aws_cloudfront_distribution.this -target=aws_lb.this
+# 1단계: 클러스터 없이 만들 수 있는 것 전부, 병렬로 (~18분)
+#   PowerShell이 -target의 점을 쪼개지 않게 --% 필수
+terraform apply --% -auto-approve -parallelism=30 -var k8s_provider_ready=false -target=aws_eks_cluster.this -target=aws_eks_node_group.main -target=aws_iam_openid_connect_provider.eks -target=aws_eks_addon.coredns -target=aws_eks_addon.kube_proxy -target=aws_eks_addon.vpc_cni -target=aws_eks_addon.metrics_server -target=aws_db_instance.this -target=aws_db_proxy.this -target=aws_db_proxy_target.this -target=null_resource.proxy_client_auth -target=aws_cloudfront_distribution.this -target=aws_lb.this -target=aws_s3_object.seed -target=null_resource.build_push
 
-# 2단계: 나머지 전체 (이미지 빌드/push, WAF, k8s 배포, DB 시드까지 자동)
-#   클러스터 이름을 외우지 않는다 — output 이 정확한 명령을 그대로 준다
-#   (project 변수를 바꿨어도 항상 맞는 이름이 나온다)
+# 2단계: k8s 리소스만 남는다 (helm, 앱 배포, db-init, TargetGroupBinding)
 Invoke-Expression (terraform output -raw kubeconfig_cmd)
-terraform apply -auto-approve
+terraform apply -auto-approve -parallelism=30
 
 terraform output endpoint     # ← 채점 플랫폼에 제출 (프로토콜+주소만, 경로 X)
 ```
 
-> **1단계 target 목록에 무엇을 넣는가**: k8s provider(`kubernetes`/`helm`/`kubectl`)를 쓰지 않는
-> 리소스는 전부 넣어도 된다. terraform이 의존성(VPC·서브넷·SG·IAM·S3·ECR·시크릿)을 자동으로
-> 끌어오므로 위 12개만 지정하면 충분하다. 반대로 `kubernetes_*`·`helm_release`·`kubectl_manifest`는
-> 클러스터가 없으면 만들 수 없으니 2단계로 남긴다.
+**왜 이 목록인가 (전부 실측/확인)**
+
+| 리소스 | 대략 소요 | 클러스터 의존 |
+|---|---|---|
+| `aws_cloudfront_distribution` | ~18분 | 없음 (ALB만) |
+| `aws_db_instance` (Multi-AZ) | ~15분 | 없음 |
+| `aws_eks_cluster` → 노드그룹 → 애드온 | ~12+4분 | (자기 자신) |
+| `null_resource.build_push` | ~2분 | 없음 (`depends_on = aws_ecr_repository`) |
+| `null_resource.proxy_client_auth` | 프록시 available 대기 | 없음 (`aws_db_proxy_target`) |
+| `aws_s3_object.seed` | 10MB 업로드 | 없음 |
+
+서로 의존이 없으므로 동시에 진행되고, 1단계 소요는 **가장 느린 하나(CloudFront)** 에 수렴한다.
+RDS를 2단계로 미루면 EKS가 끝난 뒤에야 15분을 시작해서 총 시간이 그만큼 늘어난다.
+
+> `-target` 목록에서 빠뜨려도 terraform이 의존성(VPC·서브넷·SG·IAM·S3·ECR·시크릿·WAF)은
+> 자동으로 끌어온다. 위 15개만 지정하면 된다. 반대로 `kubernetes_*`·`helm_release`·
+> `kubectl_manifest`는 클러스터가 없으면 만들 수 없으니 2단계에 남긴다.
 >
-> 확인된 사실: `rds.tf`/`rds_proxy.tf`에는 EKS·k8s 참조가 없다(주석 제외). 즉 RDS는 EKS와
-> 독립이고 병렬 생성이 안전하다. 프록시 엔드포인트를 읽는 쪽은 `kubernetes_secret.db`(2단계)다.
+> 검증 방법: 위 목록으로 `terraform plan` 을 돌려 출력에 `# kubernetes_`/`# helm_`/`# kubectl_`
+> 가 **없어야** 한다. 하나라도 있으면 provider가 `https://localhost`로 붙어 실패한다.
+
+**더 줄이려면 (미적용)**: `kubernetes_*`·`helm_release`·`kubectl_manifest` 25개에
+`count = var.k8s_provider_ready ? 1 : 0` 을 걸면 `-target` 없이 apply 두 번으로 끝난다.
+다만 apply 횟수는 그대로 2회이고(provider가 클러스터 엔드포인트를 필요로 하는 건 동일),
+리소스 주소가 전부 `[0]` 형태로 바뀌어 `terraform state mv` 25번이 필요하다.
+시간 이득은 거의 없고 사고 위험만 커서 넣지 않았다.
 
 ### 클러스터가 이미 있을 때
 

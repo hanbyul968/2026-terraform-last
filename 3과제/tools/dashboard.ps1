@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   3과제 모니터링 대시보드 실행 (Windows PowerShell)
 .DESCRIPTION
@@ -53,6 +53,7 @@ Write-Host ""
 $args_list = @(
     "$here\dashboard.py",
     "--port", $Port,
+    "--host", "127.0.0.1",
     "--namespace", $Namespace,
     "--waf-log-group", $WafLogGroup,
     "--waf-region", $WafRegion
@@ -65,7 +66,7 @@ if ($Demo) {
 # 브라우저 자동 열기 (1초 후)
 Start-Job -ScriptBlock {
     Start-Sleep -Seconds 2
-    Start-Process "http://localhost:$using:Port"
+    Start-Process ("http://localhost:" + $using:Port)
 } | Out-Null
 
 # Flask 실행 (foreground — Ctrl+C로 종료)

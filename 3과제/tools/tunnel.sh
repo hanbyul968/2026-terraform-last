@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # CloudShell에서 Flask 대시보드를 브라우저로 보기: cloudflared 터널 + 접속주소 출력.
 # 사용:  bash tunnel.sh
-#        PORT=8080 NS=app WAF=aws-waf-logs-wsi2026b bash tunnel.sh
+#        PORT=8080 NS=app WAF=aws-waf-logs-wsi2026 bash tunnel.sh
 set -e
 HERE="$(cd "$(dirname "$0")" && pwd)"
-PORT="${PORT:-8080}"; NS="${NS:-app}"; WAF="${WAF:-aws-waf-logs-wsi2026b}"
+PORT="${PORT:-8080}"; NS="${NS:-app}"; WAF="${WAF:-aws-waf-logs-wsi2026}"
 mkdir -p "$HOME/bin"
 
 if [ ! -x "$HOME/bin/cloudflared" ]; then

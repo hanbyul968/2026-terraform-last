@@ -3,7 +3,7 @@
 데이터 수집은 monitor.py 함수를 재사용. 시간창 1/5/10/15/20/25/30분 선택 + 자동 갱신.
 
 설치:  pip3 install flask   (CloudShell: pip3 install --user flask)
-실행:  python3 dashboard.py --namespace app --waf-log-group aws-waf-logs-wsi2026b
+실행:  python3 dashboard.py --namespace app --waf-log-group aws-waf-logs-wsi2026
        → http://<host>:8080
 """
 import argparse
@@ -517,7 +517,9 @@ def main():
     global DEMO
     ap = argparse.ArgumentParser(description="3과제 모니터링 대시보드 (Flask)")
     ap.add_argument("--port", type=int, default=8080)
-    ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--host", default="127.0.0.1",
+                    help="바인딩 주소. 기본 127.0.0.1(로컬만). 이 대시보드는 인증이 없으므로 "
+                         "0.0.0.0 은 같은 네트워크의 누구나 클러스터 정보를 보게 된다 — 필요할 때만 지정")
     ap.add_argument("--namespace", default="app")
     ap.add_argument("--waf-log-group", default="aws-waf-logs-wsi2026")
     ap.add_argument("--waf-region", default="us-east-1")

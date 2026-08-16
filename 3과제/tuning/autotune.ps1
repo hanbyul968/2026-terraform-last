@@ -18,7 +18,13 @@
 param(
   [string]$Duration = '90s',
   [string]$App = '',
-  [string]$Url = ''   # 비우면 config.ps1 의 $ENDPOINT 사용 (-Url 로 이 실행만 override)
+  [string]$Url = '',  # 비우면 config.ps1 의 $ENDPOINT 사용 (-Url 로 이 실행만 override)
+  # 조합 사이에 이전 노드가 회수될 때까지 기다리는 상한(초).
+  #   -1  : NodePool 의 consolidateAfter 에서 자동 유도 (기본, 정확하지만 조합당 최대 12분)
+  #    0  : 대기 없음 (빠르지만 nodes_avg 가 이전 조합에 오염된다 -> 비용 비교 불가)
+  #   N   : N 초까지만 대기
+  # 경기 중에는 시간이 없으므로 autotune 대신 loadtest -> advise 반복을 쓴다(README 참고).
+  [int]$DrainTimeout = -1
 )
 $ErrorActionPreference = 'Continue'
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -85,6 +91,7 @@ function Invoke-PatchAll {
 # timeout 이 뜬다(실측: 항상 timeout, 실제 전량 회수까지는 12분 걸렸다).
 # disruption budget 이 Underutilized=1 이라 노드는 한 대씩 회수되므로 여유를 넉넉히 준다.
 function Get-DrainTimeoutSec {
+  if ($DrainTimeout -ge 0) { return $DrainTimeout }   # 사용자가 지정하면 그 값
   $sec = 300
   try {
     $ca = (kubectl get nodepool default -o jsonpath='{.spec.disruption.consolidateAfter}' 2>$null)
@@ -98,17 +105,27 @@ function Get-DrainTimeoutSec {
 function Invoke-Drain {
   $target = [int]$COST_BASELINE_NODES + 1   # 기준선 + 여유 1대
   $limit = Get-DrainTimeoutSec
+  if ($limit -le 0) {
+    try { $n = (kubectl get nodes --no-headers 2>$null | Select-String '\bReady').Count } catch { $n = -1 }
+    Write-Host "    drain 생략 (-DrainTimeout 0) — nodes=$n 로 시작, nodes_avg 비교는 신뢰 불가" -ForegroundColor Yellow
+    return $n
+  }
   $sw = [System.Diagnostics.Stopwatch]::StartNew()
   $last = -1
+  $nextTick = 0
   while ($sw.Elapsed.TotalSeconds -lt $limit) {
     try { $n = (kubectl get nodes --no-headers 2>$null | Select-String '\bReady').Count } catch { $n = -1 }
     if ($n -ge 1 -and $n -le $target) {
       Write-Host ("    nodes=$n (baseline 복귀, {0:N0}초 대기)" -f $sw.Elapsed.TotalSeconds)
       return $n
     }
-    if ($n -ne $last -and $n -ge 1) {
-      Write-Host ("    nodes=$n ... 회수 대기 ({0:N0}/{1}초)" -f $sw.Elapsed.TotalSeconds, $limit)
+    # 노드 수가 그대로여도 30초마다 찍는다. 안 찍으면 12분 동안 아무 출력이 없어
+    # 멈춘 것처럼 보인다(실측: 사용자가 hang 으로 오인).
+    $el = [int]$sw.Elapsed.TotalSeconds
+    if ($n -ne $last -or $el -ge $nextTick) {
+      Write-Host ("    nodes=$n (목표 <=$target) ... 회수 대기 {0}/{1}초, 남은 {2}초" -f $el, $limit, ($limit - $el))
       $last = $n
+      $nextTick = $el + 30
     }
     Start-Sleep -Seconds 10
   }
@@ -128,7 +145,13 @@ function Get-TrialScore {
 }
 
 $modeDesc = if ($App) { "tuning ONLY [$App] (others untouched)" } else { "tuning ALL [$($APPS -join ' ')] uniformly" }
+$dsec = Get-DrainTimeoutSec
+$estMin = [math]::Round(($COMBOS.Count * ($dsec + 120)) / 60.0)
 Write-Host "### autotune: $($COMBOS.Count) combos x $Duration  $modeDesc  endpoint=$EP"
+Write-Host "### 조합당 드레인 대기 최대 ${dsec}초 -> 전체 최대 약 ${estMin}분" -ForegroundColor Yellow
+if ($estMin -gt 30) {
+  Write-Host '### 경기 중이면 너무 느립니다. loadtest -> advise 반복을 쓰거나 -DrainTimeout 으로 줄이세요' -ForegroundColor Yellow
+}
 foreach ($c in $COMBOS) {
   Write-Host ''
   Write-Host ">>> combo=$($c.name)  cpu=$($c.cpu) util=$($c.util) replicas=$($c.min)-$($c.max)"

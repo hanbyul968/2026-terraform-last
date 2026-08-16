@@ -197,7 +197,13 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "user" {
     # 대체 파드가 뜨는 동안 서비스가 끊긴다. 2 이면 hostname spread 로 두 노드에 나뉘어
     # 한 노드가 빠져도 무중단이고 consolidation 도 정상 동작한다.
     min_replicas = 2
-    max_replicas = 6
+    # max_replicas 는 '천장'이지 튜닝값이 아니다. 넉넉히 둔다.
+    #   낮으면: HPA 가 평형(총실사용 / target%)에 도달하지 못해 파드마다 과부하가 걸린 채
+    #           지연이 난다. 실측(max=6): user/stress 가 6/6 에 붙어 성능이 각 1.0/4 였다.
+    #   높아도: 부하가 없으면 HPA 가 파드를 만들지 않으므로 비용이 늘지 않는다.
+    # 실질 상한은 Karpenter NodePool 의 limits.cpu(=16 -> t3.medium 8대)가 잡아준다.
+    # 그래서 여기서 값을 아끼면 대회날 '상한 때문이었다'를 발견하는 라운드만 낭비한다.
+    max_replicas = 20
     scale_target_ref {
       api_version = "apps/v1"
       kind        = "Deployment"
@@ -440,7 +446,13 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "product" {
     # 대체 파드가 뜨는 동안 서비스가 끊긴다. 2 이면 hostname spread 로 두 노드에 나뉘어
     # 한 노드가 빠져도 무중단이고 consolidation 도 정상 동작한다.
     min_replicas = 2
-    max_replicas = 6
+    # max_replicas 는 '천장'이지 튜닝값이 아니다. 넉넉히 둔다.
+    #   낮으면: HPA 가 평형(총실사용 / target%)에 도달하지 못해 파드마다 과부하가 걸린 채
+    #           지연이 난다. 실측(max=6): user/stress 가 6/6 에 붙어 성능이 각 1.0/4 였다.
+    #   높아도: 부하가 없으면 HPA 가 파드를 만들지 않으므로 비용이 늘지 않는다.
+    # 실질 상한은 Karpenter NodePool 의 limits.cpu(=16 -> t3.medium 8대)가 잡아준다.
+    # 그래서 여기서 값을 아끼면 대회날 '상한 때문이었다'를 발견하는 라운드만 낭비한다.
+    max_replicas = 20
     scale_target_ref {
       api_version = "apps/v1"
       kind        = "Deployment"
@@ -675,7 +687,13 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "stress" {
     # 대체 파드가 뜨는 동안 서비스가 끊긴다. 2 이면 hostname spread 로 두 노드에 나뉘어
     # 한 노드가 빠져도 무중단이고 consolidation 도 정상 동작한다.
     min_replicas = 2
-    max_replicas = 6
+    # max_replicas 는 '천장'이지 튜닝값이 아니다. 넉넉히 둔다.
+    #   낮으면: HPA 가 평형(총실사용 / target%)에 도달하지 못해 파드마다 과부하가 걸린 채
+    #           지연이 난다. 실측(max=6): user/stress 가 6/6 에 붙어 성능이 각 1.0/4 였다.
+    #   높아도: 부하가 없으면 HPA 가 파드를 만들지 않으므로 비용이 늘지 않는다.
+    # 실질 상한은 Karpenter NodePool 의 limits.cpu(=16 -> t3.medium 8대)가 잡아준다.
+    # 그래서 여기서 값을 아끼면 대회날 '상한 때문이었다'를 발견하는 라운드만 낭비한다.
+    max_replicas = 20
     scale_target_ref {
       api_version = "apps/v1"
       kind        = "Deployment"

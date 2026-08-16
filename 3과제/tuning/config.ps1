@@ -56,7 +56,10 @@ if (-not $COST_PENALTY) { $COST_PENALTY = 6 }
 # 비용 패널티 기준선(노드 수). 이 대수까지는 패널티 0, 초과분에만 부과한다.
 # terraform 의 node_desired_size 와 맞춘다 (현재 1). 안 맞으면 autotune 이
 # 엉뚱한 조합을 우승으로 뽑는다.
-if (-not $COST_BASELINE_NODES) { $COST_BASELINE_NODES = 1 }
+# terraform node_desired_size 와 반드시 같아야 한다(현재 2). 채점기준의 비용도
+# '평균 EC2 대수 ÷ 기준 2대' 로 계산되므로, 이 값이 틀리면 autotune 이 엉뚱한 조합을
+# 우승으로 뽑고 비용 비율도 잘못 보고된다.
+if (-not $COST_BASELINE_NODES) { $COST_BASELINE_NODES = 2 }
 # 쿠버네티스 네임스페이스.
 if (-not $NS) { $NS = 'app' }
 

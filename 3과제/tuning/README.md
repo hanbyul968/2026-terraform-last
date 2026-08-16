@@ -19,10 +19,10 @@
 | `setup.ps1` | `hey.exe`·`kubectl.exe` 설치(`%USERPROFILE%\bin`) + kubeconfig 작성 |
 | `config.ps1` | **대회날 여기만 고친다.** 엔드포인트·API 목록·SLO·게이트 |
 | `verify.ps1` | 응답코드 규약 검증 (정상 2xx / 비정상 403 / 미정의 404 / 이미지 200) |
-| `loadtest.ps1` | 채점 방식 부하 측정 → 리포트 + 권장값 |
+| `loadtest.ps1` | 채점 방식 부하 측정 → 리포트 + 권장값 (+ `podcpu.csv` 실사용 기록) |
 | `autotune.ps1` | cpu/HPA 조합 스윕 → 최고 조합 자동 적용 |
 | `score.py` | hey CSV 채점기 (`loadtest`/`autotune` 이 호출) |
-| `advise.py` | 측정 + 라이브 상태 → 앱별 늘려/줄여/유지 판정 |
+| `advise.py` | 측정 + 실사용 + 라이브 상태 → **원인 구분 후** 앱별 판정 |
 | `waf_header_stats.py` | WAF 로그 분석 → 아직 안 막힌 비정상 패턴 + tfvars 제안 |
 
 ---
@@ -74,7 +74,9 @@ $APIS = @(
 terraform 변수를 바꿔도 여기는 자동 반영되지 않는다.
 
 ⚠ `$COST_BASELINE_NODES` 가 실제 baseline 과 다르면 autotune 이 엉뚱한 조합을 우승으로 뽑는다.
-terraform 이 `node_desired_size = 1` 이면 여기도 1.
+terraform 이 `node_desired_size = 2` 이므로 여기도 **2**, `advise.py`/`score.py` 의
+`TUNE_BASELINE_NODES` 도 2 다. 채점기준의 비용도 `평균 EC2 대수 ÷ 기준 2대` 로 계산된다.
+`node_desired_size` 를 바꾸면 세 곳을 같이 바꿔야 한다.
 
 ---
 
@@ -110,15 +112,27 @@ FAIL 이면 스크립트가 원인별 처방을 같이 출력한다. 실패 시 
 .\loadtest.ps1 -Duration 180s -Label baseline
 ```
 
-모든 API 를 `hey` 로 **병렬** 부하하고, 5초 간격으로 노드/파드 수를 샘플링한다.
-끝나면 `score.py report` 리포트와 `advise.py` 권장값이 이어서 나온다.
+모든 API 를 `hey` 로 **병렬** 부하하고, 5초 간격으로 노드/파드 수와 **파드별 CPU 실사용**을
+샘플링한다. 끝나면 `score.py report` 리포트와 `advise.py` 권장값이 이어서 나온다.
+
+결과 폴더(`%TEMP%\tune-<label>`)에 남는 것:
+
+| 파일 | 내용 | 쓰는 곳 |
+|---|---|---|
+| `<앱>.csv` | hey 원본 (상태코드, 응답시간) | 가용성·성능 채점 |
+| `nodes.csv` | `ts,노드수,Running파드수` | 비용 지표(노드 수 평균) |
+| `podcpu.csv` | `ts,파드명,cpu(밀리코어)` | **request 산정의 유일한 근거** |
+
+`podcpu.csv` 가 필요한 이유는 request 권고가 실사용 피크에서 나오기 때문이다. 부하가 끝난 뒤
+`kubectl top` 을 한 번 찍으면 그 순간값이 피크로 잡혀 과대·과소 권고가 난다. 창 전체를 남겨야
+p95 를 제대로 계산할 수 있다. `metrics-server` 가 없으면 이 파일만 비고 가용성·성능 측정은 정상이다.
 
 ```
 api             n  avail%  perf%     p50     p95     p99     max
 user         1800  100.0%  98.2%   0.041   0.180   0.240   0.900
 product      1800  100.0%  99.9%   0.012   0.030   0.050   0.210
 stress        360   99.7%  95.0%   0.400   0.950   1.400   2.100
-nodes      min=1 max=4 avg=2.30  (baseline=1, 초과분 1.30 대가 비용 패널티)
+nodes      min=1 max=4 avg=2.30  (baseline=2, 비용 비율 1.15배)
 ```
 
 | 열 | 의미 | 판단 |
@@ -135,19 +149,77 @@ nodes      min=1 max=4 avg=2.30  (baseline=1, 초과분 1.30 대가 비용 패�
 
 ## advise.py — 앱별 판정
 
-`loadtest.ps1` 끝에서 자동 실행된다. 측정값 + 라이브 설정(cpu request, HPA util/min/max, 현재 CPU%)을
-합쳐 앱마다 판정하고, 즉시 적용 명령과 terraform 반영값을 같이 출력한다.
+`loadtest.ps1` 끝에서 자동 실행된다. 측정값 + 라이브 설정 + **부하 중 실사용 CPU** 를 합쳐
+앱마다 판정하고, 즉시 적용 명령과 terraform 반영값을 같이 출력한다.
 
-| 우선순위 | 조건 | 판정 |
+### request 를 다루는 원칙 (중요)
+
+`requests.cpu` 는 **노드 예약량이지 파드 속도 상한이 아니다.** cpu limit 이 없는 앱은
+request 를 올려도 빨라지지 않는다. 올리면 오히려 두 방향으로 해롭다.
+
+- 노드당 파드 수가 줄어 **노드가 늘고 비용이 오른다**
+- HPA 사용률 = 실사용 ÷ request 가 작아져 **스케일업이 늦어진다** (성능이 더 나빠질 수 있다)
+
+그래서 "느리다 → request 올려" 는 틀린 처방이다. 원인을 먼저 가른다.
+
+| 상황 | 판정 · 원인 | request |
 |---|---|---|
-| 1 | `avail < 99%` | **늘려** — cpu×1.5, min+1, util−5 (비용은 나중) |
-| 2 | `perf < 95%` 또는 `p95 > SLO` | **늘려** — cpu×1.4, util−10 (꼬리지연) |
-| 3 | `perf ≥ 99.5%` + 현재CPU ≪ 목표 | **줄여** — cpu×0.75, util+10 (과투자) |
-| 4 | 그 외 | 유지 |
+| `avail < 99%` + 파드가 max 에 붙음 | 늘려 · 파드 상한 도달 | 유지, `max+2` |
+| `avail < 99%` (상한 여유 있음) | 늘려 · 파드 부족/스케일 지연 | 유지, `min+1` · `util-10` |
+| 느림 + 파드가 max 에 붙음 | 늘려 · 파드 상한 도달 | 유지, `max+2` |
+| 느림 + 노드 CPU ≥ 80% | 늘려 · 노드 CPU 포화 | **올림** (노드 경쟁 완화. 이 경우만 유효) |
+| 느림 + 실사용 < request × 0.5 | 유지 · **CPU 병목 아님** | **올리지 않음** → DB·캐시·커넥션풀 확인 |
+| 느림 + 현재 사용률 < 목표 | 늘려 · 스케일 지연 | 유지, `util-15` · `min+1` |
+| 느림 + 실사용이 request 에 근접 | 늘려 · 파드 CPU 포화 | 실사용 × 1.3 |
+| 통과 + request ≫ 실사용 | 줄여 · 과투자 | 실사용 × 1.3 (비용↓) |
+| 그 외 | 유지 · 균형 | 유지 |
 
-`kubectl set resources` / `patch hpa` 는 **임시**다(재배포 시 사라짐). 확정된 값은
-`terraform/k8s_apps.tf` 의 해당 앱 `requests.cpu` / HPA `average_utilization`·`min_replicas` 에 박고
-`terraform apply`.
+권장 request 는 항상 **실사용 × 1.3** 이다. `×1.4` 같은 임의 배수를 쓰지 않는다.
+
+### 실사용을 무엇으로 재는가
+
+출력 첫 줄의 `실사용 근거` 를 반드시 확인한다.
+
+| 표시 | 의미 |
+|---|---|
+| `부하 창 p95 (podcpu.csv)` | 정상. 부하 중 5초 간격 표본의 **순위기반 p95** |
+| `지금 순간값 1회 [!] 근거 약함` | `podcpu.csv` 가 없어 폴백. **이 회차의 request 권고는 신뢰하지 말 것** |
+
+순간값 하나로 판단하면 찍히는 타이밍이 값을 정해버린다. 실제로 겪은 사고다.
+
+```
+실사용 132m 지속 + 230m 스파이크 1회
+순간값 230m  ->  request 300m 권고   (과대)
+부하 창 p95 132m  ->  request 175m   (정상)
+```
+
+p95 는 **보간 없는 순위 기반**으로 계산한다. `statistics.quantiles` 같은 보간형은 표본이 적을 때
+상위 백분위가 최댓값으로 끌려간다(실측: 120~152m 표본 19개 + 400m 1개에서 p95 가 388m).
+5초 간격 180초면 표본이 36개뿐이라 이 차이가 그대로 권고값을 흔든다.
+
+### 대회날 변경 대응
+
+앱 이름·개수·SLO·노드 타입을 코드에 박지 않는다.
+
+- **앱 목록**: 결과 폴더의 `<앱>.csv` 에서 자동 발견
+- **SLO**: `--slos user=0.2,product=0.2,stress=1.0`. 목록에 없는 앱은 `--default-slo`(기본 1.0초)를
+  쓰고 `[!] SLO 미지정 앱` 경고를 낸다 → 문제지 값으로 `--slos` 를 지정할 것
+- **노드 할당가능 CPU**: 라이브 `status.allocatable` 에서 읽는다. 여러 타입이 섞이면 가장 작은 노드
+  기준(노드 수 과소추정 방지). 못 읽으면 `미확인(추정 생략)` 으로 두고 틀린 숫자를 내지 않는다
+
+```powershell
+python advise.py <label|폴더> [--slos user=0.2,...] [--default-slo 1.0] [--ns app]
+```
+
+### 적용
+
+`kubectl set resources` / `patch hpa` 는 **임시**다(apply 하면 사라짐). 확정된 값은
+`terraform/k8s_apps.tf` 의 `requests.cpu` / HPA `average_utilization`·`min_replicas`·`max_replicas`
+에 박고 `terraform apply`.
+
+⚠ **부하 측정 중에는 `requests` 를 바꾸지 않는다.** requests 변경은 파드 롤아웃을 일으키고,
+롤아웃 자체가 504 를 만들어 가용성 점수를 깎는다. 측정 중에 손대야 하면 **HPA 만** 만진다.
+advise.py 도 request 가 안 바뀌면 `set resources`·`rollout status` 를 아예 출력하지 않는다.
 
 ---
 
@@ -198,3 +270,12 @@ WAF 가 ALLOW 한 요청**을 뽑아준다. tfvars 제안까지 출력한다. (C
 
 **원칙**: `avail%` < 99 면 비용·성능보다 **무조건 용량 먼저**. 가용성 12점과 성능 12점은
 avail 이 깨지면 동시에 무너진다. 한 번에 한 앱만 바꿔야 원인 추적이 된다.
+
+**부하 중 금지**: `requests` 변경(= `kubectl set resources`, `terraform apply` 로 파드 템플릿 변경)은
+롤아웃을 일으키고 **롤아웃 자체가 504** 를 만든다. 측정·채점 트래픽이 도는 동안에는 HPA 만 만진다.
+`terraform apply` 도 파드 템플릿이 바뀌면 같은 문제가 생기므로 트래픽 전에 끝낸다.
+
+**request 를 올리기 전에 확인**: 실사용이 request 의 절반도 안 되는데 느리면 CPU 가 병목이 아니다.
+그 상태에서 request 를 올리면 노드만 늘어 비용을 깎고 스케일업까지 늦어진다. `advise.py` 가
+`CPU 병목 아님` 으로 판정하면 DB(RDS CPU·커넥션·쿼리지연)·CloudFront 캐시 히트율·커넥션풀
+borrow 대기를 본다.

@@ -21,7 +21,9 @@ import statistics
 
 # 비용 패널티 기준선(노드 수). config.ps1 이 $COST_BASELINE_NODES 로 전달한다.
 # terraform node_desired_size 와 맞아야 한다 (기본 1).
-BASELINE_NODES = float(os.environ.get("TUNE_BASELINE_NODES", "1"))
+# 기본값은 terraform node_desired_size 와 같게 둔다(현재 2). config.ps1 이 환경변수로
+# 넘기지만, score.py 를 직접 호출할 때도 틀린 기준으로 채점하지 않게 하기 위한 것.
+BASELINE_NODES = float(os.environ.get("TUNE_BASELINE_NODES", "2"))
 
 
 def parse_slo(s):

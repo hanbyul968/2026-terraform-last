@@ -171,5 +171,5 @@ variable "waf_block_private_xff" {
 variable "is_windows" {
   type        = bool
   default     = true
-  description = "Set true when running terraform from Windows PowerShell (no bash). build.tf then uses PowerShell instead of /bin/sh for the docker build/push step. CloudShell/Linux?먯꽌 ?ㅽ뻾 ??-var is_windows=false 瑜?吏?뺥븯?몄슂."
+  description = "Windows PowerShell 에서 terraform 을 실행하면 true (기본값). build.tf 의 docker build/push 단계가 /bin/sh 대신 PowerShell 을 쓴다. CloudShell/Linux 에서 실행할 때는 -var is_windows=false 를 지정한다."
 }

@@ -5,6 +5,10 @@
 - 실행 환경: **Windows PowerShell + Docker Desktop**, 리전 `ap-northeast-2`
 - 배점 40점은 **전부 부하 테스트 결과**로 매겨진다 (구성 점수 없음)
 
+> 새 PC라 terraform/aws/kubectl/docker가 아직 없거나, **새 AWS 계정**에 처음 배포한다면
+> 먼저 [../README "새 PC · 새 계정에서 처음 시작하기"](../README.md#새-pc--새-계정에서-처음-시작하기)를 본다.
+> 패키지 설치, 자격증명, 버킷 이름 전역 고유 설정이 거기에 있다.
+
 ---
 
 ## 0. 대회날 순서
@@ -107,7 +111,9 @@ terraform init
 terraform apply --% -var k8s_provider_ready=false -target=aws_eks_cluster.this -target=aws_eks_node_group.main -target=aws_iam_openid_connect_provider.eks -target=aws_eks_addon.coredns -target=aws_eks_addon.kube_proxy -target=aws_eks_addon.vpc_cni -target=aws_eks_addon.metrics_server
 
 # 2단계: 나머지 전체 (이미지 빌드/push, ALB, CloudFront, WAF, DB 시드까지 자동)
-aws eks update-kubeconfig --name wsi2026-cluster --region ap-northeast-2
+#   클러스터 이름을 외우지 않는다 — output 이 정확한 명령을 그대로 준다
+#   (project 변수를 바꿨어도 항상 맞는 이름이 나온다)
+Invoke-Expression (terraform output -raw kubeconfig_cmd)
 terraform apply -auto-approve
 
 terraform output endpoint     # ← 채점 플랫폼에 제출 (프로토콜+주소만, 경로 X)

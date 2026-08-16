@@ -7,6 +7,132 @@
 
 ---
 
+## 새 PC · 새 계정에서 처음 시작하기
+
+**아무것도 설치되지 않은 Windows PC + 비어 있는 새 AWS 계정** 기준. 위에서부터 그대로 따라간다.
+이미 세팅된 PC면 이 절을 건너뛰고 [배포](terraform/README.md#2-배포)로 간다.
+
+### 1. 필수 패키지 설치 (PowerShell)
+
+**관리자 권한 PowerShell**에서 실행한다. winget은 Windows 10 1809 이상에 기본 포함이다.
+
+```powershell
+$pkgs = @(
+  'Hashicorp.Terraform',   # 인프라 배포 (필수)
+  'Amazon.AWSCLI',         # ECR 로그인, kubeconfig, 지표 조회 (필수)
+  'Kubernetes.kubectl',    # 파드/HPA 확인, 튜닝 (필수)
+  'Docker.DockerDesktop',  # 이미지 빌드/push (필수)
+  'Python.Python.3.13',    # 측정·대시보드 스크립트 (필수)
+  'Git.Git',               # 리포 clone (필수)
+  'Helm.Helm'              # 선택: helm history 등 트러블슈팅용
+)
+foreach ($p in $pkgs) {
+  winget install --exact --id $p --accept-source-agreements --accept-package-agreements
+}
+```
+
+설치 후 **PowerShell 창을 새로 열어야** PATH가 반영된다.
+`Docker Desktop`은 한 번 실행해서 **엔진이 떠 있는 상태로 둔다** (안 띄우면 apply가 build 단계에서 멈춘다).
+
+파이썬 외부 패키지는 두 개뿐이다 (나머지는 표준 라이브러리).
+
+```powershell
+python -m pip install --upgrade pip
+python -m pip install boto3 flask
+```
+
+| 패키지 | 쓰는 곳 |
+|---|---|
+| `boto3` | `tuning/waf_header_stats.py` (WAF 로그 조회) |
+| `flask` | `tools/dashboard.py` (모니터링 웹 UI) |
+
+`tools/monitor.py`·`tuning/score.py`·`tuning/advise.py`는 표준 라이브러리 + `aws`/`kubectl` CLI만 쓴다.
+
+### 2. 설치 확인
+
+```powershell
+foreach ($c in 'terraform','aws','kubectl','docker','python','git') {
+  '{0,-11} {1}' -f $c, $(if (Get-Command $c -EA SilentlyContinue) { '설치됨' } else { '없음 ←' })
+}
+docker info --format '{{.ServerVersion}}' 2>$null | ForEach-Object { "docker engine $_" }
+python -c "import boto3, flask; print('boto3 / flask OK')"
+```
+
+`없음 ←` 이나 `docker engine` 줄이 안 나오면 다음으로 넘어가지 않는다.
+검증된 조합: terraform 1.13.4 / aws-cli 2.34.62 / kubectl 1.34.0 / docker 29.5.2 / python 3.13.3.
+
+### 3. AWS 자격증명
+
+새 계정에서 발급받은 액세스 키로 설정한다. 리전은 **`ap-northeast-2`** 고정.
+
+```powershell
+aws configure
+# AWS Access Key ID     : <발급받은 키>
+# AWS Secret Access Key : <발급받은 시크릿>
+# Default region name   : ap-northeast-2
+# Default output format  : json
+
+aws sts get-caller-identity      # 계정 ID가 나오면 성공
+```
+
+관리자 권한 계정이어야 한다 (EKS·RDS·CloudFront·WAF·IAM 생성 필요).
+프로파일을 여러 개 쓰면 모든 apply에 `-var aws_profile=<이름>`을 붙인다.
+
+### 4. 리포 clone
+
+```powershell
+git clone https://github.com/hnmly/2026-terraform.git C:\wsi
+cd C:\wsi\3과제\terraform
+```
+
+배포에 필요한 **바이너리와 DB 덤프가 리포에 포함**되어 있어(`application/binary/{user,product,stress}`,
+`load_user.dump`) clone만으로 배포가 가능하다. 따로 받을 파일은 없다.
+
+### 5. 계정 고유값 설정 — 버킷 이름 (신규 계정에서 반드시)
+
+S3 버킷 이름은 **AWS 전체에서 전역 고유**하다. 기본값 `wsi2026-images` / `wsi2026-artifacts`는
+다른(이전) 계정이 이미 쓰고 있으면 `BucketAlreadyExists`로 apply가 실패한다.
+
+`terraform.tfvars` (지금 디렉터리에 이미 있다) 맨 위에 한 줄 추가한다.
+한 번 넣으면 이후 모든 apply에 계속 적용된다.
+
+```hcl
+bucket_prefix = "wsi2026-608"   # 608 = 본인 비번호. 전역에서 겹치지 않는 값
+```
+
+> `-var bucket_prefix=...` 로 줘도 되지만, **매 apply마다 빠짐없이** 붙여야 해서
+> tfvars에 박아두는 쪽이 안전하다. 빠뜨리면 이름이 달라져 버킷이 새로 만들어진다.
+
+### 6. 배포
+
+`3과제\terraform` 에서:
+
+```powershell
+terraform init
+```
+
+이후 최초 구축은 provider 의존성 때문에 **2단계**다 (클러스터 → 나머지 전체).
+그대로 복사해 쓸 명령은 [terraform/README "2. 배포"](terraform/README.md#2-배포)에 있다.
+끝나면 `terraform output endpoint` 값을 채점 플랫폼에 제출한다.
+
+### 신규 계정에서 실제로 걸리는 것
+
+| 증상 | 원인 / 대응 |
+|---|---|
+| `BucketAlreadyExists` | 위 5번의 `bucket_prefix` 미설정 |
+| build 단계에서 멈춤 / `docker: command not found` | Docker Desktop 미실행. 트레이 아이콘 확인 |
+| `VcpuLimitExceeded` | 신규 계정 vCPU 쿼터. t3.medium 최대 8대 = 16 vCPU 필요.<br>Service Quotas → EC2 → *Running On-Demand Standard instances* 증설 요청 |
+| `AccessDenied` on `iam:CreateServiceLinkedRole` | 관리자 권한 아님. EKS/ELB/RDS가 서비스 연결 역할을 만들어야 한다 |
+| CloudFront가 한참 `InProgress` | 정상. 배포 전파에 15~20분 걸린다 |
+| `Error acquiring the state lock` | 이전 apply가 중단됨. `terraform` 프로세스가 끝날 때까지 기다린다 |
+
+state는 **로컬 `terraform/terraform.tfstate`** 에 저장되고 git에 올라가지 않는다.
+따라서 **다른 PC에서 이어받는 게 아니라 처음부터 새로 배포**하는 흐름이다.
+같은 계정에 이미 배포된 스택이 있는데 state가 없으면 이름 충돌이 나므로,
+연습 계정이면 먼저 `terraform destroy` 로 정리하거나 위 `bucket_prefix`/`-var project=` 를 바꾼다.
+
+---
+
 ## 폴더
 
 | 폴더 | 역할 |

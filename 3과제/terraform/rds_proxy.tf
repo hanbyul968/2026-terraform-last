@@ -15,6 +15,42 @@ resource "aws_secretsmanager_secret" "db_proxy" {
   recovery_window_in_days = 0
 }
 
+# 자동 교정 스크립트 — terraform 값만 보간하고 셸 변수는 최소화(build.tf 와 동일한 방침).
+locals {
+  proxy_auth_want = "MYSQL_NATIVE_PASSWORD"
+
+  proxy_auth_cmd_ps = <<-PS
+    $ErrorActionPreference='Stop'
+    $cur = aws rds describe-db-proxies --db-proxy-name ${local.name}-proxy --region ${var.region} --query "DBProxies[0].Auth[0].ClientPasswordAuthType" --output text
+    if ($cur -eq '${local.proxy_auth_want}') { Write-Host "proxy client auth OK ($cur)"; exit 0 }
+    Write-Host "proxy client auth = $cur -> ${local.proxy_auth_want} 로 교정"
+    $arn = aws rds describe-db-proxies --db-proxy-name ${local.name}-proxy --region ${var.region} --query "DBProxies[0].Auth[0].SecretArn" --output text
+    aws rds modify-db-proxy --db-proxy-name ${local.name}-proxy --region ${var.region} --auth "AuthScheme=SECRETS,SecretArn=$arn,IAMAuth=DISABLED,ClientPasswordAuthType=${local.proxy_auth_want}" | Out-Null
+    for ($i=0; $i -lt 40; $i++) {
+      $st = aws rds describe-db-proxies --db-proxy-name ${local.name}-proxy --region ${var.region} --query "DBProxies[0].Status" --output text
+      if ($st -eq 'available') { Write-Host "proxy available"; exit 0 }
+      Start-Sleep -Seconds 10
+    }
+    Write-Error "proxy 가 available 로 돌아오지 않았습니다"
+  PS
+
+  proxy_auth_cmd_sh = <<-SH
+    set -e
+    CUR=$(aws rds describe-db-proxies --db-proxy-name ${local.name}-proxy --region ${var.region} --query "DBProxies[0].Auth[0].ClientPasswordAuthType" --output text)
+    if [ "$CUR" = "${local.proxy_auth_want}" ]; then echo "proxy client auth OK ($CUR)"; exit 0; fi
+    echo "proxy client auth = $CUR -> ${local.proxy_auth_want} 로 교정"
+    ARN=$(aws rds describe-db-proxies --db-proxy-name ${local.name}-proxy --region ${var.region} --query "DBProxies[0].Auth[0].SecretArn" --output text)
+    aws rds modify-db-proxy --db-proxy-name ${local.name}-proxy --region ${var.region} --auth "AuthScheme=SECRETS,SecretArn=$ARN,IAMAuth=DISABLED,ClientPasswordAuthType=${local.proxy_auth_want}" >/dev/null
+    i=0
+    while [ $i -lt 40 ]; do
+      ST=$(aws rds describe-db-proxies --db-proxy-name ${local.name}-proxy --region ${var.region} --query "DBProxies[0].Status" --output text)
+      if [ "$ST" = "available" ]; then echo "proxy available"; exit 0; fi
+      i=$((i+1)); sleep 10
+    done
+    echo "proxy 가 available 로 돌아오지 않았습니다" >&2; exit 1
+  SH
+}
+
 resource "aws_secretsmanager_secret_version" "db_proxy" {
   secret_id = aws_secretsmanager_secret.db_proxy.id
   secret_string = jsonencode({
@@ -106,18 +142,6 @@ resource "aws_db_proxy" "this" {
   }
 
   depends_on = [aws_secretsmanager_secret_version.db_proxy]
-
-  # 이 값이 native 가 아니면 앱(go-sql-driver)이 1045 로 전부 죽는다.
-  # 실측: terraform 이 기존 프록시를 "수정"할 때는 이 필드를 반영하지 못했다
-  # (apply 는 성공했는데 AWS 는 MYSQL_CACHING_SHA2_PASSWORD 유지).
-  # mysql CLI 로는 caching_sha2 여도 접속이 되므로 CLI 검증으로는 절대 못 잡는다.
-  # → apply 시점에 실제 값을 확인해 조용히 넘어가지 않게 한다.
-  lifecycle {
-    postcondition {
-      condition     = anytrue([for a in self.auth : a.client_password_auth_type == "MYSQL_NATIVE_PASSWORD"])
-      error_message = "RDS Proxy client auth 가 MYSQL_NATIVE_PASSWORD 가 아닙니다. 앱이 1045 로 죽습니다. 수정: aws rds modify-db-proxy --db-proxy-name <name> --auth AuthScheme=SECRETS,SecretArn=<arn>,IAMAuth=DISABLED,ClientPasswordAuthType=MYSQL_NATIVE_PASSWORD"
-    }
-  }
 }
 
 resource "aws_db_proxy_default_target_group" "this" {
@@ -137,4 +161,31 @@ resource "aws_db_proxy_target" "this" {
   db_proxy_name          = aws_db_proxy.this.name
   target_group_name      = aws_db_proxy_default_target_group.this.name
   db_instance_identifier = aws_db_instance.this.identifier
+}
+
+# ---------------------------------------------------------------------------
+# 클라이언트 인증 방식 강제 (native) — 자동 교정
+#
+# 실측: terraform 이 기존 프록시를 수정할 때 client_password_auth_type 이 반영되지 않고
+# apply 는 성공해버렸다(AWS 는 MYSQL_CACHING_SHA2_PASSWORD 유지). 그 상태면 제공된 Go
+# 바이너리가 Error 1045 로 전부 CrashLoopBackOff 된다.
+# provider 동작에 의존하지 않기 위해, 실제 AWS 값을 읽어 다르면 직접 고치고 available 까지
+# 기다린다. 이미 native 면 아무 것도 하지 않는다(idempotent).
+#
+# ⚠ mysql CLI 는 caching_sha2 여도 접속되므로 CLI 검증으로는 이 문제를 잡을 수 없다.
+# ---------------------------------------------------------------------------
+resource "null_resource" "proxy_client_auth" {
+  triggers = {
+    proxy = aws_db_proxy.this.name
+    # 매 apply 마다 실제 값을 확인한다 (외부에서 바뀌었을 수도 있으므로)
+    always = timestamp()
+  }
+
+  provisioner "local-exec" {
+    interpreter = local.build_interpreter
+    environment = local.exec_env
+    command     = var.is_windows ? local.proxy_auth_cmd_ps : local.proxy_auth_cmd_sh
+  }
+
+  depends_on = [aws_db_proxy_target.this]
 }

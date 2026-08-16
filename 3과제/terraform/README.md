@@ -49,14 +49,32 @@ db.t3.micro 의 `max_connections` 를 넘겨 커넥션 폭주로 죽는다. Prox
 백엔드 커넥션으로 멀티플렉싱해 이를 막는다. 파드형 풀러(ProxySQL)를 쓰지 않으므로 노드 CPU/메모리를
 앱에 전부 쓸 수 있다.
 
-⚠ **인증 전제**: RDS Proxy 는 `caching_sha2_password` + `require_tls = false` 조합에서 `1045` 로
-거부한다. `k8s_base.tf` 의 db-init Job 이 앱 유저를 `mysql_native_password` 로 ALTER 하기 때문에
-(RDS 직결로 수행) 프록시 경유 인증이 성립한다. **이 ALTER 가 빠지면 앱 전체가 1045 로 죽는다.**
-배포 후 반드시 확인:
+⚠ **인증 전제 (가장 중요)**: `rds_proxy.tf` 의 `client_password_auth_type = "MYSQL_NATIVE_PASSWORD"` 가
+반드시 적용돼야 한다. 기본값인 `MYSQL_CACHING_SHA2_PASSWORD` 로 남으면 제공된 Go 바이너리
+(go-sql-driver)가 비-TLS 에서 그 방식을 처리하지 못해 **모든 앱이 `Error 1045 Access denied` 로
+CrashLoopBackOff** 된다. db-init 의 `mysql_native_password` ALTER 는 프록시→DB 구간용이고,
+클라이언트→프록시 구간은 이 설정이 담당한다.
+
+**함정**: `mysql` CLI 는 caching_sha2 여도 프록시 접속이 **성공**한다. CLI 로 검증하면 문제를 놓친다.
+반드시 앱 로그로 확인한다.
 
 ```powershell
-kubectl -n app logs job/db-init | Select-String "ALTER"
-kubectl -n app logs deploy/user --tail=20        # 1045 / access denied 없어야 함
+aws rds describe-db-proxies --db-proxy-name wsi2026-proxy --region ap-northeast-2 `
+  --query "DBProxies[0].Auth[0].ClientPasswordAuthType" --output text     # MYSQL_NATIVE_PASSWORD 여야 함
+kubectl -n app get pods                                                   # CrashLoopBackOff 없어야 함
+kubectl -n app logs deploy/user --tail=20 | Select-String 1045             # 아무것도 안 나와야 함
+```
+
+**terraform 이 이 값을 수정하지 못하는 경우가 있다.** 기존 프록시에 대해 apply 는 성공하는데 AWS 는
+옛 값을 유지한 사례가 있어, `aws_db_proxy` 에 `postcondition` 을 걸어 apply 가 실패하게 해뒀다.
+그래도 걸리면 CLI 로 직접 바꾸고 앱을 재시작한다.
+
+```powershell
+$sec = (aws rds describe-db-proxies --db-proxy-name wsi2026-proxy --region ap-northeast-2 --query "DBProxies[0].Auth[0].SecretArn" --output text)
+aws rds modify-db-proxy --db-proxy-name wsi2026-proxy --region ap-northeast-2 `
+  --auth "AuthScheme=SECRETS,SecretArn=$sec,IAMAuth=DISABLED,ClientPasswordAuthType=MYSQL_NATIVE_PASSWORD"
+# Status 가 available 로 돌아온 뒤
+kubectl -n app rollout restart deploy/user deploy/product
 ```
 
 ⚠ **비용**: RDS Proxy 는 DB 인스턴스 vCPU 시간당 과금(db.t3.micro = 2 vCPU → 약 $0.03/h).

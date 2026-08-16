@@ -97,9 +97,27 @@ resource "aws_db_proxy" "this" {
     auth_scheme = "SECRETS"
     iam_auth    = "DISABLED"
     secret_arn  = aws_secretsmanager_secret.db_proxy.arn
+    # ★ 이게 없으면 프록시가 클라이언트에 caching_sha2_password 를 제시하고,
+    #   제공된 Go 바이너리(go-sql-driver)는 비-TLS 에서 그 방식을 처리하지 못해
+    #   "Error 1045 Access denied for user 'appuser'" 로 전부 죽는다.
+    #   (mysql CLI 는 성공하므로 CLI 로만 검증하면 놓친다 — 반드시 앱 로그로 확인)
+    #   native 로 고정하면 DSN 수정 없이 인증이 통한다.
+    client_password_auth_type = "MYSQL_NATIVE_PASSWORD"
   }
 
   depends_on = [aws_secretsmanager_secret_version.db_proxy]
+
+  # 이 값이 native 가 아니면 앱(go-sql-driver)이 1045 로 전부 죽는다.
+  # 실측: terraform 이 기존 프록시를 "수정"할 때는 이 필드를 반영하지 못했다
+  # (apply 는 성공했는데 AWS 는 MYSQL_CACHING_SHA2_PASSWORD 유지).
+  # mysql CLI 로는 caching_sha2 여도 접속이 되므로 CLI 검증으로는 절대 못 잡는다.
+  # → apply 시점에 실제 값을 확인해 조용히 넘어가지 않게 한다.
+  lifecycle {
+    postcondition {
+      condition     = anytrue([for a in self.auth : a.client_password_auth_type == "MYSQL_NATIVE_PASSWORD"])
+      error_message = "RDS Proxy client auth 가 MYSQL_NATIVE_PASSWORD 가 아닙니다. 앱이 1045 로 죽습니다. 수정: aws rds modify-db-proxy --db-proxy-name <name> --auth AuthScheme=SECRETS,SecretArn=<arn>,IAMAuth=DISABLED,ClientPasswordAuthType=MYSQL_NATIVE_PASSWORD"
+    }
+  }
 }
 
 resource "aws_db_proxy_default_target_group" "this" {

@@ -18,7 +18,8 @@ waf_blocked_user_agents = [
   "gobuster",
   "attack",
   "bin/bash",
-  "ZAP"
+  "ZAP",
+  "/bin/bash"
 ]
 
 # multipart/form-data 차단 (사용자 요청). Content-Type 헤더 값에 포함되면 403.

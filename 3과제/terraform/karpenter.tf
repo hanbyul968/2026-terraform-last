@@ -226,11 +226,15 @@ resource "kubectl_manifest" "karpenter_nodepool" {
       }
       limits = { cpu = "16" }
       disruption = {
-        # 부하 빠지면 30s 만에 저활용 노드 회수 → 평균 노드 수(비용 ratio) 감소.
         consolidationPolicy = "WhenEmptyOrUnderutilized"
-        consolidateAfter    = "30s"
-        # 한 번에 1대만 회수. 기본값(10%)은 노드가 늘면 동시에 여러 대를 빼서
-        # 트래픽 중 파드가 한꺼번에 재스케줄되고 availability/performance 가 깎인다.
+        # 30s 는 너무 공격적이었다. 실측: 부하가 잠깐 내려가면 파드가 올라가 있는 노드까지
+        # 30초 만에 회수하고("Underutilized ... pod-count:2 ... delete"), 곧바로 HPA 가
+        # 파드를 늘리면 새 노드 부팅(60~90s) 동안 "Insufficient cpu" 로 스케줄이 막혀
+        # 요청이 실패했다(가용성·성능 동시 손실).
+        # 5분으로 늘려 일시적 저부하에 흔들리지 않게 한다. 부하가 진짜 끝나면 그때 회수되므로
+        # 비용 ratio 손실은 노드 몇 분치로 제한된다.
+        consolidateAfter = "5m"
+        # 한 번에 1대만 회수 (기본 10% 는 노드가 늘면 여러 대를 동시에 뺀다).
         budgets = [{ nodes = "1" }]
       }
     }

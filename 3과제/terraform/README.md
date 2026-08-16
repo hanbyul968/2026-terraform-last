@@ -31,7 +31,7 @@
                                 └ 미정의 경로 → 404 fixed-response
                                 └ CloudFront 우회 직접호출 → 403
 
-Pod → ProxySQL (커넥션 풀러) → RDS MySQL 8.0 Multi-AZ (db.t3.micro)
+Pod → RDS Proxy (커넥션 풀러) → RDS MySQL 8.0 Multi-AZ (db.t3.micro)
 ```
 
 | 계층       | 구성                                | 비고                                |
@@ -40,15 +40,28 @@ Pod → ProxySQL (커넥션 풀러) → RDS MySQL 8.0 Multi-AZ (db.t3.micro)
 | 컨테이너   | EKS 1.35 + t3.medium                | Fargate/Lambda 미사용 (문제지 §15) |
 | 오토스케일 | Karpenter(노드) + HPA(파드)         | idle 시 노드 통합                   |
 | DB         | RDS MySQL 8.0 Multi-AZ gp3          | `apdev-rds-instance`, db.t3.micro |
-| DB 커넥션  | ProxySQL (파드)                     | RDS Proxy 미사용 — 아래 참고       |
+| DB 커넥션  | RDS Proxy                           | 파드 풀러 없음 — 아래 참고          |
 | 엔드포인트 | CloudFront → ALB + S3              | 단일화                              |
 | 보안       | WAFv2 관리형 3종 + 변수 기반 커스텀 | 비정상 403 / 미정의 404             |
 
-**ProxySQL을 쓰는 이유**: RDS Proxy는 제공된 Go 바이너리(go-sql-driver)가 비-TLS에서 프록시의
-caching_sha2 핸드셰이크를 처리하지 못해 `1045`로 실패한다(앱·DSN 수정 불가). ProxySQL은 프론트엔드에
-`mysql_native_password`로 응답해 인증이 통하고, RDS 백엔드 커넥션을 소수로 상한(멀티플렉싱)해서
-db.t3.micro(1GB)를 보호한다. EC2 기반 파드라 §15도 준수. RDS Proxy는 **삭제**했다(미사용 + 과금 +
-문제지 §12 불필요 리소스 감점).
+**RDS Proxy 를 쓰는 이유**: HPA 로 user/product 파드가 늘어나면 (파드 × MaxOpenConns) 가
+db.t3.micro 의 `max_connections` 를 넘겨 커넥션 폭주로 죽는다. Proxy 가 다수 클라이언트를 소수
+백엔드 커넥션으로 멀티플렉싱해 이를 막는다. 파드형 풀러(ProxySQL)를 쓰지 않으므로 노드 CPU/메모리를
+앱에 전부 쓸 수 있다.
+
+⚠ **인증 전제**: RDS Proxy 는 `caching_sha2_password` + `require_tls = false` 조합에서 `1045` 로
+거부한다. `k8s_base.tf` 의 db-init Job 이 앱 유저를 `mysql_native_password` 로 ALTER 하기 때문에
+(RDS 직결로 수행) 프록시 경유 인증이 성립한다. **이 ALTER 가 빠지면 앱 전체가 1045 로 죽는다.**
+배포 후 반드시 확인:
+
+```powershell
+kubectl -n app logs job/db-init | Select-String "ALTER"
+kubectl -n app logs deploy/user --tail=20        # 1045 / access denied 없어야 함
+```
+
+⚠ **비용**: RDS Proxy 는 DB 인스턴스 vCPU 시간당 과금(db.t3.micro = 2 vCPU → 약 $0.03/h).
+채점의 "인스턴스 비용 ratio" 에 EC2·RDS 인스턴스만 잡히면 불리하지 않지만, 확실하지 않으므로
+노드를 아끼는 이득과 비교해 판단한다.
 
 ### 배점 대응 (40점)
 
@@ -321,7 +334,7 @@ terraform/
 ├── vpc.tf                    # VPC + 2-AZ public subnet + IGW + S3 VPCe
 ├── ecr.tf / build.tf         # ECR 3개 + apply 내 docker build/push
 ├── rds.tf                    # MySQL 8.0 Multi-AZ + 파라미터그룹
-├── proxysql.tf               # 커넥션 풀러 (RDS Proxy 대체)
+├── rds_proxy.tf              # RDS Proxy (커넥션 풀링) + Secrets Manager + IAM/SG
 ├── s3.tf / seed.tf           # 이미지 버킷(OAC) + 시드 덤프 업로드
 ├── eks.tf                    # 클러스터 1.35 + 노드그룹 + 애드온
 ├── karpenter.tf              # Karpenter 1.13 + NodePool/EC2NodeClass

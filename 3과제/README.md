@@ -42,7 +42,7 @@
            └─ 그 외       → ALB → EKS Pod (user/product/stress)
                              └ 미정의 경로 → 404 / CloudFront 우회 → 403
 
-Pod → RDS Proxy (커넥션 풀러) → RDS MySQL 8.0 Multi-AZ (db.t3.micro)
+Pod → ProxySQL (커넥션 풀러) → RDS MySQL 8.0 Multi-AZ (db.t3.micro)
 노드: t3.medium (관리형 NG + Karpenter)
 ```
 

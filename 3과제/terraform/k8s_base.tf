@@ -15,12 +15,10 @@ resource "kubernetes_secret" "db" {
   data = {
     MYSQL_USER     = var.db_username
     MYSQL_PASSWORD = random_password.db.result
-    # 앱은 RDS Proxy 경유(rds_proxy.tf). 파드가 HPA 로 늘어도 프록시가 백엔드 커넥션을
-    # 소수로 멀티플렉싱해 db.t3.micro(1GB)의 max_connections 를 지킨다.
-    # 엔진명이 아닌 DNS 엔드포인트라 문제지 요구("엔진명 삽입금지")에 맞는다.
-    # db_init 는 아래에서 MYSQL_HOST 를 직결 RDS 로 override 하여 ALTER/스키마/시드를 수행한다
-    # (프록시 인증을 고치는 ALTER 를 프록시 경유로는 실행할 수 없으므로 — 치킨-에그).
-    MYSQL_HOST   = aws_db_proxy.this.endpoint
+    # 앱은 ProxySQL 경유(proxysql.tf). ProxySQL이 프론트엔드에 native 인증 제시(go-sql-driver 무관) +
+    # RDS 백엔드 커넥션을 소수로 상한 → t3.micro 보호. 엔진명이 아닌 DNS라 문제지 허용.
+    # db_init는 아래에서 MYSQL_HOST를 직결 RDS로 override하여 ALTER/스키마/시드를 직접 수행.
+    MYSQL_HOST   = "${kubernetes_service.proxysql.metadata[0].name}.${kubernetes_namespace.app.metadata[0].name}.svc.cluster.local"
     MYSQL_PORT   = "3306"
     MYSQL_DBNAME = var.db_name
   }
@@ -155,5 +153,5 @@ resource "kubernetes_job" "db_init" {
     create = "15m"
   }
 
-  depends_on = [aws_db_instance.this, aws_db_proxy_target.this, aws_eks_node_group.main, aws_s3_object.seed]
+  depends_on = [aws_db_instance.this, aws_eks_node_group.main, aws_s3_object.seed]
 }

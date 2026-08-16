@@ -21,20 +21,23 @@ resource "kubernetes_deployment" "user" {
   spec {
     replicas = 2
     selector { match_labels = { app = "user" } }
-    # 롤링 업데이트가 '분산된 상태로' 수렴하게 만드는 설정.
-    # max_surge=1(25%) 이면 신 파드를 먼저 띄운 뒤 구 파드를 지우는데, 어느 구 파드를
-    # 지울지는 ReplicaSet 의 삭제 순서가 정하고 topology spread 를 고려하지 않는다.
-    # 그래서 롤 결과가 운에 좌우된다(실측: user/product 는 1개씩 나뉘었는데 stress 는
-    # 두 개가 한 노드에 몰렸다. 쿠버네티스는 사후 재배치를 하지 않아 그대로 굳는다).
-    # max_surge=0 / max_unavailable=1 이면 '지우고 -> 빈 자리에 새로 스케줄' 순서가 되어
-    # 매번 남은 파드가 없는 노드가 선택되고 1개씩 분산으로 수렴한다.
-    # 대가: 롤 도중 순간적으로 파드가 1개가 된다. 바이너리 교체는 트래픽 주입(T+1h) 전에
-    # 끝내므로 가용성 점수에 영향이 없다. 트래픽 중 롤은 피한다.
+    # max_surge=1 / max_unavailable=0 은 타협 불가다. 반대로 두면(0/1) 롤링 업데이트가
+    # 구 파드를 '먼저 지우고' 새로 만들기 때문에 레플리카 2개 중 1개만 남는 구간이 생긴다.
+    # 그 사이 ALB 는 지워진 파드의 타깃을 deregistration_delay 동안 draining 으로 들고 있고
+    # 새 파드는 등록+헬스체크를 통과해야 하므로, 부하 중이면 용량 공백이 그대로 504 가 된다.
+    # (실측: 0/1 로 바꾼 회차에서 504 발생. 가용성 12점을 직접 깎는다)
+    # 1/0 이면 새 파드를 먼저 띄우고 Ready 를 확인한 뒤 구 파드를 지우므로
+    # 가용 레플리카가 절대 desired 아래로 내려가지 않는다.
+    #
+    # 대가: 롤 결과의 노드 분산이 운에 좌우된다(어느 구 파드를 지울지는 ReplicaSet 삭제
+    # 순서가 정하고 topology spread 를 보지 않는다). 그건 분산 문제이지 가용성 문제가
+    # 아니고, 노드 분산은 node_desired_size=2 + NG 선호 affinity 로 따로 잡는다.
+    # 가용성 > 분산 우선순위를 지킨다.
     strategy {
       type = "RollingUpdate"
       rolling_update {
-        max_surge       = "0"
-        max_unavailable = "1"
+        max_surge       = "1"
+        max_unavailable = "0"
       }
     }
     template {
@@ -117,7 +120,9 @@ resource "kubernetes_deployment" "user" {
           }
           resources {
             # no cpu limit: CFS throttling wrecks tail latency; memory limit only
-            requests = { cpu = "200m", memory = "128Mi" }
+            # request 는 노드 예약량이라 실사용보다 크게 잡으면 노드 수가 그대로 늘어난다.
+            # 실측 사용량(부하 중) 기준으로 맞춘 값: user 100~138m / product 53~80m / stress 137~264m
+            requests = { cpu = "150m", memory = "128Mi" }
             limits   = { memory = "256Mi" }
           }
           readiness_probe {
@@ -240,20 +245,23 @@ resource "kubernetes_deployment" "product" {
   spec {
     replicas = 2
     selector { match_labels = { app = "product" } }
-    # 롤링 업데이트가 '분산된 상태로' 수렴하게 만드는 설정.
-    # max_surge=1(25%) 이면 신 파드를 먼저 띄운 뒤 구 파드를 지우는데, 어느 구 파드를
-    # 지울지는 ReplicaSet 의 삭제 순서가 정하고 topology spread 를 고려하지 않는다.
-    # 그래서 롤 결과가 운에 좌우된다(실측: user/product 는 1개씩 나뉘었는데 stress 는
-    # 두 개가 한 노드에 몰렸다. 쿠버네티스는 사후 재배치를 하지 않아 그대로 굳는다).
-    # max_surge=0 / max_unavailable=1 이면 '지우고 -> 빈 자리에 새로 스케줄' 순서가 되어
-    # 매번 남은 파드가 없는 노드가 선택되고 1개씩 분산으로 수렴한다.
-    # 대가: 롤 도중 순간적으로 파드가 1개가 된다. 바이너리 교체는 트래픽 주입(T+1h) 전에
-    # 끝내므로 가용성 점수에 영향이 없다. 트래픽 중 롤은 피한다.
+    # max_surge=1 / max_unavailable=0 은 타협 불가다. 반대로 두면(0/1) 롤링 업데이트가
+    # 구 파드를 '먼저 지우고' 새로 만들기 때문에 레플리카 2개 중 1개만 남는 구간이 생긴다.
+    # 그 사이 ALB 는 지워진 파드의 타깃을 deregistration_delay 동안 draining 으로 들고 있고
+    # 새 파드는 등록+헬스체크를 통과해야 하므로, 부하 중이면 용량 공백이 그대로 504 가 된다.
+    # (실측: 0/1 로 바꾼 회차에서 504 발생. 가용성 12점을 직접 깎는다)
+    # 1/0 이면 새 파드를 먼저 띄우고 Ready 를 확인한 뒤 구 파드를 지우므로
+    # 가용 레플리카가 절대 desired 아래로 내려가지 않는다.
+    #
+    # 대가: 롤 결과의 노드 분산이 운에 좌우된다(어느 구 파드를 지울지는 ReplicaSet 삭제
+    # 순서가 정하고 topology spread 를 보지 않는다). 그건 분산 문제이지 가용성 문제가
+    # 아니고, 노드 분산은 node_desired_size=2 + NG 선호 affinity 로 따로 잡는다.
+    # 가용성 > 분산 우선순위를 지킨다.
     strategy {
       type = "RollingUpdate"
       rolling_update {
-        max_surge       = "0"
-        max_unavailable = "1"
+        max_surge       = "1"
+        max_unavailable = "0"
       }
     }
     template {
@@ -334,7 +342,9 @@ resource "kubernetes_deployment" "product" {
           }
           resources {
             # no cpu limit: CFS throttling wrecks tail latency; memory limit only
-            requests = { cpu = "200m", memory = "128Mi" }
+            # request 는 노드 예약량이라 실사용보다 크게 잡으면 노드 수가 그대로 늘어난다.
+            # 실측 사용량(부하 중) 기준으로 맞춘 값: user 100~138m / product 53~80m / stress 137~264m
+            requests = { cpu = "100m", memory = "128Mi" }
             limits   = { memory = "512Mi" }
           }
           readiness_probe {
@@ -454,20 +464,23 @@ resource "kubernetes_deployment" "stress" {
   spec {
     replicas = 2
     selector { match_labels = { app = "stress" } }
-    # 롤링 업데이트가 '분산된 상태로' 수렴하게 만드는 설정.
-    # max_surge=1(25%) 이면 신 파드를 먼저 띄운 뒤 구 파드를 지우는데, 어느 구 파드를
-    # 지울지는 ReplicaSet 의 삭제 순서가 정하고 topology spread 를 고려하지 않는다.
-    # 그래서 롤 결과가 운에 좌우된다(실측: user/product 는 1개씩 나뉘었는데 stress 는
-    # 두 개가 한 노드에 몰렸다. 쿠버네티스는 사후 재배치를 하지 않아 그대로 굳는다).
-    # max_surge=0 / max_unavailable=1 이면 '지우고 -> 빈 자리에 새로 스케줄' 순서가 되어
-    # 매번 남은 파드가 없는 노드가 선택되고 1개씩 분산으로 수렴한다.
-    # 대가: 롤 도중 순간적으로 파드가 1개가 된다. 바이너리 교체는 트래픽 주입(T+1h) 전에
-    # 끝내므로 가용성 점수에 영향이 없다. 트래픽 중 롤은 피한다.
+    # max_surge=1 / max_unavailable=0 은 타협 불가다. 반대로 두면(0/1) 롤링 업데이트가
+    # 구 파드를 '먼저 지우고' 새로 만들기 때문에 레플리카 2개 중 1개만 남는 구간이 생긴다.
+    # 그 사이 ALB 는 지워진 파드의 타깃을 deregistration_delay 동안 draining 으로 들고 있고
+    # 새 파드는 등록+헬스체크를 통과해야 하므로, 부하 중이면 용량 공백이 그대로 504 가 된다.
+    # (실측: 0/1 로 바꾼 회차에서 504 발생. 가용성 12점을 직접 깎는다)
+    # 1/0 이면 새 파드를 먼저 띄우고 Ready 를 확인한 뒤 구 파드를 지우므로
+    # 가용 레플리카가 절대 desired 아래로 내려가지 않는다.
+    #
+    # 대가: 롤 결과의 노드 분산이 운에 좌우된다(어느 구 파드를 지울지는 ReplicaSet 삭제
+    # 순서가 정하고 topology spread 를 보지 않는다). 그건 분산 문제이지 가용성 문제가
+    # 아니고, 노드 분산은 node_desired_size=2 + NG 선호 affinity 로 따로 잡는다.
+    # 가용성 > 분산 우선순위를 지킨다.
     strategy {
       type = "RollingUpdate"
       rolling_update {
-        max_surge       = "0"
-        max_unavailable = "1"
+        max_surge       = "1"
+        max_unavailable = "0"
       }
     }
     template {
@@ -539,7 +552,9 @@ resource "kubernetes_deployment" "stress" {
           resources {
             # robust default — NOT app-tuned. Re-derive per app with
             # tuning/autotune.sh on competition day (app behavior varies).
-            requests = { cpu = "500m", memory = "128Mi" }
+            # request 는 노드 예약량이라 실사용보다 크게 잡으면 노드 수가 그대로 늘어난다.
+            # 실측 사용량(부하 중) 기준으로 맞춘 값: user 100~138m / product 53~80m / stress 137~264m
+            requests = { cpu = "300m", memory = "128Mi" }
             # cpu limit: stress 는 CPU 를 무제한 태워 같은 노드의 user/product 를 굶긴다.
             # (노드 CPU 89~97% / RDS 5~10% → 지연 원인은 노드 CPU 경쟁)
             # stress SLO 1000ms 는 느슨하므로 여기를 캡해 user 200ms 를 지킨다.

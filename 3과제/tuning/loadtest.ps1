@@ -61,9 +61,15 @@ if ($Kubectl) {
     param($NS, $csv, $cpucsv, $kubectl)
     while ($true) {
       $ts = [int][double]::Parse((Get-Date -UFormat %s))
-      try { $n = (& $kubectl get nodes --no-headers 2>$null | Select-String '\bReady').Count } catch { $n = 0 }
-      try { $p = (& $kubectl -n $NS get pods --no-headers 2>$null | Select-String 'Running').Count } catch { $p = 0 }
-      "$ts,$n,$p" | Add-Content -Path $csv
+      # kubectl 조회가 실패했을 때 0 을 기록하면 안 된다. 노드가 0대인 상황은 없으므로
+      # 그 0 은 '측정 실패'인데, 평균에 섞이면 비용 지표(평균 노드 수)를 실제보다
+      # 좋게 만든다. 실측 사고: 3399 표본 중 1370개(40%)가 0 이었고 그 결과
+      # 평균 2.28대(ratio 1.14, 비용 11점)로 보였지만, 0 을 제외하면 3.82대
+      # (ratio 1.91, 비용 9점)였다. 실패한 표본은 아예 남기지 않는다.
+      $n = $null; $p = $null
+      try { $n = (& $kubectl get nodes --no-headers 2>$null | Select-String '\bReady').Count } catch {}
+      try { $p = (& $kubectl -n $NS get pods --no-headers 2>$null | Select-String 'Running').Count } catch {}
+      if ($n -ge 1) { "$ts,$n,$(if ($p -ne $null) { $p } else { 0 })" | Add-Content -Path $csv }
       # 파드별 CPU 실사용. metrics-server 가 없으면 조용히 건너뛴다(가용성/성능 측정엔 무관).
       try {
         $rows = & $kubectl -n $NS top pods --no-headers 2>$null

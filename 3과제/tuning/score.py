@@ -50,10 +50,21 @@ def load(out, slo):
 
 
 def nodes(out):
+    """nodes.csv 의 노드 수 표본. 0 은 '측정 실패'이므로 제외한다.
+
+    노드가 0대인 상황은 존재하지 않는다. 옛 loadtest 는 kubectl 조회 실패 시 0 을
+    기록했고, 그 0 이 평균에 섞여 비용 지표를 실제보다 좋게 만들었다.
+      실측: 3399 표본 중 1370개가 0 -> 평균 2.28대(ratio 1.14) 로 보였지만
+            0 을 빼면 3.82대(ratio 1.91) 였다. 비용 점수가 11점 -> 9점으로 달라진다.
+    """
     try:
         ns = [int(l.split(",")[1]) for l in open(f"{out}/nodes.csv") if l.strip()]
     except FileNotFoundError:
         ns = []
+    dropped = sum(1 for v in ns if v <= 0)
+    ns = [v for v in ns if v > 0]
+    if dropped:
+        print(f"  [!] nodes.csv 표본 {dropped}개가 0(측정 실패) 이어서 제외했습니다", file=sys.stderr)
     # kubectl 이 없어 샘플이 없으면 기준선으로 가정 (비용 패널티 0).
     return ns or [BASELINE_NODES]
 

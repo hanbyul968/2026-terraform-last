@@ -176,11 +176,16 @@ def load_measures(outdir, slos):
 
 
 def load_nodes(outdir):
+    """노드 수 표본. 0(= kubectl 조회 실패)은 제외한다.
+
+    노드 0대는 존재하지 않는다. 0 을 평균에 섞으면 비용 비율이 실제보다 낮게 나와
+    비용 점수를 과대평가한다(실측: 40% 가 0 이라 1.14배로 보였지만 실제 1.91배).
+    """
     try:
         ns = [int(l.split(",")[1]) for l in open(os.path.join(outdir, "nodes.csv")) if l.strip()]
     except FileNotFoundError:
         ns = []
-    return ns
+    return [v for v in ns if v > 0]
 
 
 # ---------- 라이브 상태 (kubectl) ----------

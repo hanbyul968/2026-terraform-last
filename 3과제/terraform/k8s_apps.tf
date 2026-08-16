@@ -49,7 +49,7 @@ resource "kubernetes_deployment" "user" {
         # 그 노드가 Karpenter 에 회수되면 앱이 통째로 끊긴다(실측: 앱 파드 3개가 한 노드 집중).
         # ScheduleAnyway 라 노드가 부족할 때 스케줄을 막지는 않는다(가용성 우선).
         topology_spread_constraint {
-          max_skew           = 1
+          max_skew           = 3
           topology_key       = "kubernetes.io/hostname"
           when_unsatisfiable = "ScheduleAnyway"
           label_selector { match_labels = { app = "user" } }
@@ -121,7 +121,7 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "user" {
     # 대체 파드가 뜨는 동안 서비스가 끊긴다. 2 이면 hostname spread 로 두 노드에 나뉘어
     # 한 노드가 빠져도 무중단이고 consolidation 도 정상 동작한다.
     min_replicas = 2
-    max_replicas = 10
+    max_replicas = 6
     scale_target_ref {
       api_version = "apps/v1"
       kind        = "Deployment"
@@ -162,7 +162,7 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "user" {
           # 60%: CPU가 더 차야 확장 → 파드/노드 덜 늘어남 (55는 과민했음).
           # 꼬리지연 생기면 그 앱만 낮추기 — advise.py/autotune 이 판정해줌.
           type                = "Utilization"
-          average_utilization = 60
+          average_utilization = 70
         }
       }
     }
@@ -216,7 +216,7 @@ resource "kubernetes_deployment" "product" {
         # 그 노드가 Karpenter 에 회수되면 앱이 통째로 끊긴다(실측: 앱 파드 3개가 한 노드 집중).
         # ScheduleAnyway 라 노드가 부족할 때 스케줄을 막지는 않는다(가용성 우선).
         topology_spread_constraint {
-          max_skew           = 1
+          max_skew           = 3
           topology_key       = "kubernetes.io/hostname"
           when_unsatisfiable = "ScheduleAnyway"
           label_selector { match_labels = { app = "product" } }
@@ -288,7 +288,7 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "product" {
     # 대체 파드가 뜨는 동안 서비스가 끊긴다. 2 이면 hostname spread 로 두 노드에 나뉘어
     # 한 노드가 빠져도 무중단이고 consolidation 도 정상 동작한다.
     min_replicas = 2
-    max_replicas = 10
+    max_replicas = 6
     scale_target_ref {
       api_version = "apps/v1"
       kind        = "Deployment"
@@ -329,7 +329,7 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "product" {
           # 60%: CPU가 더 차야 확장 → 파드/노드 덜 늘어남 (55는 과민했음).
           # 꼬리지연 생기면 그 앱만 낮추기 — advise.py/autotune 이 판정해줌.
           type                = "Utilization"
-          average_utilization = 60
+          average_utilization = 70
         }
       }
     }
@@ -369,7 +369,7 @@ resource "kubernetes_deployment" "stress" {
         # 그 노드가 Karpenter 에 회수되면 앱이 통째로 끊긴다(실측: 앱 파드 3개가 한 노드 집중).
         # ScheduleAnyway 라 노드가 부족할 때 스케줄을 막지는 않는다(가용성 우선).
         topology_spread_constraint {
-          max_skew           = 1
+          max_skew           = 3
           topology_key       = "kubernetes.io/hostname"
           when_unsatisfiable = "ScheduleAnyway"
           label_selector { match_labels = { app = "stress" } }
@@ -383,7 +383,10 @@ resource "kubernetes_deployment" "stress" {
             # robust default — NOT app-tuned. Re-derive per app with
             # tuning/autotune.sh on competition day (app behavior varies).
             requests = { cpu = "500m", memory = "128Mi" }
-            limits   = { memory = "512Mi" }
+            # cpu limit: stress 는 CPU 를 무제한 태워 같은 노드의 user/product 를 굶긴다.
+            # (노드 CPU 89~97% / RDS 5~10% → 지연 원인은 노드 CPU 경쟁)
+            # stress SLO 1000ms 는 느슨하므로 여기를 캡해 user 200ms 를 지킨다.
+            limits = { cpu = "1000m", memory = "512Mi" }
           }
           readiness_probe {
             http_get {
@@ -434,7 +437,7 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "stress" {
     # 대체 파드가 뜨는 동안 서비스가 끊긴다. 2 이면 hostname spread 로 두 노드에 나뉘어
     # 한 노드가 빠져도 무중단이고 consolidation 도 정상 동작한다.
     min_replicas = 2
-    max_replicas = 10
+    max_replicas = 6
     scale_target_ref {
       api_version = "apps/v1"
       kind        = "Deployment"
@@ -475,7 +478,7 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "stress" {
           # 60%: CPU가 더 차야 확장 → 파드/노드 덜 늘어남 (55는 과민했음).
           # 꼬리지연 생기면 그 앱만 낮추기 — advise.py/autotune 이 판정해줌.
           type                = "Utilization"
-          average_utilization = 60
+          average_utilization = 70
         }
       }
     }

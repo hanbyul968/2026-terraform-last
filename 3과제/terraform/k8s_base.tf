@@ -153,5 +153,5 @@ resource "kubernetes_job" "db_init" {
     create = "15m"
   }
 
-  depends_on = [aws_db_instance.this, aws_db_proxy_target.this, aws_eks_node_group.main, aws_s3_object.seed]
+  depends_on = [aws_db_instance.this, aws_eks_node_group.main, aws_s3_object.seed]
 }

@@ -23,6 +23,12 @@ if ($ENDPOINT) { $ENDPOINT = "$ENDPOINT".Trim() }
 # 공통 식별자(앱이 요구하면). 안 쓰면 비워둬도 됨.
 if (-not $UUID) { $UUID = '7c5a3c6a-758f-4bc5-9bdf-3e573a0ad729' }
 
+# 헬스체크 경로 (verify.ps1 이 사용). terraform var.healthcheck_path 와 맞춘다.
+if (-not $HC_PATH) { $HC_PATH = '/healthcheck' }
+
+# 이미지 다운로드 경로 prefix (verify.ps1 이 사용). terraform var.images_prefix 와 맞춘다.
+if (-not $IMAGES_PREFIX) { $IMAGES_PREFIX = '/images' }
+
 # 측정 전에 한 번 넣어둘 시드 레코드 (GET 부하가 실제 행을 맞히게).
 #   method: GET|POST,  path,  body(JSON; GET 이면 $null)
 $SEEDS = @(
@@ -47,8 +53,15 @@ $APIS = @(
 if (-not $AVAIL_GATE)   { $AVAIL_GATE = 99 }
 # 노드 1대(평균) 초과당 비용 패널티 점수.
 if (-not $COST_PENALTY) { $COST_PENALTY = 6 }
+# 비용 패널티 기준선(노드 수). 이 대수까지는 패널티 0, 초과분에만 부과한다.
+# terraform 의 node_desired_size 와 맞춘다 (현재 1). 안 맞으면 autotune 이
+# 엉뚱한 조합을 우승으로 뽑는다.
+if (-not $COST_BASELINE_NODES) { $COST_BASELINE_NODES = 1 }
 # 쿠버네티스 네임스페이스.
 if (-not $NS) { $NS = 'app' }
+
+# score.py / advise.py 가 읽는다 (인자 순서를 건드리지 않기 위해 환경변수로 전달).
+$env:TUNE_BASELINE_NODES = "$COST_BASELINE_NODES"
 
 # SLO 문자열("user=0.2,product=0.2,...") — score.py 로 넘길 때 사용.
 $SLOS = ($APIS | ForEach-Object { "$($_.name)=$($_.slo)" }) -join ','

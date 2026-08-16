@@ -42,7 +42,7 @@ resource "kubernetes_deployment" "user" {
         container {
           name              = "user"
           image             = "${local.ecr_url["user"]}:${local.app_image_tags["user"]}"
-          image_pull_policy = "Always"
+          image_pull_policy = "IfNotPresent"
           port { container_port = var.container_port }
           env_from {
             secret_ref { name = kubernetes_secret.db.metadata[0].name }
@@ -192,7 +192,7 @@ resource "kubernetes_deployment" "product" {
         container {
           name              = "product"
           image             = "${local.ecr_url["product"]}:${local.app_image_tags["product"]}"
-          image_pull_policy = "Always"
+          image_pull_policy = "IfNotPresent"
           port { container_port = var.container_port }
           env_from {
             secret_ref { name = kubernetes_secret.db.metadata[0].name }
@@ -323,10 +323,16 @@ resource "kubernetes_deployment" "stress" {
       spec {
         termination_grace_period_seconds = 35
         service_account_name             = kubernetes_service_account.stress.metadata[0].name
+        topology_spread_constraint {
+          max_skew           = 1
+          topology_key       = "topology.kubernetes.io/zone"
+          when_unsatisfiable = "ScheduleAnyway"
+          label_selector { match_labels = { app = "stress" } }
+        }
         container {
           name              = "stress"
           image             = "${local.ecr_url["stress"]}:${local.app_image_tags["stress"]}"
-          image_pull_policy = "Always"
+          image_pull_policy = "IfNotPresent"
           port { container_port = var.container_port }
           resources {
             # robust default — NOT app-tuned. Re-derive per app with

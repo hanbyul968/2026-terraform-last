@@ -15,8 +15,13 @@ Windows 에는 heredoc 이 없으므로 파일로 분리하는 편이 깔끔하�
                 조합이 이기지 못하게 한다.
 """
 import csv
+import os
 import sys
 import statistics
+
+# 비용 패널티 기준선(노드 수). config.ps1 이 $COST_BASELINE_NODES 로 전달한다.
+# terraform node_desired_size 와 맞아야 한다 (기본 1).
+BASELINE_NODES = float(os.environ.get("TUNE_BASELINE_NODES", "1"))
 
 
 def parse_slo(s):
@@ -47,7 +52,8 @@ def nodes(out):
         ns = [int(l.split(",")[1]) for l in open(f"{out}/nodes.csv") if l.strip()]
     except FileNotFoundError:
         ns = []
-    return ns or [2]
+    # kubectl 이 없어 샘플이 없으면 기준선으로 가정 (비용 패널티 0).
+    return ns or [BASELINE_NODES]
 
 
 def q_at(lat, pct):
@@ -72,7 +78,7 @@ def main():
                   f"{q_at(lat,49):>7.3f} {q_at(lat,94):>7.3f} {q_at(lat,98):>7.3f} {max(lat):>7.3f}")
         ns = nodes(out)
         print(f"nodes      min={min(ns)} max={max(ns)} avg={sum(ns)/len(ns):.2f}  "
-              f"(cost proxy avg/2 = {sum(ns)/len(ns)/2:.2f})")
+              f"(baseline={BASELINE_NODES:g}, 초과분 {max(0, sum(ns)/len(ns)-BASELINE_NODES):.2f} 대가 비용 패널티)")
     elif mode == "score":
         out, slo, gate, pen = sys.argv[2], parse_slo(sys.argv[3]), float(sys.argv[4]), float(sys.argv[5])
         focus = sys.argv[6] if len(sys.argv) > 6 else None
@@ -80,7 +86,7 @@ def main():
         ns = nodes(out); navg = sum(ns) / len(ns)
         avg = perf[focus] if focus in perf else sum(perf.values()) / len(perf)
         mav = min(avail.values())
-        cost = max(0, (navg - 2)) * pen; g = 0 if mav >= gate else -50
+        cost = max(0, (navg - BASELINE_NODES)) * pen; g = 0 if mav >= gate else -50
         print(f"{avg:.1f} {mav:.1f} {navg:.2f} {avg-cost+g:.1f}")
     else:
         sys.exit(f"unknown mode: {mode}")

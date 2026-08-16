@@ -29,6 +29,8 @@ import subprocess
 import sys
 
 ALLOC_M = 1900  # t3.medium 할당 가능 CPU (밀리코어) — 노드 수 추정용
+# 비용 기준선 노드 수 (config.ps1 의 $COST_BASELINE_NODES). terraform node_desired_size 와 동일.
+BASELINE_NODES = float(os.environ.get("TUNE_BASELINE_NODES", "1"))
 
 
 def run(cmd, timeout=20):
@@ -200,7 +202,7 @@ def main():
         print("  영구 반영 → terraform/k8s_apps.tf 해당 앱 수정 후:")
         for l in tf_lines:
             print(l)
-        print("    cd ..\\terraform ; terraform apply -auto-approve -var \"k8s_provider_ready=true\"")
+        print("    cd ..\\terraform ; terraform apply -auto-approve")
     else:
         print("  변경 권장 없음 — 현 설정 유지.")
     print("  검증: 적용 후  .\\loadtest.ps1 <ep> 180s after  로 재측정 (한 번에 한 앱만 바꾸면 원인 추적 쉬움)")

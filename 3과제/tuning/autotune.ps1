@@ -68,6 +68,19 @@ function Invoke-PatchAll {
   foreach ($app in $TUNE_APPS) { kubectl -n $NS rollout status "deploy/$app" --timeout=180s 2>$null | Out-Null }
 }
 
+# 이전 조합이 띄운 노드가 남아 있으면 다음 조합의 nodes_avg 가 부풀어 비용 점수가
+# 뒤섞인다. Karpenter consolidation 이 기준선까지 회수할 때까지 기다려 조합 간
+# 측정 조건을 맞춘다 (최대 3분).
+function Invoke-Drain {
+  $target = [int]$COST_BASELINE_NODES + 1   # 기준선 + 여유 1대
+  for ($i = 0; $i -lt 36; $i++) {
+    try { $n = (kubectl get nodes --no-headers 2>$null | Select-String '\bReady').Count } catch { $n = 99 }
+    if ($n -le $target) { Write-Host "    nodes=$n (baseline 복귀)"; return }
+    Start-Sleep -Seconds 5
+  }
+  Write-Host '    drain timeout — nodes_avg 비교 시 유의' -ForegroundColor Yellow
+}
+
 function Get-TrialScore {
   param($Label)
   $out = Join-Path $env:TEMP "tune-$Label"
@@ -85,7 +98,7 @@ foreach ($c in $COMBOS) {
   Write-Host ''
   Write-Host ">>> combo=$($c.name)  cpu=$($c.cpu) util=$($c.util) replicas=$($c.min)-$($c.max)"
   Invoke-PatchAll $c.cpu $c.util $c.min $c.max
-  Start-Sleep -Seconds 45   # HPA/Karpenter 가 baseline 으로 돌아가도록
+  Invoke-Drain
   & (Join-Path $Here 'loadtest.ps1') -Url $EP -Duration $Duration -Label $c.name *> $null
   $r = Get-TrialScore $c.name
   $ap, $ma, $na, $sc = $r[0], $r[1], $r[2], $r[3]

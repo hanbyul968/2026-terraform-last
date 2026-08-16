@@ -229,6 +229,9 @@ resource "kubectl_manifest" "karpenter_nodepool" {
         # 부하 빠지면 30s 만에 저활용 노드 회수 → 평균 노드 수(비용 ratio) 감소.
         consolidationPolicy = "WhenEmptyOrUnderutilized"
         consolidateAfter    = "30s"
+        # 한 번에 1대만 회수. 기본값(10%)은 노드가 늘면 동시에 여러 대를 빼서
+        # 트래픽 중 파드가 한꺼번에 재스케줄되고 availability/performance 가 깎인다.
+        budgets = [{ nodes = "1" }]
       }
     }
   })

@@ -42,9 +42,9 @@ import statistics
 import subprocess
 import sys
 
-# 노드 1대의 할당가능 CPU 는 상수로 두지 않는다. 대회날 인스턴스 타입이 바뀌면
-# t3.medium(1930m) 가정이 전부 틀어지므로 node_alloc_m() 으로 라이브에서 읽는다.
-ALLOC_FALLBACK_M = 1930  # 클러스터 조회 실패 시에만 쓰는 최후 기본값 (t3.medium)
+# 노드 1대의 할당가능 CPU 는 어떤 상수도 두지 않는다. 특정 인스턴스 타입(t3.medium 등)을
+# 가정하면 대회날 타입이 바뀔 때 노드 수 추정이 조용히 틀어진다.
+# 못 읽으면 0 을 돌려주고, 호출부는 추정을 아예 생략한다(틀린 숫자보다 '미확인'이 낫다).
 # 비용 기준선 노드 수 (config.ps1 의 $COST_BASELINE_NODES). terraform node_desired_size 와 동일.
 BASELINE_NODES = float(os.environ.get("TUNE_BASELINE_NODES", "2"))
 DEFAULT_SLO = 1.0  # --slos 에 없는 앱에 쓰는 SLO(초). 쓰이면 경고를 출력한다.
@@ -68,6 +68,22 @@ def cpu_m(s):
 
 def round50(v):
     return max(100, int(round(v / 50.0)) * 50)
+
+
+def pct_nearest(sorted_vals, q):
+    """보간 없는 순위 기반 백분위 (nearest-rank).
+
+    statistics.quantiles(n=100) 는 보간을 하므로 표본이 적을 때 상위 백분위가 최댓값 쪽으로
+    끌려간다. 실측: 120~150m 표본 19개 + 400m 스파이크 1개(총 20개)에서 p95 가 388m 로
+    나왔다(기대값 ~152m). 부하 창 샘플은 5초 간격이라 180초면 36개 수준으로 적기 때문에
+    보간형 백분위를 쓰면 스파이크 1회가 그대로 권고값을 흔든다.
+    """
+    if not sorted_vals:
+        return 0
+    if len(sorted_vals) == 1:
+        return sorted_vals[0]
+    idx = int(q / 100.0 * (len(sorted_vals) - 1))
+    return sorted_vals[idx]
 
 
 def right_size(peak_m):
@@ -135,10 +151,43 @@ def load_nodes(outdir):
 
 
 # ---------- 라이브 상태 (kubectl) ----------
-def pod_usage(ns):
-    """{앱: 파드 CPU 피크(밀리코어)} — kubectl top pods 실측. request 판단의 근거.
+def usage_from_window(outdir):
+    """{앱: {p95, max, n}} — loadtest 가 부하 중 5초마다 남긴 podcpu.csv 에서 계산.
 
-    파드 이름이 '<앱>-<replicaset>-<hash>' 이므로 뒤 두 토큰을 떼어 앱명을 얻는다.
+    request 권장값의 근거는 반드시 '부하 창 전체' 여야 한다. 부하가 끝난 뒤 kubectl top 을
+    한 번 찍는 방식은 찍히는 순간에 따라 값이 요동친다:
+      실측 사고 — 실사용이 132m 인데 스파이크 순간에 400m 로 읽혀 request 300m 를 권고했다.
+    p95 를 기준으로 삼는 이유: 최대값 하나는 단발 스파이크에 끌려가고, 평균은 피크를 놓친다.
+    """
+    f = os.path.join(outdir, "podcpu.csv")
+    if not os.path.exists(f):
+        return {}
+    per = {}
+    try:
+        for line in open(f, encoding="utf-8", errors="replace"):
+            c = line.strip().split(",")
+            if len(c) < 3:
+                continue
+            app = c[1].rsplit("-", 2)[0]
+            try:
+                v = int(c[2])
+            except ValueError:
+                continue
+            per.setdefault(app, []).append(v)
+    except OSError:
+        return {}
+    out = {}
+    for app, vals in per.items():
+        vals.sort()
+        out[app] = {"p95": pct_nearest(vals, 95), "max": vals[-1], "n": len(vals)}
+    return out
+
+
+def pod_usage_live(ns):
+    """{앱: 파드 CPU(밀리코어)} — 지금 순간값 1회. podcpu.csv 가 없을 때만 쓰는 폴백.
+
+    순간값은 스파이크/휴지에 그대로 끌려가므로 request 산정 근거로는 약하다. 호출부에서
+    이 값을 쓸 때 경고를 출력한다.
     """
     peak = {}
     out = run(["kubectl", "-n", ns, "top", "pods", "--no-headers"])
@@ -184,7 +233,7 @@ def node_alloc_m():
         v = cpu_m(c) if c else None
         if v:
             vals.append(v)
-    return min(vals) if vals else ALLOC_FALLBACK_M
+    return min(vals) if vals else 0
 
 
 def node_types():
@@ -331,16 +380,29 @@ def main():
         slos.setdefault(name, a.default_slo)
     meas = load_measures(outdir, {k: slos[k] for k in apps})
     live = live_state(a.ns)
-    peaks = pod_usage(a.ns)          # 앱별 실사용 CPU 피크 (request 판단 근거)
+    # request 산정 근거: 부하 창 전체(podcpu.csv) 를 1순위로 쓴다. 순간값은 스파이크에
+    # 끌려가 과대/과소 권고를 만든다(실측: 132m 를 400m 로 읽어 request 300m 권고).
+    win = usage_from_window(outdir)
+    if win:
+        peaks = {k: v["p95"] for k, v in win.items()}
+        basis = "부하 창 p95 (podcpu.csv)"
+    else:
+        peaks = pod_usage_live(a.ns)
+        basis = "지금 순간값 1회 [!] 근거 약함"
     node_cpu = node_cpu_max()        # 노드 실사용 CPU 최대 % (노드 경쟁 판단)
-    alloc_m = node_alloc_m()         # 노드 할당가능 CPU (노드 수 추정 기준)
+    alloc_m = node_alloc_m()         # 노드 할당가능 CPU (0 이면 추정 생략)
     ntypes = node_types()
     have_live = bool(live)
 
     print("\n" + "=" * 72)
     print("  앱별 권장값 (측정: %s%s)" % (outdir, "" if have_live else " · [!] kubectl 조회 실패 - 현재값은 기본 가정"))
-    print("  노드: %s · 할당가능 %dm/대 (라이브)   노드CPU최대: %s" % (
-        ntypes, alloc_m, ("%d%%" % node_cpu) if node_cpu is not None else "미확인"))
+    print("  노드: %s · 할당가능 %s (라이브)   노드CPU최대: %s" % (
+        ntypes,
+        ("%dm/대" % alloc_m) if alloc_m else "미확인(추정 생략)",
+        ("%d%%" % node_cpu) if node_cpu is not None else "미확인"))
+    print("  실사용 근거: %s" % basis)
+    if not win:
+        print("      podcpu.csv 가 없다. 최신 loadtest.ps1 로 다시 측정하면 부하 창 p95 로 판정한다")
     if assumed:
         print("  [!] SLO 미지정 앱: %s -> %.2fs 로 가정했다. 문제지 SLO 로 --slos 를 지정할 것"
               % (", ".join(assumed), a.default_slo))
@@ -360,8 +422,13 @@ def main():
         print(f"\n[{api}]  판정: {d} {mark}  원인: {cause}")
         print(f"  현재: cpu={cpu}{'m' if cpu != '?' else ''} util={util}% min={mn} max={mx}"
               + (f" 파드={cur.get('replicas')}" if cur.get("replicas") else ""))
-        print(f"  실사용: 파드 CPU 피크 {peak if peak is not None else '-'}m"
-              + (f" · 적정 request {right_size(peak)}m" if peak else ""))
+        w = win.get(api)
+        if w:
+            print(f"  실사용: p95 {w['p95']}m · 최대 {w['max']}m · 표본 {w['n']}개"
+                  + (f" · 적정 request {right_size(peak)}m" if peak else ""))
+        else:
+            print(f"  실사용: {peak if peak is not None else '-'}m (순간값)"
+                  + (f" · 적정 request {right_size(peak)}m" if peak else ""))
         print(f"  근거: {why}")
         if nextchk:
             print(f"  다음 확인: {nextchk}")
@@ -397,8 +464,14 @@ def main():
     est = -(-sum_cpu // alloc_m) if (sum_cpu and alloc_m) else 0  # ceil, 노드 할당량은 라이브 값
     print("\n" + "-" * 72)
     if ns_hist:
-        print(f"  측정 중 노드: min={min(ns_hist)} max={max(ns_hist)} avg={sum(ns_hist)/len(ns_hist):.2f}"
-              f"   (권장 min 반영 시 정상부하 노드 추정 ≈ {est})")
+        line = (f"  측정 중 노드: min={min(ns_hist)} max={max(ns_hist)} "
+                f"avg={sum(ns_hist)/len(ns_hist):.2f}")
+        if alloc_m and est:
+            line += f"   (권장 min 반영 시 정상부하 노드 추정 ~ {est})"
+        else:
+            line += "   (노드 할당가능 CPU 미확인 -> 노드 추정 생략)"
+        print(line)
+        print(f"  비용 비율: {sum(ns_hist)/len(ns_hist)/BASELINE_NODES:.2f}배 (기준 {BASELINE_NODES:g}대)")
     if tf_lines:
         print("  영구 반영 → terraform/k8s_apps.tf 해당 앱 수정 후:")
         for l in tf_lines:

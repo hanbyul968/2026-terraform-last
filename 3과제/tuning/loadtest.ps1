@@ -47,18 +47,38 @@ if (-not $Hey) { Write-Error 'hey 없음 — 먼저 .\setup.ps1 <cluster> <regio
 if (-not $Kubectl) { Write-Warning 'kubectl 없음 — 노드 샘플링 생략(가용성/성능은 정상 측정)' }
 
 # --- node/pod 샘플러 (5초 간격, 백그라운드 잡) ---
+# nodes.csv  : ts,노드수,Running파드수      (비용 지표 = 노드 수 평균)
+# podcpu.csv : ts,파드명,cpu(밀리코어)      (request 산정의 유일한 근거)
+#
+# podcpu.csv 를 반드시 부하 '중에' 남겨야 하는 이유:
+#   request 권장값은 실사용 피크에서 나온다. 그런데 부하가 끝난 뒤 kubectl top 을 한 번
+#   찍으면 그 순간값이 피크로 잡힌다. 스파이크 순간에 찍히면 과대(실측: 실사용 132m 인데
+#   400m 로 읽혀 request 300m 를 권고), 부하가 빠진 뒤에 찍히면 과소가 된다.
+#   5초 간격으로 창 전체를 남겨 두면 p95/최대를 제대로 계산할 수 있다.
 $sampler = $null
 if ($Kubectl) {
   $sampler = Start-Job -ScriptBlock {
-    param($NS, $csv, $kubectl)
+    param($NS, $csv, $cpucsv, $kubectl)
     while ($true) {
+      $ts = [int][double]::Parse((Get-Date -UFormat %s))
       try { $n = (& $kubectl get nodes --no-headers 2>$null | Select-String '\bReady').Count } catch { $n = 0 }
       try { $p = (& $kubectl -n $NS get pods --no-headers 2>$null | Select-String 'Running').Count } catch { $p = 0 }
-      $ts = [int][double]::Parse((Get-Date -UFormat %s))
       "$ts,$n,$p" | Add-Content -Path $csv
+      # 파드별 CPU 실사용. metrics-server 가 없으면 조용히 건너뛴다(가용성/성능 측정엔 무관).
+      try {
+        $rows = & $kubectl -n $NS top pods --no-headers 2>$null
+        foreach ($r in $rows) {
+          $f = ($r -split '\s+') | Where-Object { $_ -ne '' }
+          if ($f.Count -ge 2) {
+            $c = $f[1]
+            $m = if ($c -match '^(\d+)m$') { [int]$Matches[1] } else { [int]([double]$c * 1000) }
+            "$ts,$($f[0]),$m" | Add-Content -Path $cpucsv
+          }
+        }
+      } catch {}
       Start-Sleep -Seconds 5
     }
-  } -ArgumentList $NS, (Join-Path $OUT 'nodes.csv'), $Kubectl
+  } -ArgumentList $NS, (Join-Path $OUT 'nodes.csv'), (Join-Path $OUT 'podcpu.csv'), $Kubectl
 }
 
 # --- 시드 레코드 (idempotent) ---

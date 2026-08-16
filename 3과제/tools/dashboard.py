@@ -159,11 +159,35 @@ function vDiag(){return D.diag.map(function(t){return '<div class="tip '+t[0]+'"
 function cpuM(s){if(s===undefined||s===null||s==='')return 0;s=''+s;return s.slice(-1)==='m'?parseInt(s):Math.round(parseFloat(s)*1000)}
 function pctn(s){var n=parseInt((''+(s||'')).replace('%',''));return isNaN(n)?null:n}
 function hpaOf(n){return (D.hpa||[]).find(function(h){return h.name===n})||{}}
-// 앱의 '실제' CPU 사용량 (request 가 아니라 top 실측)
-function useOf(n){var mx=0,sum=0,cnt=0,tot=0;
+// 앱의 '실제' CPU 사용량. 순간값 하나로 request 를 권고하면 안 된다 — 스파이크가 찍히면
+// 과대, 부하가 빠진 순간이 찍히면 과소가 된다(실측: 실사용 132m 를 400m 로 읽어 request
+// 300m 를 권고). 그래서 폴링마다 관측을 누적하고 '순위 기반 p95'(보간 없음)를 기준으로 쓴다.
+// 보간형 백분위는 표본이 적을 때 최댓값으로 끌려가므로 쓰지 않는다.
+var USEHIST={};            // {앱: [관측된 파드 CPU(m), ...]}  누적
+var USEHIST_CAP=600;       // 앱당 표본 상한 (폴링 5초면 약 50분)
+function useRecord(){
+ (D.pods||[]).forEach(function(p){
+  if(p.phase!=='Running')return;
+  var v=cpuM(p.cpu); if(!(v>0))return;
+  var a=USEHIST[p.app]||(USEHIST[p.app]=[]);
+  a.push(v); if(a.length>USEHIST_CAP)a.shift();
+ });
+}
+function pctNearest(sorted,q){
+ if(!sorted.length)return 0;
+ if(sorted.length===1)return sorted[0];
+ return sorted[Math.floor(q/100*(sorted.length-1))];
+}
+function useOf(n){
+ var now=0,sum=0,cnt=0,tot=0;
  (D.pods||[]).forEach(function(p){if(p.app!==n||p.phase!=='Running')return;tot++;
-  var v=cpuM(p.cpu);if(v>0){mx=Math.max(mx,v);sum+=v;cnt++;}});
- return {max:mx,avg:cnt?Math.round(sum/cnt):0,pods:tot,measured:cnt>0}}
+  var v=cpuM(p.cpu);if(v>0){now=Math.max(now,v);sum+=v;cnt++;}});
+ var h=(USEHIST[n]||[]).slice().sort(function(a,b){return a-b});
+ var p95=pctNearest(h,95);
+ // 기준값: 누적 표본이 충분하면 p95, 아니면 현재 순간 최대값
+ var basis=h.length>=10?p95:now;
+ return {max:basis,now:now,p95:p95,hmax:h.length?h[h.length-1]:0,
+         samples:h.length,avg:cnt?Math.round(sum/cnt):0,pods:tot,measured:cnt>0}}
 // 노드 CPU 최대 사용률(%) — '노드 경쟁' 판단용. 실사용 기준(예약률 아님).
 function nodeCpuMax(){var mx=0;(D.nodes||[]).forEach(function(nd){var v=pctn(nd.cpu_pct);if(v!==null&&v>mx)mx=v});return mx}
 // 적정 request = 실사용 피크 x 1.3 (헤드룸), 25m 단위, 하한 50m
@@ -188,6 +212,7 @@ function nodeTypes(){
 }
 function vCalc(){
  var apps=D.apps||[];var nodeMax=nodeCpuMax();var sMin=0,sMinCpu=0;
+ useRecord();  // 폴링마다 실사용 관측을 누적 (순간값 한 점으로 판단하지 않기 위해)
  var ALLOC=nodeAllocM();  // 라이브 노드에서 유도 (노드 타입 변경에 자동 대응)
  var cards=apps.map(function(a){
   var n=a.app,h=hpaOf(n);
@@ -257,7 +282,9 @@ function vCalc(){
   }
   return '<div class=card><div class=lbl>'+n+' &nbsp;<span class='+cls+' style="font-weight:700">'+dir+'</span> &nbsp;<span class=mut>'+cause+'</span></div>'
    +'<div class=row><span class=mut>설정</span><span>request <b>'+req+'m</b> · util '+util+'% · min '+mn+' · max '+mx+' · 파드 '+rep+'</span></div>'
-   +'<div class=row><span class=mut>실사용</span><span>파드 CPU 피크 <b>'+u.max+'m</b> (평균 '+u.avg+'m) · 적정 request '+(fit||'-')+'m · 노드CPU최대 '+nodeMax+'%</span></div>'
+   +'<div class=row><span class=mut>실사용</span><span>기준 <b>'+u.max+'m</b> '
+     +(u.samples>=10?'(누적 p95, 표본 '+u.samples+')':'(현재 순간값 — 표본 '+u.samples+'개, 10개 이상 모이면 p95 사용)')
+     +' · 지금 '+u.now+'m · 관측최대 '+u.hmax+'m · 적정 request '+(fit||'-')+'m · 노드CPU최대 '+nodeMax+'%</span></div>'
    +'<div class=row><span class=mut>측정</span><span>perf '+perf+'% · avail '+avail+'% · p95 '+p95+'ms / SLO '+slo+'ms · HPA현재 '+(cur===null?'-':cur+'%')+'</span></div>'
    +'<div style="margin-top:9px"><div class=lbl style="margin-bottom:4px">이렇게 바꿔 (k8s_apps.tf 에 반영)</div><div style="font-size:12.5px">'+how+'</div></div>'
    +warn+cmds
@@ -274,7 +301,7 @@ function vCalc(){
   +summary+'<div class="grid g3">'+cards+'</div>'
   +'<div class="tip mut" style="margin-top:12px"><h3>이 탭이 request 를 다루는 방식</h3><div class=why>'
   +'requests.cpu 는 노드 예약량이지 속도 상한이 아니다(user/product 는 cpu limit 없음). 그래서 "느리다"는 이유만으로 request 를 올리지 않는다. '
-  +'권장 request 는 항상 <b>실사용 피크 x 1.3</b> 이고, 올리는 처방은 <b>노드 CPU 포화</b> 또는 <b>파드 실사용이 request 에 근접</b>한 경우로 제한한다. '
+  +'권장 request 는 항상 <b>실사용 x 1.3</b> 이고, 그 실사용은 폴링을 누적한 <b>순위기반 p95</b> 다 — 순간값 한 점을 쓰면 스파이크에 끌려가 과대 권고가 난다(실측: 132m 를 400m 로 읽어 300m 권고). '+'정확한 값이 필요하면 loadtest 의 podcpu.csv 를 쓰는 <code>tuning/advise.py</code> 를 본다. '+'올리는 처방은 <b>노드 CPU 포화</b> 또는 <b>파드 실사용이 request 에 근접</b>한 경우로 제한한다. '
   +'실사용이 request 의 절반도 안 되는데 느리면 CPU 가 병목이 아니므로 DB·캐시·커넥션풀을 본다. '
   +'노드 추정 = ⌈Σ(min x request) / 노드 할당가능 CPU⌉ 이고, 할당가능 CPU 는 라이브 노드의 status.allocatable 에서 읽는다(섞여 있으면 가장 작은 노드 기준). '
   +'앱 목록·SLO·파드·노드 타입 모두 라이브에서 읽으므로 대회날 앱이나 인스턴스 타입이 바뀌어도 그대로 쓴다. 현재 노드: '+nodeTypes()+'.'

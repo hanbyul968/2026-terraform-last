@@ -40,6 +40,16 @@ if ($probe -notmatch '^(2|3)\d\d$') {
 
 $OUT = Join-Path $env:TEMP "tune-$Label"
 New-Item -ItemType Directory -Force -Path $OUT | Out-Null
+# 이전 실행 결과를 반드시 지운다. nodes.csv / podcpu.csv 는 Add-Content(append) 로 쓰므로
+# 같은 -Label 로 다시 돌리면 옛 표본이 그대로 쌓인다.
+#   실측 사고: autotune 의 조합 이름(baseline, lean-cpu, ...)이 과거 실행 라벨과 같아
+#   tune-baseline/nodes.csv 에 35일치 3423 표본이 누적됐고, 그 평균으로 비용 비율을
+#   계산해 실제와 다른 값이 나왔다(조합 간 비교도 무의미해진다).
+# 앱 CSV(<앱>.csv)는 Out-File 로 덮어쓰므로 문제가 없지만, 옛 앱이 남아 있으면
+# 그것도 앱으로 잡히니(예: 대회날 앱 이름이 바뀐 경우) 함께 정리한다.
+Get-ChildItem -Path $OUT -File -ErrorAction SilentlyContinue |
+  Where-Object { $_.Extension -in '.csv', '.err', '.json' } |
+  Remove-Item -Force -ErrorAction SilentlyContinue
 
 $Hey = (Get-Command hey -ErrorAction SilentlyContinue).Source
 $Kubectl = (Get-Command kubectl -ErrorAction SilentlyContinue).Source

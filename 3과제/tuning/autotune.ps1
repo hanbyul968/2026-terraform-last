@@ -36,7 +36,7 @@ if (-not (Get-Command hey -ErrorAction SilentlyContinue) -or -not (Get-Command k
   Write-Error 'hey/kubectl 없음 — .\setup.ps1 먼저'; exit 1
 }
 $Results = Join-Path $env:TEMP 'autotune-results.csv'
-'combo,avg_perf,min_avail,nodes_avg,score' | Set-Content -Path $Results
+'combo,avg_perf,min_avail,nodes_avg,score,nodes_start' | Set-Content -Path $Results
 
 $APPS = $APIS | ForEach-Object { $_.name }
 
@@ -77,15 +77,43 @@ function Invoke-PatchAll {
 
 # 이전 조합이 띄운 노드가 남아 있으면 다음 조합의 nodes_avg 가 부풀어 비용 점수가
 # 뒤섞인다. Karpenter consolidation 이 기준선까지 회수할 때까지 기다려 조합 간
-# 측정 조건을 맞춘다 (최대 3분).
+# 이전 조합이 띄운 노드가 회수될 때까지 기다린다. 남아 있으면 다음 조합의 nodes_avg 가
+# 부풀어 비용 비교가 무의미해진다.
+#
+# 대기 시간은 Karpenter NodePool 의 consolidateAfter 에서 유도한다. 고정 3분으로 두면
+# 안 된다 — consolidateAfter 가 5분이면 회수가 '시작'되기도 전에 포기해서 항상
+# timeout 이 뜬다(실측: 항상 timeout, 실제 전량 회수까지는 12분 걸렸다).
+# disruption budget 이 Underutilized=1 이라 노드는 한 대씩 회수되므로 여유를 넉넉히 준다.
+function Get-DrainTimeoutSec {
+  $sec = 300
+  try {
+    $ca = (kubectl get nodepool default -o jsonpath='{.spec.disruption.consolidateAfter}' 2>$null)
+    if ($ca -match '^(\d+)m$') { $sec = [int]$Matches[1] * 60 }
+    elseif ($ca -match '^(\d+)s$') { $sec = [int]$Matches[1] }
+  } catch {}
+  # consolidateAfter + 노드 종료/한 대씩 회수 여유
+  return [int]($sec + 420)
+}
+
 function Invoke-Drain {
   $target = [int]$COST_BASELINE_NODES + 1   # 기준선 + 여유 1대
-  for ($i = 0; $i -lt 36; $i++) {
-    try { $n = (kubectl get nodes --no-headers 2>$null | Select-String '\bReady').Count } catch { $n = 99 }
-    if ($n -le $target) { Write-Host "    nodes=$n (baseline 복귀)"; return }
-    Start-Sleep -Seconds 5
+  $limit = Get-DrainTimeoutSec
+  $sw = [System.Diagnostics.Stopwatch]::StartNew()
+  $last = -1
+  while ($sw.Elapsed.TotalSeconds -lt $limit) {
+    try { $n = (kubectl get nodes --no-headers 2>$null | Select-String '\bReady').Count } catch { $n = -1 }
+    if ($n -ge 1 -and $n -le $target) {
+      Write-Host ("    nodes=$n (baseline 복귀, {0:N0}초 대기)" -f $sw.Elapsed.TotalSeconds)
+      return $n
+    }
+    if ($n -ne $last -and $n -ge 1) {
+      Write-Host ("    nodes=$n ... 회수 대기 ({0:N0}/{1}초)" -f $sw.Elapsed.TotalSeconds, $limit)
+      $last = $n
+    }
+    Start-Sleep -Seconds 10
   }
-  Write-Host '    drain timeout — nodes_avg 비교 시 유의' -ForegroundColor Yellow
+  Write-Host ("    drain timeout ({0}초) — nodes={1} 로 시작하므로 이 조합의 nodes_avg 는 부풀어 있습니다" -f $limit, $last) -ForegroundColor Yellow
+  return $last
 }
 
 function Get-TrialScore {
@@ -105,7 +133,7 @@ foreach ($c in $COMBOS) {
   Write-Host ''
   Write-Host ">>> combo=$($c.name)  cpu=$($c.cpu) util=$($c.util) replicas=$($c.min)-$($c.max)"
   Invoke-PatchAll $c.cpu $c.util $c.min $c.max
-  Invoke-Drain
+  $startNodes = Invoke-Drain
   & (Join-Path $Here 'loadtest.ps1') -Url $EP -Duration $Duration -Label $c.name *> $null
   $r = Get-TrialScore $c.name
   $ap, $ma, $na, $sc = $r[0], $r[1], $r[2], $r[3]

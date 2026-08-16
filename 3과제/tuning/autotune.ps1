@@ -62,8 +62,15 @@ function Invoke-PatchAll {
   param($cpu, $util, $min, $max)
   foreach ($app in $TUNE_APPS) {
     kubectl -n $NS set resources "deploy/$app" --requests=cpu=$cpu 2>$null | Out-Null
+    # ⚠ PowerShell 은 네이티브 exe 에 큰따옴표를 그대로 넘기지 못한다. -p $patch 로 주면
+    #    kubectl 에 {spec:...} 로 도착해 "invalid character 's'" 로 실패하는데,
+    #    2>$null 때문에 조용히 넘어가 HPA 가 전혀 안 바뀌던 버그가 있었다.
+    #    --patch-file 로 넘겨 따옴표 문제를 원천 제거하고, 실패는 표면화한다.
     $patch = @{ spec = @{ minReplicas = $min; maxReplicas = $max; metrics = @(@{ type = 'Resource'; resource = @{ name = 'cpu'; target = @{ type = 'Utilization'; averageUtilization = $util } } }) } } | ConvertTo-Json -Depth 10 -Compress
-    kubectl -n $NS patch hpa $app --type=merge -p $patch 2>$null | Out-Null
+    $pf = Join-Path $env:TEMP "hpa-$app.json"
+    $patch | Set-Content -Path $pf -Encoding ascii -NoNewline
+    kubectl -n $NS patch hpa $app --type=merge --patch-file $pf | Out-Null
+    if ($LASTEXITCODE -ne 0) { Write-Warning "    HPA patch 실패 ($app) — util/min/max 가 반영되지 않았습니다" }
   }
   foreach ($app in $TUNE_APPS) { kubectl -n $NS rollout status "deploy/$app" --timeout=180s 2>$null | Out-Null }
 }

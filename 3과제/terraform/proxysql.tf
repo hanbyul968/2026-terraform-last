@@ -83,6 +83,14 @@ resource "kubernetes_deployment" "proxysql" {
         labels = { app = "proxysql" }
       }
       spec {
+        # 2 replica 를 서로 다른 노드/AZ 로 분산. 없으면 둘이 같은 노드에 뜰 수 있어
+        # 그 노드가 죽으면 user·product 의 DB 경로가 동시에 끊긴다(가용성 12점 직결).
+        topology_spread_constraint {
+          max_skew           = 1
+          topology_key       = "kubernetes.io/hostname"
+          when_unsatisfiable = "ScheduleAnyway"
+          label_selector { match_labels = { app = "proxysql" } }
+        }
         container {
           name  = "proxysql"
           image = "proxysql/proxysql:2.6.5"
@@ -94,9 +102,13 @@ resource "kubernetes_deployment" "proxysql" {
           }
 
           resources {
+            # ProxySQL 은 threads=2 커넥션 멀티플렉서로, 이 과제 QPS(앱당 10~30)에서는
+            # CPU 를 거의 쓰지 않는다. 기본 노드가 이미 requests 89% 로 빡빡해서
+            # 100m×2 가 2번째 노드를 띄우는 방아쇠가 될 수 있어 50m 으로 낮춘다.
+            # (limit 은 그대로 두어 튀는 경우를 흡수)
             requests = {
-              cpu    = "100m"
-              memory = "128Mi"
+              cpu    = "50m"
+              memory = "96Mi"
             }
             limits = {
               memory = "256Mi"

@@ -185,9 +185,13 @@ def main():
                                      "metrics": [{"type": "Resource", "resource": {"name": "cpu",
                                                   "target": {"type": "Utilization", "averageUtilization": rutil}}}]}},
                            separators=(",", ":"))
+        # PowerShell 은 네이티브 exe 로 넘길 때 큰따옴표를 벗겨버려서 -p '{"spec":...}' 가
+        # kubectl 에 {spec:...} 로 도착한다 → "invalid character 's' looking for beginning
+        # of object key string". 큰따옴표를 \" 로 이스케이프하면 그대로 전달된다.
+        patch_ps = patch.replace('"', '\\"')
         print("  즉시 적용 (임시 - 재배포 시 사라짐):")
         print(f"    kubectl -n {a.ns} set resources deploy/{api} --requests=cpu={rcpu}m")
-        print(f"    kubectl -n {a.ns} patch hpa {api} --type=merge -p '{patch}'")
+        print(f"    kubectl -n {a.ns} patch hpa {api} --type=merge -p '{patch_ps}'")
         print(f"    kubectl -n {a.ns} rollout status deploy/{api}")
         tf_lines.append(f"  {api:8}: requests.cpu = \"{rcpu}m\"   average_utilization = {rutil}   min_replicas = {rmn}")
         sum_cpu += rmn * rcpu

@@ -60,6 +60,26 @@ function Test-Code {
 Write-Host ""
 Write-Host "=== verify: $EP ===" -ForegroundColor Cyan
 
+# ---------- 시드: A 그룹의 GET 대상 레코드를 먼저 만든다 ----------
+# config.ps1 의 $APIS 는 GET 경로에 특정 레코드(loadseed1 / loadseedp1)를 지정한다.
+# 그 레코드가 없으면 앱이 정상이어도 조회가 404 라서 [FAIL] 로 보인다.
+# loadtest.ps1 은 부하 전에 $SEEDS 를 넣는데 verify 는 안 넣어서 생기던 오탐.
+# 이미 있으면 중복 응답(4xx)이 오지만 무시한다 — 목적은 "행이 존재함" 뿐이다.
+if ($SEEDS -and $SEEDS.Count -gt 0) {
+  Write-Host "  시드 레코드 준비 ($($SEEDS.Count)건)..." -ForegroundColor DarkGray
+  foreach ($s in $SEEDS) {
+    if ($s.method -eq 'GET') {
+      & curl.exe -s -o NUL --max-time 10 "$EP$($s.path)" 2>$null | Out-Null
+    } else {
+      $sf = Join-Path $env:TEMP "verify-seed-$([Math]::Abs($s.path.GetHashCode())).json"
+      $s.body | Set-Content -Path $sf -Encoding ascii -NoNewline
+      & curl.exe -s -o NUL --max-time 10 -X $s.method -H 'Content-Type: application/json' `
+        --data-binary "@$sf" "$EP$($s.path)" 2>$null | Out-Null
+    }
+  }
+  Start-Sleep -Seconds 1   # product GET 은 CloudFront 캐싱이 걸려 있어 잠깐 여유
+}
+
 # ---------- A. 정상 요청 ----------
 Write-Host ""
 Write-Host "A. 정상 요청 (2xx)" -ForegroundColor White
@@ -88,7 +108,9 @@ Test-Code 'forged XFF (127.0.0.1)'   '403' @('-H', 'X-Forwarded-For: 127.0.0.1',
 Test-Code 'path traversal in query'  '403' @("$EP$validPath&f=/etc/passwd")
 $injBody = Join-Path $env:TEMP 'verify-inj.json'
 '{"requestid":"1","uuid":"u","username":{"$ne":null},"email":"x@x.org"}' | Set-Content -Path $injBody -Encoding ascii -NoNewline
-Test-Code 'NoSQL injection body'     '403' @('-X', 'POST', '-H', 'Content-Type: application/json', '--data-binary', "@$injBody", "$EP/v1/user")
+# POST 대상도 config 에서 유도 (api_prefix 가 /v2 로 바뀌어도 따라간다).
+$postTarget = ($APIS | Select-Object -First 1).path -replace '\?.*$', ''
+Test-Code 'NoSQL injection body'     '403' @('-X', 'POST', '-H', 'Content-Type: application/json', '--data-binary', "@$injBody", "$EP$postTarget")
 
 # ---------- C. 미정의 경로 → 404 ----------
 Write-Host ""
@@ -115,9 +137,12 @@ if ($SkipImage) {
     $script:Skip++
     Write-Host '  [SKIP] 버킷 조회 실패 (terraform output s3_bucket)' -ForegroundColor Yellow
   } else {
-    $key = "verify-probe.txt"
-    $probe = Join-Path $env:TEMP $key
+    # 키를 매 실행마다 유니크하게 만든다. 고정 키(verify-probe.txt)를 쓰면 images 캐시
+    # 정책의 default_ttl(1일) 때문에 CloudFront 가 이전 실행의 본문을 그대로 돌려주고,
+    # S3 원본을 새로 올려도 body 비교가 실패한다(200 은 뜨므로 더 헷갈린다).
     $marker = "verify-$([guid]::NewGuid().ToString('N').Substring(0,8))"
+    $key = "$marker.txt"
+    $probe = Join-Path $env:TEMP $key
     $marker | Set-Content -Path $probe -Encoding ascii -NoNewline
     aws s3 cp $probe "s3://$bucket/$key" --only-show-errors 2>$null
     if ($LASTEXITCODE -ne 0) {

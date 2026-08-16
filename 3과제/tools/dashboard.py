@@ -7,6 +7,8 @@
        → http://<host>:8080
 """
 import argparse
+import sys
+
 from flask import Flask, jsonify, request, Response
 import monitor  # 같은 폴더의 monitor.py (수집/진단 로직 재사용)
 
@@ -145,53 +147,138 @@ function vWaf(){var w=D.waf;if(!w.enabled)return '<div class="tip dim"><h3>WAF �
  return k+t+'<div class=card style="margin-top:15px"><h2>최근 차단 — 누르면 요청 전문 · 왜 차단됐는지</h2><div class=box>'+rec+'</div></div>'}
 function vDiag(){return D.diag.map(function(t){return '<div class="tip '+t[0]+'"><h3>'+t[1]+'</h3><div class=why>'+t[2]+'</div>'+(t[3]?'<pre>'+t[3]+'</pre>':'')+'</div>'}).join('')}
 
-// ---- 계산 탭: 라이브 데이터로 자동 판정 (줄여/늘려/유지) ----
+// ---- 계산 탭: 원인을 먼저 가려낸 뒤 처방 (줄여/늘려/유지) ----
+// 설계 원칙 (중요):
+//  requests.cpu 는 '노드 예약량'이지 '파드 속도 상한'이 아니다. user/product 에는 cpu limit
+//  이 없어서 request 를 올려도 파드가 빨라지지 않는다. 올리면 오히려
+//    (1) 노드당 파드 수가 줄어 노드가 늘고(비용 상승),
+//    (2) HPA 사용률 = 실사용/request 가 작아져 스케일업이 '늦어진다'(성능 악화).
+//  그래서 '느리다 -> request 올려' 는 틀린 처방이다. 아래는 실사용/노드CPU/HPA 상한을
+//  보고 원인을 먼저 구분한다. 앱 목록·SLO·파드는 전부 라이브에서 읽으므로
+//  대회날 앱이 바뀌어도(이름/개수/SLO 변경) 그대로 동작한다.
 function cpuM(s){if(s===undefined||s===null||s==='')return 0;s=''+s;return s.slice(-1)==='m'?parseInt(s):Math.round(parseFloat(s)*1000)}
 function pctn(s){var n=parseInt((''+(s||'')).replace('%',''));return isNaN(n)?null:n}
 function hpaOf(n){return (D.hpa||[]).find(function(h){return h.name===n})||{}}
+// 앱의 '실제' CPU 사용량 (request 가 아니라 top 실측)
+function useOf(n){var mx=0,sum=0,cnt=0,tot=0;
+ (D.pods||[]).forEach(function(p){if(p.app!==n||p.phase!=='Running')return;tot++;
+  var v=cpuM(p.cpu);if(v>0){mx=Math.max(mx,v);sum+=v;cnt++;}});
+ return {max:mx,avg:cnt?Math.round(sum/cnt):0,pods:tot,measured:cnt>0}}
+// 노드 CPU 최대 사용률(%) — '노드 경쟁' 판단용. 실사용 기준(예약률 아님).
+function nodeCpuMax(){var mx=0;(D.nodes||[]).forEach(function(nd){var v=pctn(nd.cpu_pct);if(v!==null&&v>mx)mx=v});return mx}
+// 적정 request = 실사용 피크 x 1.3 (헤드룸), 25m 단위, 하한 50m
+function rightSize(peak){if(!peak)return null;return Math.max(50,Math.ceil(peak*1.3/25)*25)}
+// 노드 1대의 할당가능 CPU(밀리코어). 대회날 노드 타입이 바뀔 수 있으므로 상수를 박지 않고
+// 라이브 노드의 status.allocatable 을 쓴다. 섞여 있으면 '가장 작은 노드'를 기준으로 잡아야
+// 노드 수를 과소추정하지 않는다. 값이 없으면 사용량/사용률로 역산하고, 그것도 없으면 0.
+function nodeAllocM(){
+ var vals=[];
+ (D.nodes||[]).forEach(function(nd){
+  if(nd.cpu_alloc>0){vals.push(nd.cpu_alloc);return}
+  var use=cpuM(nd.cpu),pc=pctn(nd.cpu_pct);
+  if(use>0&&pc>0)vals.push(Math.round(use*100/pc));
+ });
+ if(!vals.length)return 0;
+ return Math.min.apply(null,vals);
+}
+// 노드 타입 구성 (표시용) — 섞여 있으면 그대로 보여줘서 추정 근거를 알 수 있게 한다.
+function nodeTypes(){
+ var m={};(D.nodes||[]).forEach(function(nd){var k=nd.type||'?';m[k]=(m[k]||0)+1});
+ return Object.keys(m).map(function(k){return k+' x'+m[k]}).join(', ')||'-';
+}
 function vCalc(){
- var apps=D.apps||[];var ALLOC=1900;var sMin=0,sMax=0,sMinCpu=0;
+ var apps=D.apps||[];var nodeMax=nodeCpuMax();var sMin=0,sMinCpu=0;
+ var ALLOC=nodeAllocM();  // 라이브 노드에서 유도 (노드 타입 변경에 자동 대응)
  var cards=apps.map(function(a){
   var n=a.app,h=hpaOf(n);
-  var cpu=cpuM(a.cpu_req),util=pctn(h.tgt)||55,mn=+h.min||0,mx=+h.max||0,rep=+h.replicas||mn,cur=pctn(h.cur);
+  var req=cpuM(a.cpu_req);
+  var util=pctn(h.tgt)||70,mn=+h.min||0,mx=+h.max||0,rep=+h.replicas||mn,cur=pctn(h.cur);
   var perf=a.slo_rate,avail=a.ok_rate,p95=a.p95,slo=a.slo_ms;
-  var dir,cls,rcpu=cpu,rutil=util,rmn=mn,note;
-  if(a.total===0){dir='관측 필요';cls='mut';note='요청이 없어 판단 불가 — loadtest로 부하를 준 뒤 보세요.';}
-  else if(avail<99){dir='늘려 ↑';cls='bd';rcpu=Math.round(cpu*1.5/50)*50;rmn=mn+1;rutil=Math.max(40,util-5);note='가용성 '+avail+'% (<99) → cpu·min 늘려 (게이트 최우선)';}
-  else if(perf<95||(slo&&p95>slo)){dir='늘려 ↑';cls='wn';rcpu=Math.round(cpu*1.4/50)*50;rutil=Math.max(40,util-10);note='성능 '+perf+'% / p95 '+p95+'ms > SLO '+slo+'ms (꼬리지연) → cpu 늘리고 util 낮춰(빨리 스케일)';}
-  else if(perf>=99.5&&((cur!==null&&cur<Math.max(15,util*0.4))||(cur===null&&slo&&p95<=slo*0.4))){dir='줄여 ↓';cls='gd';rcpu=Math.max(100,Math.round(cpu*0.75/50)*50);rutil=Math.min(75,util+10);if(mn>2)rmn=mn-1;note='성능 '+perf+'% 여유 + 현재CPU '+(cur===null?'낮음':cur+'%')+' ≪ 목표 '+util+'% → cpu·util'+(mn>2?'·min':'')+' 줄여 비용↓ (과투자)';}
-  else{dir='유지';cls='mut';note='균형 (perf '+perf+'%, 현재CPU '+(cur===null?'-':cur+'%')+'/목표'+util+'%)';}
-  rmn=Math.max(1,rmn);sMin+=rmn;sMax+=mx;sMinCpu+=rmn*rcpu;
+  var u=useOf(n),fit=rightSize(u.max);
+  var atMax=(mx>0&&rep>=mx);
+  var badAvail=(avail!==undefined&&avail!==null&&avail<99);
+  var badPerf=((perf!==undefined&&perf!==null&&perf<95)||(slo&&p95>slo));
+  var dir,cls,cause,note,rcpu=req,rutil=util,rmn=mn,rmx=mx,keepReq=false,extra='';
+
+  if(!a.total){dir='관측 필요';cls='mut';cause='요청 없음';
+   note='이 앱에 들어온 요청이 0건이라 판단할 수 없다. loadtest 로 부하를 준 상태에서 다시 본다.';}
+  else if(!u.measured){dir='관측 필요';cls='mut';cause='실사용 측정 불가';
+   note='파드 CPU 실측값이 없다(metrics-server 미동작). request 판단은 실사용 없이는 추측이 된다. kubectl top pods 가 되는지 확인한다.';}
+  else if(badAvail){
+   // 가용성은 최우선 게이트. 가용성 실패는 보통 '파드 수 부족/롤아웃/에러'이지 request 부족이 아니다.
+   keepReq=true;
+   if(atMax){dir='늘려 ↑';cls='bd';cause='파드 상한 도달';rmx=mx+2;rmn=mn;
+    note='가용성 '+avail+'% (<99) + 파드가 상한 '+mx+'개에 붙어 있다. 더 못 늘려서 실패한 것이므로 max_replicas 를 올린다. request 는 원인이 아니다.';}
+   else{dir='늘려 ↑';cls='bd';cause='파드 부족/스케일 지연';rmn=mn+1;rutil=Math.max(40,util-10);
+    note='가용성 '+avail+'% (<99). 상한에는 안 붙었으므로 초기 여유(min)와 스케일 속도(util) 문제다. min 을 올리고 util 을 낮춘다. request 는 건드리지 않는다.';}
+   extra='가용성 실패가 롤아웃 때문일 수도 있다. 부하 중 deployment 를 건드렸는지 먼저 확인한다(롤아웃 자체가 504 를 만든다).';
+  }
+  else if(badPerf){
+   if(atMax){dir='늘려 ↑';cls='wn';cause='파드 상한 도달';keepReq=true;rmx=mx+2;
+    note='p95 '+p95+'ms > SLO '+slo+'ms 인데 파드가 상한 '+mx+'개다. 더 늘릴 수 없어서 느린 것이므로 max_replicas 를 올린다. request 를 올리면 오히려 사용률이 낮아져 스케일이 더 늦어진다.';}
+   else if(nodeMax>=80){dir='늘려 ↑';cls='wn';cause='노드 CPU 포화';
+    rcpu=Math.max(req,fit||req);
+    note='노드 실사용 CPU 가 '+nodeMax+'% 다. 파드를 늘려도 같은 노드에서 경쟁한다. 이 경우에만 request 를 올리는 것이 유효하다 — 노드당 파드 수가 줄고 cpu.shares 가 커져 이웃에게 덜 밀린다(노드는 늘어난다).';
+    extra='노드를 늘리는 쪽이 더 직접적이다. Karpenter limits.cpu 와 노드그룹 크기를 함께 본다.';}
+   else if(u.max < req*0.5){dir='유지 (request 아님)';cls='bd';cause='CPU 병목 아님';keepReq=true;
+    note='p95 '+p95+'ms > SLO '+slo+'ms 인데 파드 실사용은 '+u.max+'m 으로 request '+req+'m 의 절반도 안 쓴다. 노드 CPU 도 '+nodeMax+'% 다. CPU 가 병목이 아니므로 request 를 올려도 전혀 나아지지 않는다(오히려 노드만 늘어 비용을 깎는다).';
+    extra='앱 밖을 봐야 한다: (1) RDS CPU·커넥션·쿼리 지연 (2) CloudFront 캐시 히트율 — 미스면 매 요청이 오리진까지 간다 (3) DB 커넥션 풀/프록시 borrow 대기 (4) 외부 호출·S3 지연. 실측 예: RDS CPU 5~10%, 읽기지연 0.4~4ms 였다면 DB 는 범인이 아니다.';}
+   else if(cur!==null&&cur<util){dir='늘려 ↑';cls='wn';cause='스케일 지연';keepReq=true;
+    rutil=Math.max(40,util-15);rmn=mn+1;
+    note='p95 초과인데 현재 사용률 '+cur+'% 가 목표 '+util+'% 아래다. 즉 HPA 가 아직 안 늘린 상태에서 지연이 났다 = 스케일이 느리다. util 을 낮춰 더 빨리 늘리고 min 으로 초반 여유를 준다. request 는 유지.';}
+   else{dir='늘려 ↑';cls='wn';cause='파드 CPU 포화';rcpu=fit||req;
+    note='파드 실사용 '+u.max+'m 이 request '+req+'m 에 근접·초과했고 노드는 여유가 있다. 실사용 피크x1.3 = '+(fit||req)+'m 으로 맞춘다(임의 배수 아님).';}
+  }
+  else{
+   // 성능·가용성 모두 통과 -> 비용 관점에서 request 를 실사용에 맞춰 내린다.
+   if(fit&&fit<req*0.9){dir='줄여 ↓';cls='gd';cause='과투자';rcpu=fit;
+    note='성능·가용성 통과. 실사용 피크 '+u.max+'m 인데 request 가 '+req+'m 로 과예약이다. 예약이 곧 노드 수이므로 '+fit+'m(피크x1.3)으로 내리면 비용이 줄고 성능은 그대로다.';}
+   else{dir='유지';cls='mut';cause='균형';
+    note='성능·가용성 통과, request '+req+'m 가 실사용 피크 '+u.max+'m 대비 적정(x1.3 기준 '+(fit||'-')+'m). 바꿀 이유가 없다.';}
+  }
+
+  rmn=Math.max(1,rmn);rmx=Math.max(rmx,rmn);sMin+=rmn;sMinCpu+=rmn*rcpu;
   var ch=[];
-  if(rcpu!==cpu)ch.push('requests.cpu <b>'+cpu+'m → '+rcpu+'m</b> '+(rcpu>cpu?'↑':'↓')+' <span class=mut>('+(rcpu>cpu?'파드 1개를 더 세게 → 꼬리지연↓ (노드↑)':'파드당 cpu 낮춰 → 노드↓ (비용↓)')+')</span>');
-  if(rutil!==util)ch.push('HPA averageUtilization <b>'+util+'% → '+rutil+'%</b> '+(rutil>util?'↑':'↓')+' <span class=mut>('+(rutil>util?'느긋하게 스케일 → 비용↓':'더 빨리·자주 파드 늘림 → 성능↑')+')</span>');
-  if(rmn!==mn)ch.push('min_replicas <b>'+mn+' → '+rmn+'</b> '+(rmn>mn?'↑':'↓')+' <span class=mut>('+(rmn>mn?'부하 초반부터 여유 → 가용성↑':'유휴 파드 줄여 → 비용↓')+')</span>');
+  if(rcpu!==req)ch.push('requests.cpu <b>'+req+'m → '+rcpu+'m</b> '+(rcpu>req?'↑':'↓')+' <span class=mut>('+(rcpu>req?'노드당 파드 수↓ · cpu.shares↑ → 경쟁 완화 (노드↑ 비용↑)':'예약 축소 → 노드↓ (비용↓)')+')</span>');
+  if(rutil!==util)ch.push('HPA averageUtilization <b>'+util+'% → '+rutil+'%</b> '+(rutil>util?'↑':'↓')+' <span class=mut>('+(rutil>util?'느긋하게 스케일 → 비용↓':'더 빨리 파드 늘림 → 지연↓')+')</span>');
+  if(rmn!==mn)ch.push('min_replicas <b>'+mn+' → '+rmn+'</b> '+(rmn>mn?'↑':'↓')+' <span class=mut>('+(rmn>mn?'초반 여유 → 가용성↑':'유휴 파드↓ → 비용↓')+')</span>');
+  if(rmx!==mx)ch.push('max_replicas <b>'+mx+' → '+rmx+'</b> ↑ <span class=mut>(상한에 막혀 있었음)</span>');
   var how=ch.length?ch.map(function(x){return '<div style="padding:3px 0">• '+x+'</div>'}).join(''):'<div class=mut>변경 없음 — 현상 유지</div>';
+  var warn=keepReq?'<div class="tip bd" style="margin-top:8px"><h3>request 는 올리지 않는다</h3><div class=why>이 증상의 원인이 CPU 예약이 아니다. request 를 올리면 HPA 사용률(=실사용/request)이 낮아져 스케일업이 늦어지고 노드만 늘어난다.</div></div>':'';
   var cmds='';
   if(ch.length){
-   var patch=JSON.stringify({spec:{minReplicas:rmn,maxReplicas:mx,metrics:[{type:"Resource",resource:{name:"cpu",target:{type:"Utilization",averageUtilization:rutil}}}]}});
-   var c='kubectl -n app set resources deploy/'+n+' --requests=cpu='+rcpu+'m\n'
-    +'kubectl -n app patch hpa '+n+' --type=merge -p \''+patch.replace(/"/g,'\\"')+'\'\n'
-    +'kubectl -n app rollout status deploy/'+n;
-   cmds='<div class=lbl style="margin-top:9px;margin-bottom:4px">즉시 적용 명령 (임시 · 재배포 시 사라짐)</div>'
+   var patch=JSON.stringify({spec:{minReplicas:rmn,maxReplicas:rmx,metrics:[{type:"Resource",resource:{name:"cpu",target:{type:"Utilization",averageUtilization:rutil}}}]}});
+   var c='';
+   if(rcpu!==req)c+='kubectl -n app set resources deploy/'+n+' --requests=cpu='+rcpu+'m\n';
+   c+='kubectl -n app patch hpa '+n+' --type=merge -p \''+patch.replace(/"/g,'\\"')+'\'';
+   if(rcpu!==req)c+='\nkubectl -n app rollout status deploy/'+n;
+   cmds='<div class=lbl style="margin-top:9px;margin-bottom:4px">임시 적용 (apply 하면 사라짐 · 부하 중 requests 변경은 롤아웃=504 주의)</div>'
     +'<pre style="margin:0;background:#f6f7f9;border:1px solid var(--line);border-radius:8px;padding:9px 11px;font-size:11.5px;white-space:pre-wrap;color:#1a1d23;overflow-x:auto">'+esc(c)+'</pre>';
   }
-  return '<div class=card><div class=lbl>'+n+' &nbsp;<span class='+cls+' style="font-weight:700">'+dir+'</span></div>'
-   +'<div class=row><span class=mut>현재</span><span>cpu <b>'+cpu+'m</b> · util '+util+'% · min '+mn+' · max '+mx+' · 파드 '+rep+'</span></div>'
-   +'<div class=row><span class=mut>측정</span><span>perf '+perf+'% · avail '+avail+'% · p95 '+p95+'ms · 현재CPU '+(cur===null?'-':cur+'%')+'</span></div>'
-   +'<div style="margin-top:9px"><div class=lbl style="margin-bottom:4px">이렇게 바꿔 (k8s_apps.tf)</div><div style="font-size:12.5px">'+how+'</div></div>'
-   +cmds
-   +'<div class=mut style="font-size:12px;margin-top:8px">근거: '+note+'</div></div>';
+  return '<div class=card><div class=lbl>'+n+' &nbsp;<span class='+cls+' style="font-weight:700">'+dir+'</span> &nbsp;<span class=mut>'+cause+'</span></div>'
+   +'<div class=row><span class=mut>설정</span><span>request <b>'+req+'m</b> · util '+util+'% · min '+mn+' · max '+mx+' · 파드 '+rep+'</span></div>'
+   +'<div class=row><span class=mut>실사용</span><span>파드 CPU 피크 <b>'+u.max+'m</b> (평균 '+u.avg+'m) · 적정 request '+(fit||'-')+'m · 노드CPU최대 '+nodeMax+'%</span></div>'
+   +'<div class=row><span class=mut>측정</span><span>perf '+perf+'% · avail '+avail+'% · p95 '+p95+'ms / SLO '+slo+'ms · HPA현재 '+(cur===null?'-':cur+'%')+'</span></div>'
+   +'<div style="margin-top:9px"><div class=lbl style="margin-bottom:4px">이렇게 바꿔 (k8s_apps.tf 에 반영)</div><div style="font-size:12.5px">'+how+'</div></div>'
+   +warn+cmds
+   +'<div class=mut style="font-size:12px;margin-top:8px">근거: '+note+'</div>'
+   +(extra?'<div class=mut style="font-size:12px;margin-top:6px">다음 확인: '+extra+'</div>':'')+'</div>';
  }).join('');
- var nMin=Math.ceil(sMinCpu/ALLOC);
+ var nMin=ALLOC>0?Math.ceil(sMinCpu/ALLOC):null;
  var summary='<div class="grid g4" style="margin-bottom:15px">'
   +'<div class=card><div class=lbl>권장 정상시 pod 합</div><div class="kpi sm">'+sMin+'</div></div>'
   +'<div class=card><div class=lbl>현재 파드 수</div><div class="kpi sm">'+D.summary.pods_total+'</div></div>'
-  +'<div class=card><div class=lbl>권장 정상시 노드(추정)</div><div class="kpi sm">'+nMin+'</div></div>'
+  +'<div class=card><div class=lbl>권장 정상시 노드(추정)</div><div class="kpi sm">'+(nMin===null?'-':nMin)+'</div><div class=mut style="font-size:11px">'+(ALLOC>0?'노드 '+ALLOC+'m 기준':'노드 할당량 미확인')+'</div></div>'
   +'<div class=card><div class=lbl>현재 노드</div><div class="kpi sm">'+D.summary.nodes_total+'</div></div></div>';
  return '<div class=lbl style="margin-bottom:9px">라이브 자동 판정 — 부하(loadtest/실트래픽) 도는 중에 봐야 정확합니다</div>'
   +summary+'<div class="grid g3">'+cards+'</div>'
-  +'<div class=mut style="margin-top:12px;font-size:12px">권장값을 k8s_apps.tf의 각 앱 requests.cpu / HPA averageUtilization / min_replicas 에 반영 후 apply. 노드 추정 = ⌈Σ(min×cpu)/1900m⌉ (t3.medium). 「줄여 ↓」=과투자(비용↓ 가능), 「늘려 ↑」=성능/가용성 부족.</div>';}
+  +'<div class="tip mut" style="margin-top:12px"><h3>이 탭이 request 를 다루는 방식</h3><div class=why>'
+  +'requests.cpu 는 노드 예약량이지 속도 상한이 아니다(user/product 는 cpu limit 없음). 그래서 "느리다"는 이유만으로 request 를 올리지 않는다. '
+  +'권장 request 는 항상 <b>실사용 피크 x 1.3</b> 이고, 올리는 처방은 <b>노드 CPU 포화</b> 또는 <b>파드 실사용이 request 에 근접</b>한 경우로 제한한다. '
+  +'실사용이 request 의 절반도 안 되는데 느리면 CPU 가 병목이 아니므로 DB·캐시·커넥션풀을 본다. '
+  +'노드 추정 = ⌈Σ(min x request) / 노드 할당가능 CPU⌉ 이고, 할당가능 CPU 는 라이브 노드의 status.allocatable 에서 읽는다(섞여 있으면 가장 작은 노드 기준). '
+  +'앱 목록·SLO·파드·노드 타입 모두 라이브에서 읽으므로 대회날 앱이나 인스턴스 타입이 바뀌어도 그대로 쓴다. 현재 노드: '+nodeTypes()+'.'
+  +'</div></div>';}
 
 // ---- WAF분석 탭: waf_header_stats.py 출력 붙여넣기 → 막을 것 + 룰 + 테스트 ----
 var WAFX_VALID=['/v1/user','/v1/product','/v1/stress','/healthcheck','/images'];
@@ -561,6 +648,14 @@ def api_smoke():
 
 
 def main():
+    # 한국어 Windows 콘솔은 기본 cp949 라서 도움말/로그의 em dash(—) 같은 문자에서
+    # UnicodeEncodeError 로 죽는다(실측: python dashboard.py --help 가 실패).
+    # 출력 스트림을 UTF-8 로 바꿔 --help 와 로그가 항상 나오게 한다.
+    for _s in (sys.stdout, sys.stderr):
+        try:
+            _s.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     global DEMO
     ap = argparse.ArgumentParser(description="3과제 모니터링 대시보드 (Flask)")
     ap.add_argument("--port", type=int, default=8080)

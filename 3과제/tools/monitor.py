@@ -222,8 +222,18 @@ def nodes_detail():
             if cc.get("type") == "Ready":
                 ready = "Ready" if cc.get("status") == "True" else "NotReady"
         t = tp.get(name, [])
+        # 할당가능 CPU(밀리코어)를 노드에서 직접 읽는다. 노드 타입이 대회날 바뀔 수 있어
+        # t3.medium(1930m) 같은 상수를 코드에 박아두면 노드 수 추정이 전부 틀어진다.
+        alloc = (it.get("status", {}).get("allocatable", {}) or {}).get("cpu")
+        alloc_m = 0
+        if alloc:
+            try:
+                alloc_m = int(alloc[:-1]) if alloc.endswith("m") else int(float(alloc) * 1000)
+            except ValueError:
+                alloc_m = 0
         out.append({"name": name, "type": lab.get("node.kubernetes.io/instance-type", "?"),
                     "karpenter": "karpenter.sh/nodepool" in lab, "ready": ready,
+                    "cpu_alloc": alloc_m,
                     "cpu": t[0] if len(t) > 0 else "-", "cpu_pct": t[1] if len(t) > 1 else "-",
                     "mem": t[2] if len(t) > 2 else "-", "mem_pct": t[3] if len(t) > 3 else "-"})
     return out

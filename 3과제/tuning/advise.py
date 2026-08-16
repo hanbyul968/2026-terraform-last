@@ -11,14 +11,28 @@
 
   <label|outdir> : loadtest.ps1 의 label (예: baseline) 또는 결과 폴더 전체 경로.
                    label 이면 %TEMP%\\tune-<label> 을 찾는다.
-  --slos         : 생략 시 user=0.2,product=0.2,stress=1.0
+  --slos         : 앱별 SLO(초). 목록에 없는 앱은 --default-slo 를 쓰고 경고를 낸다.
   (loadtest.ps1 이 끝에서 자동 호출하므로 보통 직접 칠 일은 없다)
 
-판정 기준 (채점 순서와 동일한 우선순위):
-  1) avail < 99%          → 늘려(게이트): cpu×1.5, min+1, util−5   ← 비용보다 무조건 먼저
-  2) perf < 95% 또는 p95 > SLO → 늘려: cpu×1.4, util−10 (꼬리지연)
-  3) perf ≥ 99.5% 이고 현재CPU ≪ 목표 (또는 p95 ≤ SLO×0.4) → 줄여: cpu×0.75, util+10 (과투자→비용↓)
-  4) 그 외 → 유지
+중요 — requests.cpu 는 '노드 예약량'이지 '파드 속도 상한'이 아니다:
+  cpu limit 이 없는 앱은 request 를 올려도 빨라지지 않는다. 올리면 오히려
+    (1) 노드당 파드 수가 줄어 노드가 늘고(비용 상승),
+    (2) HPA 사용률 = 실사용/request 이 작아져 스케일업이 늦어진다(성능 악화).
+  그래서 '느리다 -> cpu 올려' 는 틀린 처방이다. 아래는 실사용·노드CPU·HPA상한으로
+  원인을 먼저 구분하고, 권장 request 는 항상 실사용 피크 x 1.3 으로 계산한다.
+
+판정 기준 (가용성 > 성능 > 비용):
+  avail < 99%                          → 파드 상한이면 max+2, 아니면 min+1 · util-10 (request 유지)
+  느림 + 파드가 max 에 붙음            → max+2 (request 유지)
+  느림 + 노드CPU >= 80%                → request 올림 (노드 경쟁 완화. 이 경우만 유효)
+  느림 + 실사용 < request x 0.5        → request 유지. CPU 병목 아님 -> DB/캐시/커넥션풀 확인
+  느림 + 현재사용률 < 목표             → util-15 · min+1 (스케일 지연, request 유지)
+  느림 + 실사용이 request 에 근접      → request = 실사용피크 x 1.3
+  통과 + request >> 실사용             → request = 실사용피크 x 1.3 (과투자 -> 비용↓)
+  그 외                                 → 유지
+
+대회날 변경 대응: 앱 목록은 결과 CSV 에서, SLO 는 --slos, 노드 할당가능 CPU 와 노드 타입은
+라이브 클러스터에서 읽는다. 앱 이름·개수·인스턴스 타입이 바뀌어도 코드 수정이 필요 없다.
 """
 import argparse
 import csv
@@ -28,9 +42,12 @@ import statistics
 import subprocess
 import sys
 
-ALLOC_M = 1900  # t3.medium 할당 가능 CPU (밀리코어) — 노드 수 추정용
+# 노드 1대의 할당가능 CPU 는 상수로 두지 않는다. 대회날 인스턴스 타입이 바뀌면
+# t3.medium(1930m) 가정이 전부 틀어지므로 node_alloc_m() 으로 라이브에서 읽는다.
+ALLOC_FALLBACK_M = 1930  # 클러스터 조회 실패 시에만 쓰는 최후 기본값 (t3.medium)
 # 비용 기준선 노드 수 (config.ps1 의 $COST_BASELINE_NODES). terraform node_desired_size 와 동일.
-BASELINE_NODES = float(os.environ.get("TUNE_BASELINE_NODES", "1"))
+BASELINE_NODES = float(os.environ.get("TUNE_BASELINE_NODES", "2"))
+DEFAULT_SLO = 1.0  # --slos 에 없는 앱에 쓰는 SLO(초). 쓰이면 경고를 출력한다.
 
 
 def run(cmd, timeout=20):
@@ -53,7 +70,43 @@ def round50(v):
     return max(100, int(round(v / 50.0)) * 50)
 
 
+def right_size(peak_m):
+    """권장 request = 실사용 피크 x 1.3, 25m 단위 상향, 하한 50m.
+
+    임의 배수(x1.4 등)가 아니라 실측 피크에 헤드룸만 얹는다. request 는 예약량이라
+    실사용보다 크게 잡을수록 노드가 그만큼 늘어난다(비용).
+    """
+    if not peak_m:
+        return None
+    return max(50, -(-int(peak_m * 1.3) // 25) * 25)
+
+
 # ---------- 측정값 (loadtest CSV) ----------
+def discover_apps(outdir, slos):
+    """결과 폴더의 <앱>.csv 로 앱 목록을 만든다 (nodes.csv 제외).
+
+    대회날 앱 이름/개수가 바뀌어도 코드를 고치지 않아도 되게 하드코딩하지 않는다.
+    --slos 에 없는 앱은 DEFAULT_SLO 를 쓰고 호출부에서 경고를 낸다.
+    """
+    apps, assumed = [], []
+    try:
+        names = sorted(
+            os.path.splitext(f)[0]
+            for f in os.listdir(outdir)
+            if f.endswith(".csv") and os.path.splitext(f)[0] != "nodes"
+        )
+    except OSError:
+        names = []
+    for n in names:
+        apps.append(n)
+        if n not in slos:
+            assumed.append(n)
+    # CSV 가 없으면 --slos 에 적힌 앱이라도 시도
+    if not apps:
+        apps = list(slos.keys())
+    return apps, assumed
+
+
 def load_measures(outdir, slos):
     out = {}
     for api, slo in slos.items():
@@ -82,6 +135,68 @@ def load_nodes(outdir):
 
 
 # ---------- 라이브 상태 (kubectl) ----------
+def pod_usage(ns):
+    """{앱: 파드 CPU 피크(밀리코어)} — kubectl top pods 실측. request 판단의 근거.
+
+    파드 이름이 '<앱>-<replicaset>-<hash>' 이므로 뒤 두 토큰을 떼어 앱명을 얻는다.
+    """
+    peak = {}
+    out = run(["kubectl", "-n", ns, "top", "pods", "--no-headers"])
+    for line in out.splitlines():
+        f = line.split()
+        if len(f) < 2:
+            continue
+        app = f[0].rsplit("-", 2)[0]
+        v = cpu_m(f[1])
+        if v is None:
+            continue
+        if v > peak.get(app, 0):
+            peak[app] = v
+    return peak
+
+
+def node_cpu_max():
+    """노드 실사용 CPU 최대치(%) — '노드 경쟁' 판단용. 못 읽으면 None."""
+    mx = None
+    for line in run(["kubectl", "top", "nodes", "--no-headers"]).splitlines():
+        for tok in line.split():
+            if tok.endswith("%"):
+                try:
+                    v = int(tok[:-1])
+                except ValueError:
+                    continue
+                if mx is None or v > mx:
+                    mx = v
+                break
+    return mx
+
+
+def node_alloc_m():
+    """노드 1대의 할당가능 CPU(밀리코어). 여러 타입이 섞이면 '가장 작은 노드' 기준.
+
+    대회날 인스턴스 타입이 바뀔 수 있으므로 상수를 쓰지 않고 라이브에서 읽는다.
+    작은 쪽을 쓰는 이유: 노드 수를 과소추정하지 않기 위해서다.
+    """
+    vals = []
+    data = json.loads(run(["kubectl", "get", "nodes", "-o", "json"]) or "{}")
+    for it in data.get("items", []):
+        c = (it.get("status", {}).get("allocatable", {}) or {}).get("cpu")
+        v = cpu_m(c) if c else None
+        if v:
+            vals.append(v)
+    return min(vals) if vals else ALLOC_FALLBACK_M
+
+
+def node_types():
+    """노드 타입 구성 문자열 (추정 근거 표시용)."""
+    m = {}
+    data = json.loads(run(["kubectl", "get", "nodes", "-o", "json"]) or "{}")
+    for it in data.get("items", []):
+        lab = it.get("metadata", {}).get("labels", {})
+        k = lab.get("node.kubernetes.io/instance-type", "?")
+        m[k] = m.get(k, 0) + 1
+    return ", ".join("%s x%d" % (k, v) for k, v in sorted(m.items())) or "-"
+
 def live_state(ns):
     """앱별 {cpu(밀리코어), util, min, max, cur(현재CPU%)}; kubectl 실패 시 {}"""
     state = {}
@@ -115,26 +230,78 @@ def live_state(ns):
 
 
 # ---------- 판정 ----------
-def judge(m, cur):
-    """(방향, 권장 cpu/util/min, 근거) — m: 측정, cur: 현재 설정."""
+def judge(m, cur, peak_m=None, node_cpu=None):
+    """(방향, 원인, 권장 cpu/util/min/max, 근거, 다음확인) 을 돌려준다.
+
+    m       : 측정 {avail, perf, p95, slo}
+    cur     : 현재 설정 {cpu, util, min, max, replicas, cur}
+    peak_m  : 이 앱 파드의 실사용 CPU 피크(밀리코어) — request 판단의 핵심 근거
+    node_cpu: 노드 실사용 CPU 최대치(%) — '노드 경쟁' 여부
+
+    핵심: request 는 예약량이지 속도 상한이 아니다. 그래서 '느리다'만으로 올리지 않고,
+    노드 경쟁 / 파드 상한 / 스케일 지연 / CPU 병목 아님 을 먼저 가른다.
+    """
     cpu = cur.get("cpu") or 200
-    util = cur.get("util") or 60
+    util = cur.get("util") or 70
     mn = cur.get("min") or 2
-    curp = cur.get("cur")  # 현재 CPU 사용률(%)
+    mx = cur.get("max") or 10
+    rep = cur.get("replicas") or mn
+    curp = cur.get("cur")
+    fit = right_size(peak_m)
+    at_max = bool(mx) and rep >= mx
+    nc = node_cpu if node_cpu is not None else -1
+
     if m is None:
-        return ("관측필요", cpu, util, mn, "측정 데이터 없음 — loadtest 먼저")
-    if m["avail"] < 99:
-        return ("늘려", round50(cpu * 1.5), max(40, util - 5), mn + 1,
-                f"avail {m['avail']:.1f}% < 99 (게이트) — 용량부터, 비용은 나중")
-    if m["perf"] < 95 or m["p95"] > m["slo"]:
-        return ("늘려", round50(cpu * 1.4), max(40, util - 10), mn,
-                f"perf {m['perf']:.1f}% / p95 {m['p95']:.3f}s > SLO {m['slo']}s (꼬리지연)")
-    over = (curp is not None and curp < max(15, util * 0.4)) or (curp is None and m["p95"] <= m["slo"] * 0.4)
-    if m["perf"] >= 99.5 and over:
-        return ("줄여", round50(cpu * 0.75), min(75, util + 10), max(2, mn - 1) if mn > 2 else mn,
-                f"perf {m['perf']:.1f}% 여유 + 현재CPU {curp if curp is not None else '낮음'}% ≪ 목표 {util}% (과투자)")
-    return ("유지", cpu, util, mn,
-            f"균형 (perf {m['perf']:.1f}%, avail {m['avail']:.1f}%, p95 {m['p95']:.3f}s)")
+        return ("관측필요", "측정 없음", cpu, util, mn, mx,
+                "측정 데이터 없음 - loadtest 먼저", "")
+    if peak_m is None:
+        return ("관측필요", "실사용 측정 불가", cpu, util, mn, mx,
+                "파드 CPU 실측이 없다(metrics-server). 실사용 없이 request 판단은 추측이 된다",
+                "kubectl top pods 가 되는지 확인")
+
+    bad_avail = m["avail"] < 99
+    bad_perf = m["perf"] < 95 or m["p95"] > m["slo"]
+
+    if bad_avail:
+        # 가용성 실패는 보통 파드 수 부족/롤아웃이지 request 부족이 아니다 -> request 유지
+        if at_max:
+            return ("늘려", "파드 상한 도달", cpu, util, mn, mx + 2,
+                    f"avail {m['avail']:.1f}% < 99 이고 파드가 상한 {mx}개에 붙었다. 더 못 늘려 실패한 것",
+                    "부하 중 롤아웃이 있었는지도 확인(롤아웃 자체가 504 를 만든다)")
+        return ("늘려", "파드 부족/스케일 지연", cpu, max(40, util - 10), mn + 1, mx,
+                f"avail {m['avail']:.1f}% < 99. 상한엔 안 붙었으니 초기 여유(min)와 스케일 속도(util) 문제",
+                "부하 중 롤아웃이 있었는지도 확인(롤아웃 자체가 504 를 만든다)")
+
+    if bad_perf:
+        if at_max:
+            return ("늘려", "파드 상한 도달", cpu, util, mn, mx + 2,
+                    f"p95 {m['p95']:.3f}s > SLO {m['slo']}s 인데 파드가 상한 {mx}개다. request 를 올리면 사용률이 낮아져 스케일이 더 늦어진다",
+                    "")
+        if nc >= 80:
+            return ("늘려", "노드 CPU 포화", max(cpu, fit or cpu), util, mn, mx,
+                    f"노드 실사용 CPU {nc}%. 파드를 늘려도 같은 노드에서 경쟁한다. 이 경우에만 request 상향이 유효(노드당 파드↓, cpu.shares↑)",
+                    "노드를 늘리는 쪽이 더 직접적이다. Karpenter limits.cpu 와 노드그룹 크기를 함께 본다")
+        if peak_m < cpu * 0.5:
+            return ("유지", "CPU 병목 아님", cpu, util, mn, mx,
+                    f"p95 {m['p95']:.3f}s > SLO 인데 실사용 피크 {peak_m}m 이 request {cpu}m 의 절반도 안 된다"
+                    + (f", 노드도 {nc}%" if nc >= 0 else "") + ". CPU 가 병목이 아니라 request 를 올려도 안 나아진다(노드만 늘어 비용 손실)",
+                    "DB(RDS CPU/커넥션/쿼리지연), CloudFront 캐시 히트율, 커넥션풀 borrow 대기, 외부 호출 지연을 본다")
+        if curp is not None and curp < util:
+            return ("늘려", "스케일 지연", cpu, max(40, util - 15), mn + 1, mx,
+                    f"p95 초과인데 현재 사용률 {curp}% 가 목표 {util}% 아래다 = HPA 가 아직 안 늘린 상태에서 지연 발생",
+                    "")
+        return ("늘려", "파드 CPU 포화", fit or cpu, util, mn, mx,
+                f"실사용 피크 {peak_m}m 이 request {cpu}m 에 근접/초과, 노드는 여유. 피크x1.3 = {fit}m 으로 맞춘다",
+                "")
+
+    # 성능·가용성 통과 -> 비용 관점
+    if fit and fit < cpu * 0.9:
+        return ("줄여", "과투자", fit, util, mn, mx,
+                f"통과(perf {m['perf']:.1f}%, avail {m['avail']:.1f}%). 실사용 피크 {peak_m}m 인데 request {cpu}m 로 과예약 -> 예약이 곧 노드 수",
+                "")
+    return ("유지", "균형", cpu, util, mn, mx,
+            f"통과(perf {m['perf']:.1f}%, avail {m['avail']:.1f}%, p95 {m['p95']:.3f}s), request {cpu}m 가 실사용 피크 {peak_m}m 대비 적정",
+            "")
 
 
 def main():
@@ -147,6 +314,8 @@ def main():
     ap.add_argument("target", help="loadtest label 또는 결과 폴더 경로")
     ap.add_argument("--slos", default="user=0.2,product=0.2,stress=1.0")
     ap.add_argument("--ns", default="app")
+    ap.add_argument("--default-slo", type=float, default=DEFAULT_SLO,
+                    help="--slos 에 없는 앱에 쓸 SLO(초). 대회날 새 앱이 나와도 죽지 않게 하는 폴백")
     a = ap.parse_args()
 
     outdir = a.target
@@ -156,32 +325,55 @@ def main():
         sys.exit(f"결과 폴더 없음: {outdir} — .\\loadtest.ps1 <ep> 180s <label> 먼저")
 
     slos = {kv.split("=")[0]: float(kv.split("=")[1]) for kv in a.slos.split(",") if kv}
-    meas = load_measures(outdir, slos)
+    # 앱 목록을 결과 CSV 에서 만든다(하드코딩 금지). --slos 에 없는 앱은 기본 SLO + 경고.
+    apps, assumed = discover_apps(outdir, slos)
+    for name in apps:
+        slos.setdefault(name, a.default_slo)
+    meas = load_measures(outdir, {k: slos[k] for k in apps})
     live = live_state(a.ns)
+    peaks = pod_usage(a.ns)          # 앱별 실사용 CPU 피크 (request 판단 근거)
+    node_cpu = node_cpu_max()        # 노드 실사용 CPU 최대 % (노드 경쟁 판단)
+    alloc_m = node_alloc_m()         # 노드 할당가능 CPU (노드 수 추정 기준)
+    ntypes = node_types()
     have_live = bool(live)
 
     print("\n" + "=" * 72)
     print("  앱별 권장값 (측정: %s%s)" % (outdir, "" if have_live else " · [!] kubectl 조회 실패 - 현재값은 기본 가정"))
+    print("  노드: %s · 할당가능 %dm/대 (라이브)   노드CPU최대: %s" % (
+        ntypes, alloc_m, ("%d%%" % node_cpu) if node_cpu is not None else "미확인"))
+    if assumed:
+        print("  [!] SLO 미지정 앱: %s -> %.2fs 로 가정했다. 문제지 SLO 로 --slos 를 지정할 것"
+              % (", ".join(assumed), a.default_slo))
+    if not peaks:
+        print("  [!] 파드 CPU 실측 없음(metrics-server?) - request 권장은 보류된다")
     print("=" * 72)
 
     tf_lines = []
     sum_cpu = 0
-    for api in slos:
+    for api in apps:
         cur = live.get(api, {})
-        d, rcpu, rutil, rmn, why = judge(meas.get(api), cur)
+        peak = peaks.get(api)
+        d, cause, rcpu, rutil, rmn, rmx, why, nextchk = judge(meas.get(api), cur, peak, node_cpu)
         cpu, util = cur.get("cpu") or "?", cur.get("util") or "?"
         mn, mx = cur.get("min") or "?", cur.get("max") or 10
         mark = {"늘려": "↑", "줄여": "↓", "유지": "=", "관측필요": "?"}[d]
-        print(f"\n[{api}]  판정: {d} {mark}   ({why})")
+        print(f"\n[{api}]  판정: {d} {mark}  원인: {cause}")
         print(f"  현재: cpu={cpu}{'m' if cpu != '?' else ''} util={util}% min={mn} max={mx}"
               + (f" 파드={cur.get('replicas')}" if cur.get("replicas") else ""))
-        changed = (cur.get("cpu") != rcpu) or (cur.get("util") != rutil) or (cur.get("min") != rmn)
+        print(f"  실사용: 파드 CPU 피크 {peak if peak is not None else '-'}m"
+              + (f" · 적정 request {right_size(peak)}m" if peak else ""))
+        print(f"  근거: {why}")
+        if nextchk:
+            print(f"  다음 확인: {nextchk}")
+        if d == "유지" and cause == "CPU 병목 아님":
+            print("  [!] request 를 올리지 않는다 - 올리면 HPA 사용률이 낮아져 스케일업이 늦어지고 노드만 늘어난다")
+        changed = (cur.get("cpu") != rcpu) or (cur.get("util") != rutil) or (cur.get("min") != rmn) or (cur.get("max") != rmx)
         if d in ("유지", "관측필요") or not changed:
             print("  → 변경 없음")
             sum_cpu += (cur.get("min") or 2) * (cur.get("cpu") or 200)
             continue
-        print(f"  권장: cpu={rcpu}m util={rutil}% min={rmn} max={mx}")
-        patch = json.dumps({"spec": {"minReplicas": rmn, "maxReplicas": mx if mx != "?" else 10,
+        print(f"  권장: cpu={rcpu}m util={rutil}% min={rmn} max={rmx}")
+        patch = json.dumps({"spec": {"minReplicas": rmn, "maxReplicas": rmx if rmx != "?" else 10,
                                      "metrics": [{"type": "Resource", "resource": {"name": "cpu",
                                                   "target": {"type": "Utilization", "averageUtilization": rutil}}}]}},
                            separators=(",", ":"))
@@ -189,15 +381,20 @@ def main():
         # kubectl 에 {spec:...} 로 도착한다 → "invalid character 's' looking for beginning
         # of object key string". 큰따옴표를 \" 로 이스케이프하면 그대로 전달된다.
         patch_ps = patch.replace('"', '\\"')
-        print("  즉시 적용 (임시 - 재배포 시 사라짐):")
-        print(f"    kubectl -n {a.ns} set resources deploy/{api} --requests=cpu={rcpu}m")
+        req_changed = cur.get("cpu") != rcpu
+        print("  즉시 적용 (임시 - apply 하면 사라짐):")
+        if req_changed:
+            # requests 변경은 파드 롤아웃을 유발한다 = 부하 중이면 504 위험
+            print(f"    [주의] 아래 set resources 는 롤아웃을 일으킨다. 부하 측정 중이면 HPA 만 먼저 적용할 것")
+            print(f"    kubectl -n {a.ns} set resources deploy/{api} --requests=cpu={rcpu}m")
         print(f"    kubectl -n {a.ns} patch hpa {api} --type=merge -p '{patch_ps}'")
-        print(f"    kubectl -n {a.ns} rollout status deploy/{api}")
-        tf_lines.append(f"  {api:8}: requests.cpu = \"{rcpu}m\"   average_utilization = {rutil}   min_replicas = {rmn}")
+        if req_changed:
+            print(f"    kubectl -n {a.ns} rollout status deploy/{api}")
+        tf_lines.append(f"  {api:8}: requests.cpu = \"{rcpu}m\"   average_utilization = {rutil}   min_replicas = {rmn}   max_replicas = {rmx}")
         sum_cpu += rmn * rcpu
 
     ns_hist = load_nodes(outdir)
-    est = -(-sum_cpu // ALLOC_M) if sum_cpu else 0  # ceil
+    est = -(-sum_cpu // alloc_m) if (sum_cpu and alloc_m) else 0  # ceil, 노드 할당량은 라이브 값
     print("\n" + "-" * 72)
     if ns_hist:
         print(f"  측정 중 노드: min={min(ns_hist)} max={max(ns_hist)} avg={sum(ns_hist)/len(ns_hist):.2f}"

@@ -36,15 +36,12 @@ resource "aws_security_group" "eks_cluster" {
   }
 }
 
-resource "aws_security_group_rule" "cluster_from_nodes" {
-  type                     = "ingress"
-  from_port                = 443
-  to_port                  = 443
-  protocol                 = "tcp"
-  security_group_id        = aws_security_group.eks_cluster.id
-  source_security_group_id = aws_security_group.eks_node.id
-  description              = "Nodes to cluster API"
-}
+# NOTE: 노드 -> 컨트롤플레인 443 을 aws_security_group_rule 로 따로 두면 안 된다.
+# aws_security_group.eks_cluster 는 인라인 ingress/egress 를 쓰는데, 인라인 블록은
+# 규칙 집합 "전체"를 소유한다. 별도 rule 리소스를 함께 쓰면 매 apply 마다
+# 인라인이 그 규칙을 지우고 rule 리소스가 다시 만드는 충돌(perpetual drift)이 난다.
+# 위 인라인 ingress 의 443 / 0.0.0.0/0 이 이미 노드를 포함하므로 별도 규칙은 불필요하다.
+# (노드 <-> 컨트롤플레인 통신 자체는 EKS 가 만드는 cluster_security_group_id 가 담당한다)
 
 resource "aws_security_group" "eks_node" {
   name        = "${local.name}-eks-node-sg"

@@ -21,7 +21,10 @@ resource "aws_s3_object" "seed" {
   bucket = aws_s3_bucket.artifacts.id
   key    = "seed/load_user.dump"
   source = "${path.module}/../load_user.dump"
-  etag   = filemd5("${path.module}/../load_user.dump")
+  # etag 를 쓰면 안 된다: 덤프가 9.7MB 라 provider 가 멀티파트로 올려 S3 etag 는
+  # "<md5>-2" 형태가 되는데 filemd5() 는 단순 MD5 라 영원히 불일치 -> 매 apply 재업로드.
+  # source_hash 는 S3 etag 규칙과 무관하게 비교되므로, 파일이 실제로 바뀔 때만 올라간다.
+  source_hash = filemd5("${path.module}/../load_user.dump")
 }
 
 # db-init Job 이 S3 에서 시드를 받을 수 있게 IRSA 역할 (해당 객체 GetObject 만)

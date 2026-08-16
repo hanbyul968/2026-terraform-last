@@ -268,9 +268,24 @@ advise.py 도 request 가 안 바뀌면 `set resources`·`rollout status` 를 �
 .\autotune.ps1 -App user -DrainTimeout 240            # 드레인 상한 4분
 ```
 
-6개 조합(cpu × HPA util × min/max)을 돌려 **실제 채점 총점**으로 점수화하고, 최고 조합을
-라이브에 다시 적용한 뒤 terraform 반영값을 출력한다. 결과 폴더는 `tune-at-<조합명>` 이다
+6개 조합을 돌려 **실제 채점 총점**으로 점수화하고, 최고 조합을 라이브에 다시 적용한 뒤
+terraform 반영값을 출력한다. 결과 폴더는 `tune-at-<조합명>` 이다
 (수동 실행 라벨과 겹치지 않게 `at-` 접두사를 붙인다).
+
+탐색축은 **request(cpu) 와 HPA target(util)** 두 개다. `max` 는 모든 조합에서 20 으로 고정한다.
+
+| 조합 | cpu | util | min |
+|---|---|---|---|
+| `base` | 300m | 60 | 2 |
+| `lean-cpu` | 200m | 60 | 2 |
+| `rich-cpu` | 500m | 60 | 2 |
+| `fast-scale` | 300m | 45 | 3 |
+| `calm-scale` | 300m | 75 | 2 |
+| `cost-min` | 200m | 80 | 2 |
+
+`max` 를 탐색축에서 뺀 이유는 그것이 천장이기 때문이다. 예전 그리드는 `max` 를 6~12 로 흩뿌려서
+terraform 의 `max_replicas = 20` 을 **오히려 낮추고**, "상한에 붙어 성능이 안 나오는" 상태를 스스로
+재현했다(실측: user/stress 가 상한에 붙어 성능 각 1.0/4).
 
 각 조합 **측정 전에** 이전 조합이 띄운 노드가 회수될 때까지 기다린다(루프 안이라 6번 반복된다).
 남아 있으면 다음 조합의 `nodes_avg` 가 부풀어 비용 비교가 무의미해진다.

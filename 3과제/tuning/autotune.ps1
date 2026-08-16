@@ -55,13 +55,21 @@ if ($App) {
 }
 
 # --- 후보 그리드: name | cpu | util | min | max (모든 앱에 적용) ---
+# max 는 모든 조합에서 동일하게 넉넉히 둔다($MAXR). max 는 '천장'이라 탐색 대상이 아니다:
+#   낮으면 HPA 가 평형(총실사용/target%)에 도달하지 못해 파드마다 과부하가 걸리고,
+#   높아도 부하가 없으면 파드를 만들지 않아 비용이 늘지 않는다.
+#   실질 상한은 Karpenter NodePool 의 limits.cpu 가 잡는다.
+# 예전 그리드는 max 를 6~12 로 흩뿌려서, terraform 의 max_replicas 를 오히려 낮추고
+# '상한에 붙어 성능이 안 나오는' 상태를 스스로 재현했다(실측: user/stress 가 상한에 붙어
+# 성능 각 1.0/4). 그래서 탐색 축은 request(cpu) 와 HPA target(util) 두 개로 좁힌다.
+$MAXR = 20
 $COMBOS = @(
-  @{ name = 'baseline';       cpu = '300m'; util = 55; min = 2; max = 10 }
-  @{ name = 'lean-cpu';       cpu = '200m'; util = 55; min = 2; max = 10 }
-  @{ name = 'rich-cpu';       cpu = '500m'; util = 55; min = 2; max = 10 }
-  @{ name = 'aggressive-hpa'; cpu = '300m'; util = 45; min = 3; max = 12 }
-  @{ name = 'calm-hpa';       cpu = '300m'; util = 65; min = 2; max = 8 }
-  @{ name = 'cost-min';       cpu = '200m'; util = 65; min = 2; max = 6 }
+  @{ name = 'base';       cpu = '300m'; util = 60; min = 2; max = $MAXR }
+  @{ name = 'lean-cpu';   cpu = '200m'; util = 60; min = 2; max = $MAXR }
+  @{ name = 'rich-cpu';   cpu = '500m'; util = 60; min = 2; max = $MAXR }
+  @{ name = 'fast-scale'; cpu = '300m'; util = 45; min = 3; max = $MAXR }
+  @{ name = 'calm-scale'; cpu = '300m'; util = 75; min = 2; max = $MAXR }
+  @{ name = 'cost-min';   cpu = '200m'; util = 80; min = 2; max = $MAXR }
 )
 
 function Invoke-PatchAll {

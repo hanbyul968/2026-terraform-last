@@ -234,8 +234,16 @@ resource "kubectl_manifest" "karpenter_nodepool" {
         # 5분으로 늘려 일시적 저부하에 흔들리지 않게 한다. 부하가 진짜 끝나면 그때 회수되므로
         # 비용 ratio 손실은 노드 몇 분치로 제한된다.
         consolidateAfter = "5m"
-        # 한 번에 1대만 회수 (기본 10% 는 노드가 늘면 여러 대를 동시에 뺀다).
-        budgets = [{ nodes = "1" }]
+        # 회수 사유별로 속도를 다르게 둔다.
+        #  - Empty: 파드가 아예 없는 노드 → 지워도 중단이 없으므로 한꺼번에 회수(비용↓).
+        #  - Underutilized/Drifted: 파드가 올라가 있는 노드 → 한 번에 1대만.
+        #    (기본값 10% 는 노드가 늘면 여러 대를 동시에 빼서 재스케줄이 몰린다)
+        # 이렇게 하면 부하가 끝난 뒤 빈 노드가 1대씩 5분 간격으로 빠지는 대신
+        # 한 번에 정리되어 평균 노드 수(비용 ratio)가 줄어든다.
+        budgets = [
+          { nodes = "100%", reasons = ["Empty"] },
+          { nodes = "1", reasons = ["Underutilized", "Drifted"] },
+        ]
       }
     }
   })

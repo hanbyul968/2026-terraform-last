@@ -125,6 +125,24 @@ resource "kubernetes_job" "db_init" {
             else
               echo "user table already has $CNT rows; skipping seed"
             fi
+
+            # ---- RDS Proxy 가 실제로 쓸 수 있게 될 때까지 대기 ----
+            # aws_db_proxy_target 은 terraform 상 생성이 끝나도 타깃 상태가 수분간
+            # PENDING_PROXY_CAPACITY 로 남는다. 앱 Deployment 는 이 Job 에 depends_on 이므로
+            # 여기서 막아두면, 앱이 프록시로 붙는 시점에는 항상 준비가 끝나 있다.
+            # (헬스체크 /healthcheck 는 DB 를 보지 않아 앱이 Ready 로 뜨고 500 을 쏟는 걸 방지)
+            i=0
+            until mysql -h"$PROXY_HOST" -P"$MYSQL_PORT" -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" -e "SELECT 1" >/dev/null 2>&1; do
+              i=$((i+1))
+              if [ "$i" -gt 120 ]; then
+                echo "ERROR: RDS Proxy($PROXY_HOST) 로 접속하지 못했습니다 (10분 초과)." >&2
+                echo "  aws rds describe-db-proxy-targets --db-proxy-name <proxy> 로 TargetHealth 확인" >&2
+                exit 1
+              fi
+              echo "waiting for RDS Proxy ($PROXY_HOST) ... $i"
+              sleep 5
+            done
+            echo "RDS Proxy ready"
             EOT
           ]
           # db_init는 프록시가 아니라 RDS에 직접 접속한다: 프록시 인증을 고치는 ALTER를
@@ -132,6 +150,11 @@ resource "kubernetes_job" "db_init" {
           env {
             name  = "MYSQL_HOST"
             value = aws_db_instance.this.address
+          }
+          # 위 대기 루프에서 프록시 준비 확인에 사용 (앱이 쓰는 엔드포인트와 동일).
+          env {
+            name  = "PROXY_HOST"
+            value = aws_db_proxy.this.endpoint
           }
           env_from {
             secret_ref { name = kubernetes_secret.db.metadata[0].name }
@@ -152,7 +175,8 @@ resource "kubernetes_job" "db_init" {
 
   wait_for_completion = true
   timeouts {
-    create = "15m"
+    # 스키마 + 시드(10MB 덤프) + RDS Proxy 준비 대기(최대 10분)를 모두 포함한다.
+    create = "25m"
   }
 
   depends_on = [aws_db_instance.this, aws_db_proxy_target.this, aws_eks_node_group.main, aws_s3_object.seed]

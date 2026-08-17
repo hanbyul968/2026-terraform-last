@@ -85,20 +85,34 @@ Write-Host ""
 Write-Host "A. 정상 요청 (2xx)" -ForegroundColor White
 Test-Code 'GET healthcheck' '2xx' @("$EP$HC_PATH")
 
+# config.ps1 의 API 는 두 형태를 가질 수 있다:
+#   path    : 완성된 경로 (예: stress)
+#   pathFmt + keys : {KEY} 자리에 키를 넣어 쓰는 형태 (부하를 여러 키로 분산하기 위함)
+# verify 는 '응답코드 규약' 만 보므로 키 하나만 쓰면 된다. 첫 키로 경로를 만든다.
+# (이 헬퍼가 없으면 pathFmt 만 있는 API 에서 경로가 빈 문자열이 되어 전부 404 가 된다)
+function Get-ApiPath($a) {
+  if ($a.path) { return $a.path }
+  if ($a.pathFmt) {
+    $k = if ($a.keys -and $a.keys.Count -gt 0) { $a.keys[0] } else { '' }
+    return $a.pathFmt.Replace('{KEY}', $k)
+  }
+  return ''
+}
+
 foreach ($a in $APIS) {
   if ($a.method -eq 'GET') {
-    Test-Code "GET $($a.name)" '2xx' @("$EP$($a.path)")
+    Test-Code "GET $($a.name)" '2xx' @("$EP$(Get-ApiPath $a)")
   } else {
     $bf = Join-Path $env:TEMP "verify-$($a.name).json"
     $a.body | Set-Content -Path $bf -Encoding ascii -NoNewline
-    Test-Code "$($a.method) $($a.name)" '2xx' @('-X', $a.method, '-H', 'Content-Type: application/json', '--data-binary', "@$bf", "$EP$($a.path)")
+    Test-Code "$($a.method) $($a.name)" '2xx' @('-X', $a.method, '-H', 'Content-Type: application/json', '--data-binary', "@$bf", "$EP$(Get-ApiPath $a)")
   }
 }
 
 # ---------- B. 유효 경로 + 비정상 요청 → 403 ----------
 # 대상 경로는 config.ps1 의 APIS 에서 가져온다 (스펙이 바뀌면 config 만 고치면 됨).
-$validPath = ($APIS | Where-Object { $_.method -eq 'GET' } | Select-Object -First 1).path
-if (-not $validPath) { $validPath = $APIS[0].path }
+$validPath = Get-ApiPath (($APIS | Where-Object { $_.method -eq 'GET' } | Select-Object -First 1))
+if (-not $validPath) { $validPath = Get-ApiPath $APIS[0] }
 
 Write-Host ""
 Write-Host "B. 유효 경로 + 비정상 요청 (403)" -ForegroundColor White
@@ -109,7 +123,7 @@ Test-Code 'path traversal in query'  '403' @("$EP$validPath&f=/etc/passwd")
 $injBody = Join-Path $env:TEMP 'verify-inj.json'
 '{"requestid":"1","uuid":"u","username":{"$ne":null},"email":"x@x.org"}' | Set-Content -Path $injBody -Encoding ascii -NoNewline
 # POST 대상도 config 에서 유도 (api_prefix 가 /v2 로 바뀌어도 따라간다).
-$postTarget = ($APIS | Select-Object -First 1).path -replace '\?.*$', ''
+$postTarget = (Get-ApiPath ($APIS | Select-Object -First 1)) -replace '\?.*$', ''
 Test-Code 'NoSQL injection body'     '403' @('-X', 'POST', '-H', 'Content-Type: application/json', '--data-binary', "@$injBody", "$EP$postTarget")
 
 # ---------- C. 미정의 경로 → 404 ----------

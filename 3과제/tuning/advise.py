@@ -283,11 +283,9 @@ def recommendation(measurement, cpu, current, node_cpu):
     actual_trigger = recommended_request * recommended_target / 100.0
     needed = max(2, int(math.ceil(cpu["total_p90"] / max(actual_trigger, 1.0))))
 
-    recommended_min = minimum
-    if perf < 30 or avail < 99:
-        recommended_min = max(minimum + 2, int(math.ceil(cpu["pods_p50"] * 0.50)))
-    elif perf < 70:
-        recommended_min = max(minimum + 1, int(math.ceil(cpu["pods_p50"] * 0.40)))
+    # 비용 기준선은 관리형 2노드다. min을 올리면 유휴 시에도 앱 Pod가 2노드 용량을 넘어
+    # Karpenter 노드를 붙잡을 수 있으므로 모든 앱의 권장 minReplicas는 항상 2로 고정한다.
+    recommended_min = 2
 
     recommended_max = maximum
     if needed > maximum:

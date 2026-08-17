@@ -223,7 +223,7 @@ function vCalc(){
   var atMax=(mx>0&&rep>=mx);
   var badAvail=(avail!==undefined&&avail!==null&&avail<99);
   var badPerf=((perf!==undefined&&perf!==null&&perf<95)||(slo&&p95>slo));
-  var dir,cls,cause,note,rcpu=req,rutil=util,rmn=mn,rmx=mx,keepReq=false,extra='';
+  var dir,cls,cause,note,rcpu=req,rutil=util,rmn=2,rmx=mx,keepReq=false,extra='';
 
   if(!a.total){dir='관측 필요';cls='mut';cause='요청 없음';
    note='이 앱에 들어온 요청이 0건이라 판단할 수 없다. loadtest 로 부하를 준 상태에서 다시 본다.';}
@@ -232,10 +232,10 @@ function vCalc(){
   else if(badAvail){
    // 가용성은 최우선 게이트. 가용성 실패는 보통 '파드 수 부족/롤아웃/에러'이지 request 부족이 아니다.
    keepReq=true;
-   if(atMax){dir='늘려 ↑';cls='bd';cause='파드 상한 도달';rmx=mx+2;rmn=mn;
+   if(atMax){dir='늘려 ↑';cls='bd';cause='파드 상한 도달';rmx=mx+2;rmn=2;
     note='가용성 '+avail+'% (<99) + 파드가 상한 '+mx+'개에 붙어 있다. 더 못 늘려서 실패한 것이므로 max_replicas 를 올린다. request 는 원인이 아니다.';}
-   else{dir='늘려 ↑';cls='bd';cause='파드 부족/스케일 지연';rmn=mn+1;rutil=Math.max(40,util-10);
-    note='가용성 '+avail+'% (<99). 상한에는 안 붙었으므로 초기 여유(min)와 스케일 속도(util) 문제다. min 을 올리고 util 을 낮춘다. request 는 건드리지 않는다.';}
+   else{dir='늘려 ↑';cls='bd';cause='파드 부족/스케일 지연';rmn=2;rutil=Math.max(40,util-10);
+    note='가용성 '+avail+'% (<99). 상한에는 안 붙었으므로 스케일 속도(util) 문제다. min은 비용 회수를 위해 2로 고정하고 util을 낮춘다. request는 건드리지 않는다.';}
    extra='가용성 실패가 롤아웃 때문일 수도 있다. 부하 중 deployment 를 건드렸는지 먼저 확인한다(롤아웃 자체가 504 를 만든다).';
   }
   else if(badPerf){
@@ -249,8 +249,8 @@ function vCalc(){
     note='p95 '+p95+'ms > SLO '+slo+'ms 인데 파드 실사용은 '+u.max+'m 으로 request '+req+'m 의 절반도 안 쓴다. 노드 CPU 도 '+nodeMax+'% 다. CPU 가 병목이 아니므로 request 를 올려도 전혀 나아지지 않는다(오히려 노드만 늘어 비용을 깎는다).';
     extra='앱 밖을 봐야 한다: (1) RDS CPU·커넥션·쿼리 지연 (2) CloudFront 캐시 히트율 — 미스면 매 요청이 오리진까지 간다 (3) DB 커넥션 풀/프록시 borrow 대기 (4) 외부 호출·S3 지연. 실측 예: RDS CPU 5~10%, 읽기지연 0.4~4ms 였다면 DB 는 범인이 아니다.';}
    else if(cur!==null&&cur<util){dir='늘려 ↑';cls='wn';cause='스케일 지연';keepReq=true;
-    rutil=Math.max(40,util-15);rmn=mn+1;
-    note='p95 초과인데 현재 사용률 '+cur+'% 가 목표 '+util+'% 아래다. 즉 HPA 가 아직 안 늘린 상태에서 지연이 났다 = 스케일이 느리다. util 을 낮춰 더 빨리 늘리고 min 으로 초반 여유를 준다. request 는 유지.';}
+    rutil=Math.max(40,util-15);rmn=2;
+    note='p95 초과인데 현재 사용률 '+cur+'% 가 목표 '+util+'% 아래다. 즉 HPA가 아직 안 늘린 상태에서 지연이 났다 = 스케일이 느리다. min은 비용 회수를 위해 2로 고정하고 util을 낮춰 더 빨리 늘린다. request는 유지.';}
    else{dir='늘려 ↑';cls='wn';cause='파드 CPU 포화';rcpu=fit||req;
     note='파드 실사용 '+u.max+'m 이 request '+req+'m 에 근접·초과했고 노드는 여유가 있다. 실사용 피크x1.3 = '+(fit||req)+'m 으로 맞춘다(임의 배수 아님).';}
   }
@@ -423,7 +423,8 @@ function tuneParse(text){
     var mx=field(body,/(?:max_?replicas|max)\s*=\s*(\d+)/i);
     // 부분값에 임의 기본값을 채우면 기존 설정을 망칠 수 있으므로 네 값이 모두 있어야 인정한다.
     if(cpu===null||util===null||mn===null||mx===null)return null;
-    return {app:app,cpu:cpu+'m',util:util,min:mn,max:mx};
+    // 비용 기준선이 관리형 2노드이므로 붙여넣은 값과 무관하게 minReplicas는 2로 고정한다.
+    return {app:app,cpu:cpu+'m',util:util,min:2,max:mx};
   }
   function add(x){
     if(!x)return;
@@ -432,7 +433,7 @@ function tuneParse(text){
   }
 
   // 1) 하단 Terraform 반영 줄 / 화살표 요약 — 필드 순서는 자유롭다.
-  // stress: requests.cpu="375m", min_replicas=3, max_replicas=17, average_utilization=52
+  // stress: requests.cpu="375m", min_replicas=2, max_replicas=17, average_utilization=52
   // user → cpu=200m util=50% min=3 max=17
   var row=/^[\s#]*([a-z0-9][a-z0-9-]*)\s*(?::|→|->)\s*([^\r\n]+)$/gim;
   while((m=row.exec(text))!==null)add(parseFields(m[1],m[2]));
@@ -508,7 +509,7 @@ function tuneRun(){
 function vTuneApply(){
   return '<div class=card><h2>튜닝적용 — 앱별 권장값으로 적용 명령 만들기</h2>'
    +'<div class=mut style="font-size:12px;margin-bottom:9px"><code>.\\autotune.ps1 -Result baseline</code> 출력의 <b>「수동 반영할 값」 앱별 줄</b>을 붙여넣고 [명령 생성]. 출력에 없는 앱은 적용 대상에서 제외합니다. 대시보드는 값을 자동 적용하지 않습니다.</div>'
-   +'<textarea id=tune_in placeholder=\'예) stress: requests.cpu="375m", min_replicas=3, max_replicas=17, average_utilization=52\nuser: requests.cpu="200m", min_replicas=3, max_replicas=17, average_utilization=50\' style="width:100%;height:130px;background:#f6f7f9;color:#1a1d23;border:1px solid var(--line);border-radius:8px;padding:10px;font-size:12px;font-family:monospace"></textarea>'
+   +'<textarea id=tune_in placeholder=\'예) stress: requests.cpu="375m", min_replicas=2, max_replicas=17, average_utilization=52\nuser: requests.cpu="200m", min_replicas=2, max_replicas=17, average_utilization=50\' style="width:100%;height:130px;background:#f6f7f9;color:#1a1d23;border:1px solid var(--line);border-radius:8px;padding:10px;font-size:12px;font-family:monospace"></textarea>'
    +'<button onclick="tuneRun()" style="margin-top:10px">명령 생성</button>'
    +'<div id=tune_out style="margin-top:15px"></div></div>';}
 

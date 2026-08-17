@@ -47,7 +47,7 @@ class RecommendationTests(unittest.TestCase):
         result = advise.recommendation(measurement, cpu, current, 103)
         self.assertEqual(result["request"], 200)
         self.assertEqual(result["target"], 47)
-        self.assertEqual(result["min"], 4)
+        self.assertEqual(result["min"], 2)
         self.assertEqual(result["max"], 17)
         self.assertGreater(result["needed"], current["max"])
 

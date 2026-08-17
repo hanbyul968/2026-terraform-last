@@ -12,7 +12,7 @@
 | | **합계** | | **30** |
 
 > **핵심 설계**: `terraform apply` **한 번**으로 4개 리전 인프라 전부 + 오레곤 in-VPC **bastion EC2**까지 생성됩니다.
-> bastion 이 부팅하면서 **CoreDNS(Fargate) 패치 → KEDA/Karpenter 설치 → Worker 이미지 build/push → K8s 리소스 apply**(`k8s-apply.sh`)를 자동 실행합니다.
+> 모듈4 bastion 이 부팅하면서 **CoreDNS(Fargate) 패치 → KEDA/Karpenter 설치 → Worker 이미지 build/push → K8s 리소스 apply**(`k8s-apply.sh`)를 자동 실행합니다.
 > 모든 앱 소스는 terraform 이 `base64gzip` 으로 user_data 에 인라인 주입 → 런타임에 외부 저장소(GitHub 등) 의존 없음(self-contained). Windows/CloudShell/bastion 어디서 apply 해도 동일하게 동작.
 
 ---
@@ -33,32 +33,66 @@ cd C:\Users\competitor\2026-terraform\2과제\08
 
 ---
 
-## 1. 단일 apply (인프라 전부 + bastion)
+## 1. 배포 — 두 방법 중 택1
+
+### 방법 A (권장) — 로컬에서 바로 apply
 
 ```powershell
+cd C:\Users\competitor\2026-terraform\2과제\08
 terraform init
 terraform apply -var="docdb_password=Skills2026!" -auto-approve
 ```
 
-⏱ EKS + bastion 부트스트랩 포함 전체 ~25분. 한 번의 apply 로:
+한 번의 apply 로 아래가 전부 생성됩니다. ⏱ EKS + bastion 부트스트랩 포함 ~25분.
 
 - **모듈1** — DocumentDB Cluster/Instance + KMS + Secret + Client EC2(앱 자동 설치·seed·인덱스/TTL 생성)
 - **모듈2** — Client/Service VPC + Client/Service EC2(앱 자동 기동) + VPC Lattice(SN/Service/TG/Listener)
 - **모듈3** — VPC/EC2 + 보호 SG + SNS + Lambda + CloudTrail + EventBridge Rule
-- **모듈4** — VPC + EKS + Fargate Profile + SQS + IRSA Role + **bastion EC2**
+- **모듈4** — VPC + EKS + Fargate Profile + SQS + IRSA Role + **in-VPC bastion EC2**
 
-**bastion 이 자동으로 하는 일** (user_data → `k8s-apply.sh`):
+**모듈4 bastion 이 자동으로 하는 일** (user_data → `k8s-apply.sh`):
 CoreDNS 를 Fargate 로 패치 → KEDA/Karpenter Helm 설치 → `sqs-worker` SA/Deployment → KEDA `ScaledObject`/`TriggerAuthentication` → Karpenter `NodePool`/`EC2NodeClass` → 서브넷 태깅 → Worker 이미지 ECR build/push.
 
-> terraform 은 **인프라까지** 책임(apply 완료), bastion 의 K8s 배포는 **백그라운드로 수 분** 더 걸립니다. 아래 2번으로 완료를 확인하세요.
+> terraform 인프라 apply 는 먼저 끝나고, bastion 의 K8s 배포는 **백그라운드로 수 분** 더 걸립니다. 완료 확인은 **2장** 참고.
+
+### 방법 B — Linux 배포 bastion 경유 (멀티리전 apply 가 불편할 때)
+
+```powershell
+cd C:\Users\competitor\2026-terraform\2과제\08\bastion
+terraform init
+terraform apply -auto-approve
+terraform output -raw ssm_connect_command    # 접속 명령 확인
+```
+
+전용 VPC `10.250.0.0/16` 의 **STAGE1 배포 bastion**(SSM 접속, 키페어 불필요)이 생성되고, 로컬 코드가 S3 번들로 `/opt/task2` 에 준비됩니다.
+
+```powershell
+aws ssm start-session --target <bastion-instance-id> --region us-west-2
+```
+```bash
+# STAGE1 bastion 안에서:
+until [ -f /opt/task2/READY ]; do echo waiting...; sleep 5; done   # 준비 완료 대기(2~3분)
+bash /opt/task2/run.sh          # 루트 전체 apply (= 방법 A 를 bastion 에서 실행)
+```
+
+> `run.sh` 가 끝나면 방법 A 와 동일하게 **모듈4 in-VPC bastion** 이 이어서 생성되어 K8s 배포를 자동 수행합니다. 진행 확인은 2장 참고.
 
 ---
 
-## 2. bastion 진행상황 확인 (apply 후)
+## 2. 진행상황 확인 (bastion 로그) — ★ 로그 파일 이름 주의
 
 bastion 은 인바운드 없이 **SSM** 으로만 접속합니다(키페어 불필요).
+**어느 bastion 에 접속했는지에 따라 로그 파일 이름이 다릅니다.** (접속 IP 대역으로 구분)
+
+| bastion | VPC 대역 | 로그 파일 | 완료 마커 |
+|---|---|---|---|
+| **모듈4 in-VPC bastion** (실제 K8s 배포 수행 · 방법 A·B 공통) | `10.4.0.0/16` | `/var/log/skills-bastion-bootstrap.log` | `BASTION_BOOTSTRAP_DONE` |
+| **STAGE1 배포 bastion** (방법 B 에서만) | `10.250.0.0/16` | `/var/log/bastion-bootstrap.log` | `/opt/task2/READY` |
+
+### (A) 모듈4 in-VPC bastion — K8s 배포 로그 확인
 
 ```powershell
+# 방법 A 는 루트(08)에서, 방법 B 는 STAGE1 bastion 의 /opt/task2 에서 실행
 $BASTION = terraform output -raw bastion_instance_id
 aws ssm start-session --target $BASTION --region us-west-2
 ```
@@ -71,11 +105,17 @@ kubectl get pod -n keda
 kubectl get pod -n karpenter
 kubectl get deploy sqs-worker -n skills-sqs
 ```
+> 재실행이 필요하면 (멱등, 외부 repo 불필요): `cd /root/task2 && bash k8s-apply.sh`
 
-> **재실행이 필요하면** (멱등, 외부 repo 불필요):
-> ```bash
-> cd /root/task2 && bash k8s-apply.sh
-> ```
+### (B) STAGE1 배포 bastion (방법 B, IP 가 `10.250.x` 인 경우)
+
+이 bastion 에는 `skills-bastion-bootstrap.log` 가 **없습니다**(그건 모듈4 bastion 로그). 여기선:
+```bash
+sudo tail -f /var/log/bastion-bootstrap.log        # 이 bastion 의 부트스트랩 로그
+until [ -f /opt/task2/READY ]; do sleep 5; done     # READY 대기
+bash /opt/task2/run.sh                              # 루트 apply → 모듈4 bastion 생성
+```
+`run.sh` 완료 후 위 (A) 절차로 모듈4 bastion 에 접속해 `skills-bastion-bootstrap.log` 를 확인합니다.
 
 ---
 
@@ -128,8 +168,9 @@ aws ec2 describe-security-groups --region ap-southeast-1 \
   --filters Name=tag:Name,Values=skills-ceh-protected-sg --query "SecurityGroups[].IpPermissions" --output json
 # 3-3 SNS/Lambda(runtime python3.12 / handler / timeout>=30 / env)
 aws lambda get-function-configuration --region ap-southeast-1 --function-name skills-ceh-remediate-fn --output table
-# 3-4 CloudTrail logging / EventBridge Rule / Target
+# 3-4 CloudTrail logging / EventBridge Rule / Target / Lambda Resource Policy
 aws cloudtrail get-trail-status --region ap-southeast-1 --name skills-ceh-cloudtrail --output table
+aws lambda get-policy --region ap-southeast-1 --function-name skills-ceh-remediate-fn --query Policy --output text
 
 # 3-5 기능검증: 임시 Inbound 추가 → Lambda 호출 → 180초 내 0개 복구 + 로그 생성
 SG=$(aws ec2 describe-security-groups --region ap-southeast-1 --filters Name=tag:Name,Values=skills-ceh-protected-sg --query "SecurityGroups[0].GroupId" --output text)
@@ -139,6 +180,7 @@ aws lambda invoke --region ap-southeast-1 --function-name skills-ceh-remediate-f
   --cli-binary-format raw-in-base64-out --payload file:///tmp/ev.json /tmp/out.json
 aws ec2 describe-security-groups --region ap-southeast-1 --group-ids "$SG" --query "SecurityGroups[0].IpPermissions" --output json
 ```
+> 3-4 는 EventBridge → Lambda **리소스 기반 정책**(`get-policy`)까지 확인합니다. 콘솔에서 규칙 대상만 지정하면 자동 추가 안 될 수 있으니, 없으면 `aws lambda add-permission --principal events.amazonaws.com --source-arn <rule-arn> ...` 로 부여.
 
 ### 모듈4 — SQS Scaling (us-west-2)
 
@@ -158,6 +200,7 @@ for i in $(seq 1 12); do aws sqs send-message --region us-west-2 --queue-url "$Q
 kubectl get pods -n skills-sqs -l app=sqs-worker -o wide
 kubectl get nodes -l karpenter.sh/nodepool=skills-sqs-nodepool,skills-nodepool=event-worker -o wide
 ```
+> **4-5 팁**: NodePool/EC2NodeClass 는 상시 존재하지만 "Worker EC2 Node·Worker Pod 배치" 는 유휴(min 0) 상태에서 비어 보입니다. 확실히 하려면 **4-6 부하를 준 상태**에서 4-5 의 `get nodes -l ...` / `get pods -n skills-sqs` 를 실행하세요.
 
 ---
 
@@ -180,7 +223,7 @@ kubectl get nodes -l karpenter.sh/nodepool=skills-sqs-nodepool,skills-nodepool=e
 - VPC `10.73.0.0/16`, EC2 `skills-ceh-ec2`, 보호 SG `skills-ceh-protected-sg`(**최종 Inbound 0개**)
 - SNS `skills-ceh-alert-topic`(Standard)
 - Lambda `skills-ceh-remediate-fn`: 제공 `remediate_security_group.py`, **Python 3.12 / handler `remediate_security_group.lambda_handler` / timeout 30초**, env `PROTECTED_SECURITY_GROUP_ID`·`SNS_TOPIC_ARN`, IAM(SG 조회·수정 / SNS Publish / Logs) → Inbound 전량 revoke + SNS 발행 + 로그 기록
-- CloudTrail `skills-ceh-cloudtrail`(**enable_logging=true, 관리 이벤트 명시 로깅**) + EventBridge Rule `skills-ceh-sg-change-rule`(default bus, `AuthorizeSecurityGroupIngress` 패턴, Target=Lambda)
+- CloudTrail `skills-ceh-cloudtrail`(**enable_logging=true, 관리 이벤트 명시 로깅**) + EventBridge Rule `skills-ceh-sg-change-rule`(default bus, `AuthorizeSecurityGroupIngress` 패턴, Target=Lambda, **Lambda resource policy 로 events.amazonaws.com invoke 허용**)
 
 ### 모듈4 (`module4.tf`, `k8s-apply.sh`, `app/module4/`)
 - VPC `10.4.0.0/16`(Public/Private 각 2 AZ, NAT) — EKS `skills-sqs-cluster`(**Public Endpoint** → CloudShell kubectl 접근)
@@ -217,25 +260,7 @@ kubectl get nodes -l karpenter.sh/nodepool=skills-sqs-nodepool,skills-nodepool=e
 
 ---
 
-## 6. (선택) 옵션 B — Linux bastion 에서 루트 전체 apply
-
-Windows 에서 멀티리전 apply 가 불편하면 `bastion/` 을 먼저 apply → 배포 전용 Linux bastion(전용 VPC `10.250.0.0/16`, SSM 접속)이 생성되고 로컬 코드가 S3 번들로 `/opt/task2` 에 준비됩니다.
-
-```powershell
-cd C:\Users\competitor\2026-terraform\2과제\08\bastion
-terraform init; terraform apply -auto-approve
-terraform output ssm_connect_command
-aws ssm start-session --target <bastion-instance-id> --region us-west-2
-```
-```bash
-until [ -f /opt/task2/READY ]; do echo waiting...; sleep 5; done
-bash /opt/task2/run.sh      # = terraform init && apply (루트 전체)
-```
-> 채점 대상 리소스와 배포용 bastion 의 state 는 분리되어 있어, 로컬에서 `cd bastion; terraform destroy` 로 bastion 만 안전하게 제거할 수 있습니다.
-
----
-
-## 7. 트러블슈팅
+## 6. 트러블슈팅
 
 **① CoreDNS 가 Fargate 에 안 떠 DNS 실패 (`... :53: connection refused`)**
 EKS-Fargate 고질 이슈. `k8s-apply.sh` 가 맨 앞에서 자동 패치(CoreDNS 의 `eks.amazonaws.com/compute-type: ec2` 어노테이션 제거). 수동:
@@ -258,9 +283,13 @@ aws eks associate-access-policy --region us-west-2 --cluster-name skills-sqs-clu
 
 **④ Worker Pod 가 Fargate 로 스케줄됨** — `skills-sqs` 네임스페이스에는 Fargate Profile 이 없어야 하며, nodeSelector 로 Karpenter EC2 노드에만 스케줄됩니다.
 
+**⑤ `skills-bastion-bootstrap.log` 가 없다 (`No such file or directory`)** — 접속한 bastion 을 잘못 본 것입니다(2장 표 참고).
+- 접속 IP 가 `10.250.x` = **STAGE1 배포 bastion** → 로그는 `/var/log/bastion-bootstrap.log`. `skills-*` 로그는 아직 없음 → `/opt/task2/READY` 대기 후 `bash /opt/task2/run.sh` 로 **모듈4 bastion** 을 먼저 생성해야 함.
+- 접속 IP 가 `10.4.x` = **모듈4 bastion** → 여기서만 `/var/log/skills-bastion-bootstrap.log` 존재. 부팅 직후라면 아직 파일 생성 전일 수 있으니 잠시 후 재시도(또는 `sudo tail -f /var/log/cloud-init-output.log`).
+
 ---
 
-## 8. 대회 당일 변경 대응 (최대 30% 변경 상정)
+## 7. 대회 당일 변경 대응 (최대 30% 변경 상정)
 
 `skills-*` 고정 이름은 유지. 값만 아래 위치에서 수정합니다.
 
@@ -288,13 +317,15 @@ VPC/서브넷 CIDR, SQS Visibility(`aws_sqs_queue.m4` = 60), Bastion 인스턴�
 
 ---
 
-## 9. Bastion 네트워크 & 정리
+## 8. Bastion 네트워크 & 정리
 
-- **네트워크**: 전용 VPC `10.250.0.0/16` + 퍼블릭 서브넷 + IGW. (이 계정엔 default VPC 가 없어 bastion 이 자체 VPC 생성. 접속은 SSM 아웃바운드 443 만 사용.)
+- **모듈4 in-VPC bastion**: 모듈4 VPC(`10.4.0.0/16`) 안에 생성, K8s 배포 수행. SSM 접속, 로그 `/var/log/skills-bastion-bootstrap.log`.
+- **STAGE1 배포 bastion**(방법 B): 전용 VPC `10.250.0.0/16` + 퍼블릭 서브넷 + IGW. (이 계정엔 default VPC 가 없어 자체 VPC 생성. 접속은 SSM 아웃바운드 443 만 사용.) 로그 `/var/log/bastion-bootstrap.log`.
 - **AMI**: 표준 AL2023(`al2023-ami-2023.*`) — minimal AMI 는 SSM 에이전트 없어 제외.
 - **삭제**:
 ```powershell
+# 방법 B 로 만든 STAGE1 배포 bastion 만 제거 (채점 대상 리소스와 state 분리)
 cd C:\Users\competitor\2026-terraform\2과제\08\bastion
-terraform destroy -auto-approve   # 배포용 bastion 만 제거(채점 대상과 state 분리)
+terraform destroy -auto-approve
 ```
 > ⚠️ 경기 종료 후 채점·이의신청 완료 전까지 생성 리소스를 삭제/수정하지 마세요.

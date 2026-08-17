@@ -19,7 +19,7 @@
     (1) 노드당 파드 수가 줄어 노드가 늘고(비용 상승),
     (2) HPA 사용률 = 실사용/request 이 작아져 스케일업이 늦어진다(성능 악화).
   그래서 '느리다 -> cpu 올려' 는 틀린 처방이다. 아래는 실사용·노드CPU·HPA상한으로
-  원인을 먼저 구분하고, 권장 request 는 항상 실사용 피크 x 1.3 으로 계산한다.
+  원인을 먼저 구분하고, request 후보는 활성 창의 같은 시각 총CPU/파드수를 HPA 목표로 역산한다.
 
 판정 기준 (가용성 > 성능 > 비용):
   avail < 99%                          → 파드 상한이면 max+2, 아니면 min+1 · util-10 (request 유지)
@@ -27,8 +27,8 @@
   느림 + 노드CPU >= 80%                → request 올림 (노드 경쟁 완화. 이 경우만 유효)
   느림 + 실사용 < request x 0.5        → request 유지. CPU 병목 아님 -> DB/캐시/커넥션풀 확인
   느림 + 현재사용률 < 목표             → util-15 · min+1 (스케일 지연, request 유지)
-  느림 + 실사용이 request 에 근접      → request = 실사용피크 x 1.3
-  통과 + request >> 실사용             → request = 실사용피크 x 1.3 (과투자 -> 비용↓)
+  느림 + 실사용이 request 에 근접      → request = 파드평균 CPU p90 / HPA 목표율
+  통과 + request >> 역산 후보           → 활성 창이 검증된 경우에만 후보 제시 -> A/B 재측정
   그 외                                 → 유지
 
 대회날 변경 대응: 앱 목록은 결과 CSV 에서, SLO 는 --slos, 노드 할당가능 CPU 와 노드 타입은
@@ -168,22 +168,22 @@ def next_band(v):
     return tgt, round(tgt - v, 2)
 
 
-def right_size(base_m):
-    """권장 request = 기준 사용량 x 1.2, 25m 단위 상향, 하한 50m.
+def right_size(base_m, target_util=70):
+    """파드당 평균 CPU p90을 HPA 목표 사용률로 역산해 request 후보를 만든다.
 
-    기준값으로 p95 를 쓰지 않는 이유(실측):
-      stress 의 분포가 p50 382m / p95 1064m / max 1343m 로 꼬리가 두꺼웠다.
-      p95x1.3 = 1400m 을 권고하면 파드 하나가 t3.medium 의 70% 를 예약해 노드가 폭증한다.
-      p95 는 개별 파드가 어쩌다 도달하는 값이고 모든 파드가 동시에 그 값을 쓰지 않는다
-      (동시 총사용량 실측: stress 10파드 합계 3.6코어 = 파드당 평균 360m).
-    HPA 가 있으면 총 예약량은 '총실사용 / target%' 로 수렴하므로 request 는 노드 수를
-    좌우하지 않고 '파드 크기'만 정한다. 그래서 전형값(p90)에 얇은 헤드룸만 얹는다.
-    request 가 실사용보다 지나치게 작을 때만 문제가 되는데(사용률이 수백 % 로 튀어
-    HPA 가 max 에 붙어 평형에 도달하지 못한다), p90x1.2 면 그 구간을 피한다.
+        request = p90(per-tick total CPU / running pods) / (target_util / 100)
+
+    이 식은 앱 이름·현재 request·파드 수에 하드코딩되지 않는다. 같은 시각의 총 CPU와
+    파드 수를 먼저 묶으므로 "파드가 많아져 개별 표본 p90이 작아지는" 오류를 피한다.
+    결과는 scheduler/HPA가 다루기 쉬운 25m 단위 상향, 최소 50m다.
+
+    단, loadwindows/loadplan이 있는 정상 부하 실행에서만 자동 권고에 쓴다. 구버전 결과나
+    유휴 표본에는 적용하지 않는다. 적용 후에는 반드시 같은 부하로 A/B 재측정한다.
     """
-    if not base_m:
+    if not base_m or not target_util:
         return None
-    return max(50, -(-int(base_m * 1.2) // 25) * 25)
+    raw = float(base_m) / (float(target_util) / 100.0)
+    return max(50, int(-(-raw // 25) * 25))
 
 
 # ---------- 측정값 (loadtest CSV) ----------
@@ -192,7 +192,7 @@ def right_size(base_m):
 #   podcpu.csv : 파드 CPU 실사용 타임라인
 # 실측 사고: podcpu.csv 를 추가했더니 앱 이름 'podcpu' 로 잡혀 load_measures 가
 # hey CSV 로 읽다가 KeyError: 'response-time' 로 죽었다.
-META_CSV = {"nodes", "podcpu"}
+META_CSV = {"nodes", "podcpu", "nodecpu", "loadplan", "loadwindows"}
 
 
 def is_app_csv(path):
@@ -271,44 +271,92 @@ def load_nodes(outdir):
 
 
 # ---------- 라이브 상태 (kubectl) ----------
+def load_active_windows(outdir):
+    """loadwindows.csv -> {app: (start_epoch, active_end_epoch)}.
+
+    Start-Process로 실제 hey를 시작한 구간만 CPU 산정에 쓴다. 이 파일이 없던 구버전
+    결과는 전체 창을 쓰되, 자동 request 축소는 하지 않으므로 안전하게 유지된다.
+    """
+    path = os.path.join(outdir, "loadwindows.csv")
+    try:
+        rows = csv.DictReader(open(path, encoding="utf-8", errors="replace"))
+        return {r["name"]: (float(r["start_epoch"]), float(r["active_end_epoch"])) for r in rows}
+    except (OSError, KeyError, ValueError):
+        return {}
+
+
+def load_plans(outdir):
+    """loadplan.csv의 의도 부하량과 실제 CSV 요청 수를 읽는다."""
+    path = os.path.join(outdir, "loadplan.csv")
+    out = {}
+    try:
+        for r in csv.DictReader(open(path, encoding="utf-8", errors="replace")):
+            out[r["name"]] = {k: float(r[k]) for k in (
+                "duration_seconds", "concurrency", "qps_per_worker",
+                "expected_qps", "expected_requests", "jobs")}
+    except (OSError, KeyError, ValueError):
+        return {}
+    return out
+
+
 def usage_from_window(outdir, apps=None):
-    """{앱: {p50, p90, p95, max, n}} — 부하 중 5초마다 남긴 podcpu.csv 에서 계산.
+    """앱별 부하 활성 창 CPU 통계.
 
-    apps 를 주면 그 목록에 있는 앱만 집계한다. podcpu.csv 는 네임스페이스의 '모든' 파드를
-    담기 때문에, 진단용으로 띄운 파드까지 앱으로 잡힌다(실측: latprobe 라는 앱이 생겼다).
-    대회날에도 디버그 파드·Job·사이드카가 있으면 같은 오염이 생긴다.
+    이전 구현은 파드별 표본을 전부 한 배열에 넣었다. 여러 hey Start-Job이 wave로 실행되며
+    180초 부하가 475초 이상으로 늘어난 결과, 먼저 끝난 앱의 1m 유휴 표본이 p90을 16m까지
+    낮췄고 user request를 50m로 잘못 권고했다.
 
-    request 권장값의 근거는 반드시 '부하 창 전체' 여야 한다. 부하가 끝난 뒤 kubectl top 을
-    한 번 찍는 방식은 찍히는 순간에 따라 값이 요동친다:
-      실측 사고 — 실사용이 132m 인데 스파이크 순간에 400m 로 읽혀 request 300m 를 권고했다.
-    p95 를 기준으로 삼는 이유: 최대값 하나는 단발 스파이크에 끌려가고, 평균은 피크를 놓친다.
+    이제 (1) loadwindows.csv의 실제 송신 구간만 남기고, (2) 같은 시각의 파드를 합쳐
+    클러스터 총수요와 파드당 평균을 각각 계산한다. request/HPA 사용률은 파드당 평균 p90,
+    앱 간 비용 배분은 총 CPU p90을 쓴다.
     """
     f = os.path.join(outdir, "podcpu.csv")
     if not os.path.exists(f):
         return {}
-    per = {}
+    windows = load_active_windows(outdir)
+    # {app: {timestamp: [pod cpu...]}}
+    ticks = {}
     try:
         for line in open(f, encoding="utf-8", errors="replace"):
             c = line.strip().split(",")
             if len(c) < 3:
                 continue
-            app = c[1].rsplit("-", 2)[0]
+            pod = c[1]
+            candidates = [a for a in (apps or []) if pod.startswith(a + "-")]
+            app = max(candidates, key=len) if candidates else pod.rsplit("-", 2)[0]
             if apps is not None and app not in apps:
-                continue  # 측정 대상 앱이 아닌 파드(진단용 등)는 버린다
+                continue
             try:
-                v = int(c[2])
+                ts, v = float(c[0]), int(c[2])
             except ValueError:
                 continue
-            per.setdefault(app, []).append(v)
+            if app in windows and not (windows[app][0] <= ts <= windows[app][1]):
+                continue
+            ticks.setdefault(app, {}).setdefault(ts, []).append(v)
     except OSError:
         return {}
     out = {}
-    for app, vals in per.items():
-        vals.sort()
-        out[app] = {"p50": pct_nearest(vals, 50), "p90": pct_nearest(vals, 90),
-                    "p95": pct_nearest(vals, 95), "max": vals[-1], "n": len(vals)}
+    for app, by_ts in ticks.items():
+        pod_vals = sorted(v for vals in by_ts.values() for v in vals)
+        totals = sorted(sum(vals) for vals in by_ts.values())
+        avgs = sorted(sum(vals) / len(vals) for vals in by_ts.values() if vals)
+        reps = sorted(len(vals) for vals in by_ts.values())
+        if not pod_vals:
+            continue
+        out[app] = {
+            "p50": round(pct_nearest(avgs, 50)),
+            "p90": round(pct_nearest(avgs, 90)),
+            "p95": round(pct_nearest(avgs, 95)),
+            "max": max(pod_vals), "n": len(pod_vals), "ticks": len(totals),
+            "total_p50": round(pct_nearest(totals, 50)),
+            "total_p90": round(pct_nearest(totals, 90)),
+            "total_p95": round(pct_nearest(totals, 95)),
+            "total_max": max(totals),
+            "replicas_p50": round(pct_nearest(reps, 50)),
+            "replicas_max": max(reps),
+            "windowed": app in windows,
+        }
     return out
-
 
 def pod_usage_live(ns):
     """{앱: 파드 CPU(밀리코어)} — 지금 순간값 1회. podcpu.csv 가 없을 때만 쓰는 폴백.
@@ -329,6 +377,30 @@ def pod_usage_live(ns):
         if v > peak.get(app, 0):
             peak[app] = v
     return peak
+
+
+def node_cpu_from_window(outdir):
+    """부하 중 매 tick의 노드 CPU 최대값 p90. 없으면 None."""
+    path = os.path.join(outdir, "nodecpu.csv")
+    windows = load_active_windows(outdir)
+    if not os.path.exists(path):
+        return None
+    start = min((v[0] for v in windows.values()), default=None)
+    end = max((v[1] for v in windows.values()), default=None)
+    ticks = {}
+    try:
+        for line in open(path, encoding="utf-8", errors="replace"):
+            c = line.strip().split(",")
+            if len(c) < 3:
+                continue
+            ts, pct = float(c[0]), int(c[2])
+            if start is not None and not (start <= ts <= end):
+                continue
+            ticks.setdefault(ts, []).append(pct)
+    except (OSError, ValueError):
+        return None
+    vals = sorted(max(v) for v in ticks.values() if v)
+    return pct_nearest(vals, 90) if vals else None
 
 
 def node_cpu_max():
@@ -590,7 +662,7 @@ def judge(m, cur, peak_m=None, node_cpu=None, pods_verdict=("unknown", "")):
     mx = cur.get("max") or 10
     rep = cur.get("replicas") or mn
     curp = cur.get("cur")
-    fit = right_size(peak_m)
+    fit = right_size(peak_m, util)
     at_max = bool(mx) and rep >= mx
     nc = node_cpu if node_cpu is not None else -1
 
@@ -673,13 +745,16 @@ def judge(m, cur, peak_m=None, node_cpu=None, pods_verdict=("unknown", "")):
                 f"실사용 피크 {peak_m}m 이 request {cpu}m 에 근접/초과, 노드는 여유. 피크x1.3 = {fit}m 으로 맞춘다",
                 "")
 
-    # 성능·가용성 통과 -> 비용 관점
+    # 성능·가용성 통과 -> 검증된 활성 창 수요로만 request 후보를 낸다.
+    # 10% 이내 차이는 측정 잡음이므로 유지한다. main에서 loadplan/loadwindows가 없는
+    # 구버전/불완전 측정은 peak_m=None으로 막으므로 이 분기에 들어오지 않는다.
     if fit and fit < cpu * 0.9:
-        return ("줄여", "과투자", fit, util, mn, mx,
-                f"통과(perf {m['perf']:.1f}%, avail {m['avail']:.1f}%). 실사용 피크 {peak_m}m 인데 request {cpu}m 로 과예약 -> 예약이 곧 노드 수",
-                "")
+        return ("줄여", "활성 창 CPU 과예약", fit, util, mn, mx,
+                f"통과(perf {m['perf']:.1f}%, avail {m['avail']:.1f}%). 같은 시각의 총CPU/파드수 p90을 "
+                f"HPA 목표 {util}%로 역산한 request 후보 {fit}m < 현재 {cpu}m",
+                "후보 적용 후 동일 loadplan으로 A/B 재측정; 공식 총점이나 노드 평균이 나빠지면 즉시 원복")
     return ("유지", "균형", cpu, util, mn, mx,
-            f"통과(perf {m['perf']:.1f}%, avail {m['avail']:.1f}%, p95 {m['p95']:.3f}s), request {cpu}m 가 실사용 피크 {peak_m}m 대비 적정",
+            f"통과(perf {m['perf']:.1f}%, avail {m['avail']:.1f}%, p95 {m['p95']:.3f}s), 활성 창 역산 request {fit or '-'}m와 현재 {cpu}m가 근접",
             "")
 
 
@@ -716,10 +791,13 @@ def main():
     # request 산정 근거: 부하 창 전체(podcpu.csv) 를 1순위로 쓴다. 순간값은 스파이크에
     # 끌려가 과대/과소 권고를 만든다(실측: 132m 를 400m 로 읽어 request 300m 권고).
     win = usage_from_window(outdir, set(apps))
+    plans = load_plans(outdir)
+    valid_window_apps = {k for k, v in win.items() if v.get("windowed") and k in plans and v.get("ticks", 0) >= 2}
     if win:
-        # 기준은 p90. p95/max 는 참고로만 보여준다(꼬리 1회에 권고가 끌려가지 않게).
-        peaks = {k: v["p90"] for k, v in win.items()}
-        basis = "부하 창 p90 (podcpu.csv, 앱 파드만)"
+        # 자동 request 산정은 loadplan + 실제 활성 창 + 2 tick 이상이 모두 있는 앱만.
+        # 앱 이름/개수는 동적으로 발견하므로 대회날 앱이 바뀌어도 코드를 고치지 않는다.
+        peaks = {k: (v["p90"] if k in valid_window_apps else None) for k, v in win.items()}
+        basis = "앱별 실제 부하 창 · 같은 시각 총CPU/파드수 p90 (검증 메타데이터 필수)"
     else:
         # podcpu.csv 가 없으면 지금 순간값으로 폴백하되, 그 값이 '부하가 없을 때' 찍힌
         # 것이면 request 판정 근거로 쓸 수 없다. 그대로 쓰면 다음 사고가 난다:
@@ -730,7 +808,11 @@ def main():
         peaks = pod_usage_live(a.ns)
         # request 대비 타당성 검사는 live(현재 설정)를 읽은 뒤에 한다.
         basis = "지금 순간값 1회 [!] 근거 약함 (부하 중에 측정한 값이 아니면 신뢰 불가)"
-    node_cpu = node_cpu_max()        # 노드 실사용 CPU 최대 % (노드 경쟁 판단)
+    node_cpu = node_cpu_from_window(outdir)  # 부하 창 p90 우선
+    node_cpu_basis = "부하 창 nodecpu.csv p90"
+    if node_cpu is None:
+        node_cpu = node_cpu_max()
+        node_cpu_basis = "부하 후 순간값 1회 [근거 약함]"
     alloc_m = node_alloc_m()         # 노드 할당가능 CPU (0 이면 추정 생략)
     ntypes = node_types()
     # '노드를 늘리지 않고' 올릴 수 있는 min 상한. 트래픽이 계단으로 들어올 때
@@ -757,7 +839,7 @@ def main():
             print("  [!] 부하 없이 찍힌 순간값으로 판단하지 않습니다: %s" % ", ".join(dropped))
             print("      -> 최신 loadtest.ps1 로 다시 측정하면 podcpu.csv 가 남아 부하 창 p90 으로 판정합니다")
     # 예산 분배 비중에 쓸 '앱별 실사용 기준값'. 부하 창 p90 이 있으면 그것을 쓴다.
-    usage_base = {k: (win[k]["p90"] if k in win else peaks.get(k)) for k in set(list(peaks) + list(win))}
+    usage_base = {k: (win[k]["total_p90"] if k in win else peaks.get(k)) for k in set(list(peaks) + list(win))}
     # 앱별 min 상한(균등 가정이 아니라 실사용 비중으로 분배)
     min_cap_app, _ = min_headroom_per_app(alloc_m, base_nodes, sys_m, reqs_now, usage_base)
     have_live = bool(live)
@@ -767,7 +849,7 @@ def main():
     print("  노드: %s · 할당가능 %s (라이브)   노드CPU최대: %s" % (
         ntypes,
         ("%dm/대" % alloc_m) if alloc_m else "미확인(추정 생략)",
-        ("%d%%" % node_cpu) if node_cpu is not None else "미확인"))
+        ("%d%% (%s)" % (node_cpu, node_cpu_basis)) if node_cpu is not None else "미확인"))
     print("  실사용 근거: %s" % basis)
     # ★ 비용 게이트: 세 앱 중 하나라도 성능 30% 미달이면 비용 12점이 '전부' 0 이다.
     # 이때 전략이 뒤집힌다 — 비용 점수가 이미 0 이므로 노드를 더 쓰는 것이 공짜다.
@@ -839,9 +921,20 @@ def main():
               + (f" 파드={cur.get('replicas')}" if cur.get("replicas") else ""))
         w = win.get(api)
         if w:
-            print(f"  실사용: p50 {w['p50']}m · p90 {w['p90']}m · p95 {w['p95']}m · 최대 {w['max']}m"
-                  f" · 표본 {w['n']}개"
-                  + (f" · 적정 request {right_size(peak)}m (p90x1.2)" if peak else ""))
+            tag = "활성 창" if w.get("windowed") else "구버전 전체 창[주의]"
+            print(f"  실사용({tag}): 파드평균 p50 {w['p50']}m · p90 {w['p90']}m · p95 {w['p95']}m"
+                  f" · 앱총합 p90 {w['total_p90']}m · 최대 {w['total_max']}m"
+                  f" · 파드 p50 {w['replicas_p50']}개/max {w['replicas_max']}개 · tick {w['ticks']}개"
+                  + (f" · HPA 목표 역산 request {right_size(peak, (cur.get('util') or 70))}m" if peak else ""))
+            if api not in valid_window_apps:
+                print("  [!] loadplan + 활성 loadwindow + CPU tick>=2가 없어 request 변경을 보류")
+            plan = plans.get(api)
+            if plan and mm:
+                achieved = mm["n"] / plan["duration_seconds"] if plan["duration_seconds"] else 0
+                print(f"  부하량: 목표 {plan['expected_qps']:.0f} QPS"
+                      f" (= c{plan['concurrency']:.0f} x worker당 q{plan['qps_per_worker']:.0f})"
+                      f" · 실제 완료 {mm['n']}건/{plan['duration_seconds']:.0f}s = {achieved:.1f} req/s"
+                      f" · key jobs {plan['jobs']:.0f}")
         else:
             print(f"  실사용: {peak if peak is not None else '-'}m (순간값)"
                   + (f" · 적정 request {right_size(peak)}m" if peak else ""))

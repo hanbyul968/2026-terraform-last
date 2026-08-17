@@ -58,19 +58,21 @@ if (-not $Kubectl) { Write-Warning 'kubectl 없음 — 노드 샘플링 생략(�
 
 # --- node/pod 샘플러 (5초 간격, 백그라운드 잡) ---
 # nodes.csv  : ts,노드수,Running파드수      (비용 지표 = 노드 수 평균)
-# podcpu.csv : ts,파드명,cpu(밀리코어)      (request 산정의 유일한 근거)
+# podcpu.csv : ts,파드명,cpu(밀리코어)      (loadwindows와 결합해 request 후보 산정)
 #
 # podcpu.csv 를 반드시 부하 '중에' 남겨야 하는 이유:
-#   request 권장값은 실사용 피크에서 나온다. 그런데 부하가 끝난 뒤 kubectl top 을 한 번
+#   request 후보는 활성 부하 창의 같은 시각 총CPU/파드수에서 나온다. 부하가 끝난 뒤 한 번
 #   찍으면 그 순간값이 피크로 잡힌다. 스파이크 순간에 찍히면 과대(실측: 실사용 132m 인데
 #   400m 로 읽혀 request 300m 를 권고), 부하가 빠진 뒤에 찍히면 과소가 된다.
 #   5초 간격으로 창 전체를 남겨 두면 p95/최대를 제대로 계산할 수 있다.
 $sampler = $null
 if ($Kubectl) {
   $sampler = Start-Job -ScriptBlock {
-    param($NS, $csv, $cpucsv, $kubectl)
+    param($NS, $csv, $cpucsv, $nodecpucsv, $kubectl)
     while ($true) {
-      $ts = [int][double]::Parse((Get-Date -UFormat %s))
+      # Get-Date -UFormat %s 는 Windows PowerShell 5.1에서 로컬 UTC+9를 한 번 더
+      # 더해 Unix epoch가 9시간 어긋났다. loadwindows.csv와 같은 UTC epoch를 쓴다.
+      $ts = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
       # kubectl 조회가 실패했을 때 0 을 기록하면 안 된다. 노드가 0대인 상황은 없으므로
       # 그 0 은 '측정 실패'인데, 평균에 섞이면 비용 지표(평균 노드 수)를 실제보다
       # 좋게 만든다. 실측 사고: 3399 표본 중 1370개(40%)가 0 이었고 그 결과
@@ -80,6 +82,17 @@ if ($Kubectl) {
       try { $n = (& $kubectl get nodes --no-headers 2>$null | Select-String '\bReady').Count } catch {}
       try { $p = (& $kubectl -n $NS get pods --no-headers 2>$null | Select-String 'Running').Count } catch {}
       if ($n -ge 1) { "$ts,$n,$(if ($p -ne $null) { $p } else { 0 })" | Add-Content -Path $csv }
+      # 노드 CPU도 부하 창에 기록한다. 부하가 끝난 뒤 kubectl top nodes 1회로
+      # 포화 여부를 판단하면 이미 1~2%로 내려가 request 판정이 뒤집힌다.
+      try {
+        $nodeRows = & $kubectl top nodes --no-headers 2>$null
+        foreach ($r in $nodeRows) {
+          $f = ($r -split '\s+') | Where-Object { $_ -ne '' }
+          if ($f.Count -ge 3 -and $f[2] -match '^(\d+)%$') {
+            "$ts,$($f[0]),$([int]$Matches[1])" | Add-Content -Path $nodecpucsv
+          }
+        }
+      } catch {}
       # 파드별 CPU 실사용. metrics-server 가 없으면 조용히 건너뛴다(가용성/성능 측정엔 무관).
       try {
         $rows = & $kubectl -n $NS top pods --no-headers 2>$null
@@ -94,7 +107,7 @@ if ($Kubectl) {
       } catch {}
       Start-Sleep -Seconds 5
     }
-  } -ArgumentList $NS, (Join-Path $OUT 'nodes.csv'), (Join-Path $OUT 'podcpu.csv'), $Kubectl
+  } -ArgumentList $NS, (Join-Path $OUT 'nodes.csv'), (Join-Path $OUT 'podcpu.csv'), (Join-Path $OUT 'nodecpu.csv'), $Kubectl
 }
 
 # --- 시드 레코드 (idempotent) ---
@@ -109,49 +122,85 @@ foreach ($s in $SEEDS) {
 }
 
 # --- 부하: 모든 API 병렬 (hey) ---
-$jobs = @()
+# hey 의 -q 는 전체 QPS가 아니라 "worker 1개당 QPS"다. 따라서 키 분산 때 -q를
+# 키 수로 나누면 안 된다. 총 부하는 sum(c_i * q) = 원래 conc * q 여야 한다.
+#
+# 또한 키마다 Start-Job을 만들면 Windows PowerShell의 프로세스 잡 시작 지연 때문에
+# 20개 키가 여러 wave로 실행된다. 실측: -z 180s인데 마지막 요청 offset이 475s였고,
+# 뒤쪽 podcpu 표본은 이미 부하가 끝난 앱의 1m 유휴값이었다. Start-Process로 hey.exe를
+# 직접 동시에 띄워 이 지연을 없앤다.
+function Convert-DurationSeconds([string]$d) {
+  if ($d -match '^(\d+(?:\.\d+)?)(ms|s|m|h)$') {
+    $n = [double]$Matches[1]
+    switch ($Matches[2]) {
+      'ms' { return $n / 1000.0 }
+      's'  { return $n }
+      'm'  { return $n * 60.0 }
+      'h'  { return $n * 3600.0 }
+    }
+  }
+  throw "Duration 형식 오류: $d (예: 180s, 3m)"
+}
+
+$durationSec = Convert-DurationSeconds $Duration
+$procs = @()
+$plans = @()
+$windows = @{}
 foreach ($a in $APIS) {
-  # POST body 는 부모에서 미리 파일로 저장한다.
-  #  - 이유1(따옴표): Windows 는 따옴표 JSON 을 네이티브 exe 에 '-d $body' 로 넘기면 깨져 400(invalid body).
-  #  - 이유2(레이스): Start-Job 안에서 파일을 쓰면 병렬 실행 시 stress 만 body 파일이 안 만들어지는 문제가 있음.
-  #  → 부모에서 파일로 쓰고 hey '-D <file>' 로 원문 그대로 전송.
   $bodyFile = ''
   if ($a.method -ne 'GET' -and $a.body) {
     $bodyFile = Join-Path $OUT "$($a.name).body.json"
     $a.body | Set-Content -Path $bodyFile -Encoding ascii -NoNewline
   }
-  # 키가 여러 개면 키마다 hey 를 띄워 부하를 쪼갠다. 고정 키 하나로 때리면 CloudFront 가
-  # 그 키만 캐싱해 측정이 채점과 달라진다(실측: product 우리측정 99.7% vs 채점 77.2%).
-  # 동시성(conc)과 초당요청(qps)은 키 수만큼 나눠 총 부하량을 유지한다.
-  $keyList = if ($a.keys -and $a.keys.Count -gt 0) { $a.keys } else { @($null) }
-  $nk = $keyList.Count
-  $cPer = [math]::Max(1, [int][math]::Floor($a.conc / $nk))
-  $qPer = if ($a.qps) { [math]::Max(1, [int][math]::Floor($a.qps / $nk)) } else { $a.qps }
-  $ki = 0
-  foreach ($key in $keyList) {
-    $ki++
-    $pathForKey = if ($key -and $a.pathFmt) { $a.pathFmt.Replace('{KEY}', $key) } else { $a.path }
-    $jobs += Start-Job -ScriptBlock {
-      param($hey, $dur, $a, $EP, $OUT, $bodyFile, $pathForKey, $cPer, $qPer, $ki)
-      # 키별 부분 결과는 <앱>.part<N>.csv 로 저장하고, 부모가 하나로 합친다.
-      $out = Join-Path $OUT "$($a.name).part$ki.csv"
-      $err = Join-Path $OUT "$($a.name).part$ki.err"
-      # ⚠ Start-Job 안에서 네이티브 exe(hey)의 stdout 을 '> $out' 로 파일 리다이렉트하면
-      #    출력이 통째로 사라져 0바이트 CSV → 채점기가 "NO DATA" 가 되는 버그가 있음.
-      #    → stdout 을 변수로 캡처($r)한 뒤 Out-File 로 기록해야 안정적으로 저장된다.
-      $url = "$EP$pathForKey"
-      if ($a.method -eq 'GET') {
-        $r = & $hey -z $dur -c $cPer -q $qPer -o csv $url 2>&1
-      } else {
-        $r = & $hey -z $dur -c $cPer -q $qPer -m $a.method -T application/json -D $bodyFile -o csv $url 2>&1
-      }
-      $r | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | Out-File -FilePath $err -Encoding ascii
-      $r | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } | Out-File -FilePath $out -Encoding ascii
-    } -ArgumentList $Hey, $Duration, $a, $EP, $OUT, $bodyFile, $pathForKey, $cPer, $qPer, $ki
+
+  # Hashtable에는 원래 .Keys 속성이 있다. API에 'keys' 항목이 없는 stress에서
+  # $a.keys를 읽으면 null이 아니라 name/slo/conc/... 7개 필드명이 나와 stress를 7배
+  # 복제하는 버그가 생긴다. 반드시 ContainsKey + 인덱서로 구분한다.
+  $hasRequestKeys = $a.ContainsKey('keys') -and $null -ne $a['keys'] -and @($a['keys']).Count -gt 0
+  $allKeys = if ($hasRequestKeys) { @($a['keys']) } else { @('__TUNE_NO_KEY__') }
+  # 동시성보다 process를 많이 만들면 c=0이 생긴다. 최대 conc개 키만 쓴다.
+  $jobCount = [math]::Min($allKeys.Count, [int]$a.conc)
+  $keyList = @($allKeys | Select-Object -First $jobCount)
+  $baseC = [math]::Floor([int]$a.conc / $jobCount)
+  $extraC = [int]$a.conc % $jobCount
+  $qWorker = $a.qps   # hey -q는 worker당 QPS — 절대 키 수로 나누지 않는다.
+  $expectedQps = if ($qWorker) { [double]$a.conc * [double]$qWorker } else { 0 }
+  $plans += [pscustomobject]@{
+    name = $a.name; duration_seconds = $durationSec; concurrency = $a.conc
+    qps_per_worker = $qWorker; expected_qps = $expectedQps
+    expected_requests = [math]::Round($expectedQps * $durationSec); jobs = $jobCount
+  }
+  $windows[$a.name] = [pscustomobject]@{ start = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds(); duration = $durationSec }
+
+  for ($i = 0; $i -lt $jobCount; $i++) {
+    $key = $keyList[$i]
+    $cThis = [int]$baseC + $(if ($i -lt $extraC) { 1 } else { 0 })
+    $pathForKey = if ($hasRequestKeys -and $a.pathFmt) { $a.pathFmt.Replace('{KEY}', $key) } else { $a.path }
+    $part = $i + 1
+    # PowerShell 변수명은 대소문자를 구분하지 않는다. $out 을 쓰면 결과 폴더 $OUT 을
+    # 덮어써 다음 경로가 user.part1.csv\user.part2.csv... 로 망가진다.
+    $stdoutPath = Join-Path $OUT "$($a.name).part$part.csv"
+    $stderrPath = Join-Path $OUT "$($a.name).part$part.err"
+    $heyArgs = @('-z', $Duration, '-c', "$cThis")
+    if ($qWorker) { $heyArgs += @('-q', "$qWorker") }
+    if ($a.method -ne 'GET') {
+      $heyArgs += @('-m', $a.method, '-T', 'application/json', '-D', $bodyFile)
+    }
+    $heyArgs += @('-o', 'csv', "$EP$pathForKey")
+    $proc = Start-Process -FilePath $Hey -ArgumentList $heyArgs -NoNewWindow `
+      -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
+    $procs += [pscustomobject]@{ app = $a.name; process = $proc }
   }
 }
-Wait-Job $jobs | Out-Null
-Remove-Job $jobs
+
+# 실제 계획을 남겨 advise.py가 부하량과 CPU 활성 창을 검증할 수 있게 한다.
+$plans | Export-Csv -Path (Join-Path $OUT 'loadplan.csv') -NoTypeInformation -Encoding ascii
+$procs.process | Wait-Process
+$windowRows = foreach ($name in $windows.Keys) {
+  $w = $windows[$name]
+  [pscustomobject]@{ name = $name; start_epoch = $w.start; active_end_epoch = $w.start + [math]::Ceiling($w.duration) }
+}
+$windowRows | Export-Csv -Path (Join-Path $OUT 'loadwindows.csv') -NoTypeInformation -Encoding ascii
 
 # 키별 부분 결과를 <앱>.csv 하나로 합친다. hey CSV 는 첫 줄이 헤더이므로 헤더는 한 번만 쓴다.
 foreach ($a in $APIS) {

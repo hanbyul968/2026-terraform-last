@@ -64,7 +64,7 @@ $APIS = @(
 |---|---|
 | `name` | 결과 라벨 + `autotune -App` 대상 Deployment 이름 |
 | `slo` | 채점기준의 성능 SLO(초). 이 이내면 perf OK |
-| `conc`/`qps` | `hey -c` / `-q` |
+| `conc`/`qps` | `hey -c` / `-q`. **`-q`는 worker당 QPS**이므로 총 목표는 `conc × qps` |
 | `$SEEDS` | 측정 전에 넣어둘 레코드 (GET 부하가 실제 행을 맞히도록) |
 | `$AVAIL_GATE` | 가용성 합격선(99%). 미달 조합은 autotune 에서 실격 |
 | `$COST_BASELINE_NODES` | **비용 패널티 기준 노드 수. terraform `node_desired_size` 와 맞춰야 한다** |
@@ -121,11 +121,26 @@ FAIL 이면 스크립트가 원인별 처방을 같이 출력한다. 실패 시 
 |---|---|---|
 | `<앱>.csv` | hey 원본 (상태코드, 응답시간) | 가용성·성능 채점 |
 | `nodes.csv` | `ts,노드수,Running파드수` | 비용 지표(노드 수 평균) |
-| `podcpu.csv` | `ts,파드명,cpu(밀리코어)` | **request 산정의 유일한 근거** |
+| `podcpu.csv` | `UTC epoch,파드명,cpu(m)` | 활성 창의 앱 총 CPU와 파드당 평균 |
+| `nodecpu.csv` | `UTC epoch,노드명,cpu(%)` | 부하 중 노드 포화 판정 |
+| `loadplan.csv` | 앱별 duration·concurrency·worker당 QPS·목표 요청 수 | 분산 후에도 원래 부하량인지 검증 |
+| `loadwindows.csv` | 앱별 실제 부하 시작/종료 UTC epoch | 시작 전·종료 후 유휴 CPU 표본 제거 |
 
-`podcpu.csv` 가 필요한 이유는 request 권고가 실사용 피크에서 나오기 때문이다. 부하가 끝난 뒤
-`kubectl top` 을 한 번 찍으면 그 순간값이 피크로 잡혀 과대·과소 권고가 난다. 창 전체를 남겨야
-p90/p95 를 제대로 계산할 수 있다. `metrics-server` 가 없으면 이 파일만 비고 가용성·성능 측정은 정상이다.
+`hey -q`는 **worker당 QPS**다. 예를 들어 `conc=30, qps=10`의 목표는 10 QPS가 아니라
+`30 × 10 = 300 QPS`다. 키를 N개로 나눌 때 `q`를 N으로 나누지 않고 concurrency만 정수
+분배하며, 항상 `Σ(cᵢ × q) = 원래 conc × qps`를 보존한다. API에 `keys`가 없으면 정확히
+프로세스 1개만 실행한다. 앱 이름·키 수·동시성 값이 바뀌어도 같은 식을 쓴다.
+
+CPU 후보는 `loadwindows.csv` 안의 표본만 사용한다. 같은 시각의 앱 파드 CPU를 먼저 합산하고
+파드 수로 나눈 값의 p90을 HPA 목표 사용률로 역산한다.
+
+```text
+request 후보 = p90(같은 시각 앱 총 CPU / Running 앱 파드 수) / (HPA target / 100)
+```
+
+`loadplan + loadwindows + 활성 CPU tick 2개 이상` 중 하나라도 없으면 request 변경을 **보류**한다.
+따라서 시작이 지연된 프로세스나 부하 종료 뒤 `1m` 유휴 표본이 request를 50m로 떨어뜨리지 못한다.
+`metrics-server`가 없으면 CPU/HPA request 판정만 보류하고 가용성·성능 측정은 계속한다.
 
 ⚠ **같은 `-Label` 로 다시 돌리면 시작 시 그 폴더의 csv 를 지운다.** `nodes.csv`·`podcpu.csv` 는
 append 로 쓰기 때문에 안 지우면 옛 표본이 쌓인다. 실측 사고: autotune 조합 이름이 과거 수동
@@ -190,48 +205,45 @@ user         99.2%    4.0   52.2%   1.0
 
 ### request 를 다루는 원칙 (중요)
 
-`requests.cpu` 는 **노드 예약량이지 파드 속도 상한이 아니다.** cpu limit 이 없는 앱은
-request 를 올려도 빨라지지 않는다. 올리면 오히려 두 방향으로 해롭다.
+`requests.cpu` 는 **노드 예약량이며 속도 상한이 아니다.** 그래서 단순히 "느리다" 또는 개별
+파드의 최대 CPU만 보고 올리거나 내리지 않는다. `advise.py`는 다음 순서로 판단한다.
 
-- 노드당 파드 수가 줄어 **노드가 늘고 비용이 오른다**
-- HPA 사용률 = 실사용 ÷ request 가 작아져 **스케일업이 늦어진다** (성능이 더 나빠질 수 있다)
+1. `loadplan.csv`로 의도한 부하가 `conc × worker당 qps`인지 확인한다.
+2. `loadwindows.csv` 밖의 시작 전·종료 후 CPU 표본을 버린다.
+3. 각 tick에서 앱 파드 CPU를 합산하고 Running 파드 수로 나눈다.
+4. 그 시계열의 nearest-rank p90을 **그 앱의 현재 HPA 목표율**로 나눠 request 후보를 만든다.
+5. 25m 단위로 올림하고 최소 50m를 적용한다. 현재값과 10% 이내면 측정 잡음으로 보고 유지한다.
+6. 적용 후 같은 `loadplan`으로 다시 재어 공식 총점·노드 평균이 나빠지면 원복한다.
 
-그래서 "느리다 → request 올려" 는 틀린 처방이다. 원인을 먼저 가른다.
+이 계산에는 `user/product/stress`, 현재 request, 노드 타입 같은 앱별 상수가 없다. 결과 CSV에서
+앱을 발견하고 라이브 HPA target을 읽으므로 대회날 앱과 트래픽이 바뀌어도 같은 코드가 동작한다.
 
-| 상황 | 판정 · 원인 | request |
-|---|---|---|
-| `avail < 99%` + 파드가 max 에 붙음 | 늘려 · 파드 상한 도달 | 유지, `max+2` |
-| `avail < 99%` (상한 여유 있음) | 늘려 · 파드 부족/스케일 지연 | 유지, `min+1` · `util-10` |
-| 느림 + 파드가 max 에 붙음 | 늘려 · 파드 상한 도달 | 유지, `max+2` |
-| 느림 + 노드 CPU ≥ 80% | 늘려 · 노드 CPU 포화 | **올림** (노드 경쟁 완화. 이 경우만 유효) |
-| 느림 + 실사용 < request × 0.5 | 유지 · **CPU 병목 아님** | **올리지 않음** → DB·캐시·커넥션풀 확인 |
-| 느림 + 현재 사용률 < 목표 | 늘려 · 스케일 지연 | 유지, `util-15` · `min+1` |
-| 느림 + 실사용이 request 에 근접 | 늘려 · 파드 CPU 포화 | 실사용 × 1.3 |
-| 통과 + request ≫ 실사용 | 줄여 · 과투자 | 실사용 × 1.3 (비용↓) |
-| 그 외 | 유지 · 균형 | 유지 |
-
-권장 request 는 항상 **실사용 × 1.3** 이다. `×1.4` 같은 임의 배수를 쓰지 않는다.
+| 상황 | 판정 |
+|---|---|
+| 메타데이터 또는 CPU tick 부족 | `관측필요` — request 변경 없음 |
+| 가용성 실패 / HPA max 도달 | request 유지, min/max/target 원인을 먼저 조정 |
+| 느림 + 부하 중 노드 CPU p90 ≥80% | 노드 경쟁으로 보고 request/scheduler 배치 후보 검토 |
+| 느림 + 파드평균 CPU가 request의 절반 미만 | CPU 병목 아님 — DB·캐시·커넥션풀 확인 |
+| 성능·가용성 통과 + 역산 후보가 현재보다 10% 이상 작음 | 후보 출력, 한 앱씩 A/B 재측정 |
 
 ### 실사용을 무엇으로 재는가
 
-출력 첫 줄의 `실사용 근거` 를 반드시 확인한다.
+정상 출력은 `앱별 실제 부하 창 · 같은 시각 총CPU/파드수 p90`이다. 다음 중 하나면 자동 변경을
+막는다: `loadplan.csv` 없음, `loadwindows.csv` 없음, 활성 CPU tick 2개 미만, metrics-server 없음.
+노드 포화도도 부하 후 순간값이 아니라 `nodecpu.csv` 활성 창의 tick별 최대 노드 CPU p90을 쓴다.
 
-| 표시 | 의미 |
-|---|---|
-| `부하 창 p95 (podcpu.csv)` | 정상. 부하 중 5초 간격 표본의 **순위기반 p95** |
-| `지금 순간값 1회 [!] 근거 약함` | `podcpu.csv` 가 없어 폴백. **이 회차의 request 권고는 신뢰하지 말 것** |
+실제 수정 계기가 된 오류:
 
-순간값 하나로 판단하면 찍히는 타이밍이 값을 정해버린다. 실제로 겪은 사고다.
-
+```text
+원래 부하: conc=30 × worker당 q=10 = 300 QPS
+오류 부하: 20 keys × c=1 × q=1 = 20 QPS             (목표의 1/15)
+오류 실행: -z 180s인데 Start-Job wave로 마지막 offset >475s
+오류 CPU : 종료 후 user 파드 1m 표본이 쌓여 개별 파드 p90=16m
+오류 권고: 16m × 1.2 -> 하한 50m
 ```
-실사용 132m 지속 + 230m 스파이크 1회
-순간값 230m  ->  request 300m 권고   (과대)
-부하 창 p95 132m  ->  request 175m   (정상)
-```
 
-p95 는 **보간 없는 순위 기반**으로 계산한다. `statistics.quantiles` 같은 보간형은 표본이 적을 때
-상위 백분위가 최댓값으로 끌려간다(실측: 120~152m 표본 19개 + 400m 1개에서 p95 가 388m).
-5초 간격 180초면 표본이 36개뿐이라 이 차이가 그대로 권고값을 흔든다.
+수정 후에는 키마다 `q`를 나누지 않고 concurrency만 분배하며, `Start-Process`로 동시에 시작한다.
+CPU timestamp와 load window 모두 UTC epoch를 써 Windows PowerShell 5.1의 UTC+9 오차도 제거한다.
 
 ### 대회날 변경 대응
 

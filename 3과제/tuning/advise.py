@@ -116,19 +116,37 @@ def node_budget(target_points, base_nodes):
     return ratio, ratio * base_nodes
 
 
-def max_pods_in_budget(nodes_allowed, alloc_m, sys_m, req_m):
-    """노드 예산 안에 들어가는 앱 1개의 최대 파드 수.
+def max_pods_in_budget(nodes_allowed, alloc_m, sys_m, reqs, usage, app=None):
+    """비용 예산을 앱들에게 나눠 각 앱의 max_replicas 를 정한다.
 
-    max_replicas 를 임의 숫자로 두면 안 되는 이유가 여기 있다. HPA 는 부하가 요구하면
-    상한까지 파드를 만들고, Karpenter 는 노드를 공급한다. 즉 '천장이 곧 비용'이 된다.
+    max_replicas 를 임의 숫자로 두면 안 되는 이유: HPA 는 부하가 요구하면 상한까지 파드를
+    만들고 Karpenter 가 노드를 공급한다. 즉 '천장이 곧 비용'이다.
       실측: max 6 -> 비용 8점(ratio 1.91) / max 30 -> 비용 4점(ratio 2.81).
-            성능은 +0.5 얻고 비용 -4.0 을 잃어 순손실이었다.
-    그래서 상한은 감으로 정하지 말고 비용 예산에서 역산한다.
+            성능 +0.5 를 얻고 비용 -4.0 을 잃어 순손실이었다.
+
+    ⚠ 예산은 '클러스터 전체' 하나다. 앱마다 '나 혼자 예산을 다 쓴다'고 계산하면
+    앱 수만큼 초과한다(실측: 3개 앱이 각자 43/130/21 로 계산되어 예산의 3.0배).
+    그래서 앱의 '실제 CPU 수요 비중'으로 예산을 쪼갠 뒤 각자의 request 로 나눈다.
+
+    reqs  : {앱: request(m)}
+    usage : {앱: 부하 중 실사용 기준값(m)}  — 비중 계산에 쓴다. 없으면 request 로 대체.
+    반환  : app 을 주면 그 앱의 max, 안 주면 {앱: max}
     """
-    if not (nodes_allowed and alloc_m and req_m):
+    if not (nodes_allowed and alloc_m and reqs):
         return None
-    avail = alloc_m * nodes_allowed - sys_m
-    return max(1, int(avail // req_m))
+    budget = alloc_m * nodes_allowed - sys_m
+    if budget <= 0:
+        return None
+    # 비중: 실사용이 있으면 실사용, 없으면 request 기준
+    w = {a: (usage.get(a) or reqs.get(a) or 0) for a in reqs}
+    tot_w = sum(w.values())
+    out = {}
+    for a, q in reqs.items():
+        if not q:
+            continue
+        share = (budget * (w[a] / tot_w)) if tot_w else (budget / len(reqs))
+        out[a] = max(1, int(share // q))
+    return out.get(app) if app else out
 
 
 def band_of(v):
@@ -689,6 +707,8 @@ def main():
     nodes_avg = (sum(ns_hist_pre) / len(ns_hist_pre)) if ns_hist_pre else None
     ratio_now = (nodes_avg / BASELINE_NODES) if (nodes_avg and BASELINE_NODES) else None
     budget_ratio, budget_nodes = node_budget(a.cost_points, base_nodes)
+    # 예산 분배 비중에 쓸 '앱별 실사용 기준값'. 부하 창 p90 이 있으면 그것을 쓴다.
+    usage_base = {k: (win[k]["p90"] if k in win else peaks.get(k)) for k in set(list(peaks) + list(win))}
     have_live = bool(live)
 
     print("\n" + "=" * 72)
@@ -768,7 +788,11 @@ def main():
             continue
         # max 는 비용 예산에서 역산한 값으로 덮는다. HPA 는 부하가 요구하면 상한까지
         # 파드를 만들고 Karpenter 가 노드를 공급하므로 '천장이 곧 비용'이다.
-        cap = max_pods_in_budget(budget_nodes, alloc_m, sys_m, rcpu)
+        # 예산을 세 앱에 나눈 뒤 이 앱 몫으로 상한을 계산한다.
+        # 이 앱의 request 는 권장값(rcpu)을 반영해야 하므로 사본에 덮어쓴다.
+        reqs_for_cap = dict(reqs_now)
+        reqs_for_cap[api] = rcpu
+        cap = max_pods_in_budget(budget_nodes, alloc_m, sys_m, reqs_for_cap, usage_base, api)
         if cap and rmx > cap:
             print(f"  [!] max {rmx} 는 비용 예산({a.cost_points}점, 노드 {budget_nodes:.1f}대)을 넘긴다"
                   f" -> max {cap} 로 제한 (request {rcpu}m 기준)")

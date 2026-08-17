@@ -409,60 +409,70 @@ function wafxRun(){var text=document.getElementById('wafx_in').value;var ep=docu
 //   ### terraform/k8s_apps.tf 반영값 (stress 만):
 //     requests.cpu = "300m",  HPA averageUtilization = 45,  min=3 max=12
 function tuneParse(text){
-  // advise.py / autotune.ps1 어느 출력이든 그대로 붙여넣으면 되게 파싱한다.
-  //  - advise.py  : "[user] ... 권장: cpu=300m util=50% min=1 max=10"  (앱별 서로 다른 값)
-  //  - advise.py  : "user   : requests.cpu = "300m"  average_utilization = 50  min_replicas = 2"
-  //  - autotune   : "반영값 (stress 만):" + "requests.cpu = "300m", HPA averageUtilization = 45, min=3 max=12"
+  // 필드 순서와 출력 형식에 의존하지 않고 반드시 앱별로 파싱한다.
+  // 대상 앱을 알 수 없는 값 하나를 모든 앱에 복제하는 fallback은 절대 사용하지 않는다.
   var known=(D&&D.apps?D.apps.map(function(a){return a.app}):['user','product','stress']);
   var items=[], m;
-
-  // 1) advise.py 앱별 블록 — "[앱]" 헤더로 쪼개고 "권장:" 줄에서 값 추출
-  var re1=/\[([a-z0-9][a-z0-9-]*)\]([\s\S]*?)(?=\n\s*\[[a-z0-9][a-z0-9-]*\]|$)/gi;
-  while((m=re1.exec(text))!==null){
-    var app=m[1], body=m[2];
-    if(/변경\s*없음/.test(body)) continue;              // 유지 판정은 건너뜀
-    var rec=body.match(/권장\s*:\s*cpu\s*=\s*(\d+)m\s+util\s*=\s*(\d+)%?\s+min\s*=\s*(\d+)(?:\s+max\s*=\s*(\d+))?/i);
-    if(rec) items.push({app:app,cpu:rec[1]+'m',util:+rec[2],min:+rec[3],max:rec[4]?+rec[4]:null});
+  function field(body,re){var x=body.match(re);return x?+x[1]:null;}
+  function parseFields(app,body){
+    app=(app||'').toLowerCase();
+    if(known.indexOf(app)<0)return null;
+    var cpu=field(body,/(?:requests\.cpu|request|cpu)\s*=\s*"?(\d+)m"?/i);
+    var util=field(body,/(?:average_?utilization|averageUtilization|target|util)\s*=\s*(\d+)%?/i);
+    var mn=field(body,/(?:min_?replicas|min)\s*=\s*(\d+)/i);
+    var mx=field(body,/(?:max_?replicas|max)\s*=\s*(\d+)/i);
+    // 부분값에 임의 기본값을 채우면 기존 설정을 망칠 수 있으므로 네 값이 모두 있어야 인정한다.
+    if(cpu===null||util===null||mn===null||mx===null)return null;
+    return {app:app,cpu:cpu+'m',util:util,min:mn,max:mx};
   }
-  if(items.length) return {items:items};
+  function add(x){
+    if(!x)return;
+    for(var i=0;i<items.length;i++){if(items[i].app===x.app){items[i]=x;return;}}
+    items.push(x);
+  }
 
-  // 2) advise.py 하단 terraform 반영 줄 (앱별)
-  var re2=/^[\s#]*([a-z0-9][a-z0-9-]*)\s*:\s*requests\.cpu\s*=\s*"?(\d+)m"?[^\n]*?average_utilization\s*=\s*(\d+)[^\n]*?min_replicas\s*=\s*(\d+)/gim;
-  while((m=re2.exec(text))!==null) items.push({app:m[1],cpu:m[2]+'m',util:+m[3],min:+m[4],max:null});
-  if(items.length) return {items:items};
+  // 1) 하단 Terraform 반영 줄 / 화살표 요약 — 필드 순서는 자유롭다.
+  // stress: requests.cpu="375m", min_replicas=3, max_replicas=17, average_utilization=52
+  // user → cpu=200m util=50% min=3 max=17
+  var row=/^[\s#]*([a-z0-9][a-z0-9-]*)\s*(?::|→|->)\s*([^\r\n]+)$/gim;
+  while((m=row.exec(text))!==null)add(parseFields(m[1],m[2]));
+  if(items.length)return {items:items};
 
-  // 3) autotune 형식 — 값 하나 + 대상 앱 목록
-  var cpu =text.match(/requests\.cpu\s*=\s*"?(\d+)m"?/i) || text.match(/\bcpu\s*=\s*(\d+)m/i);
-  var util=text.match(/average_?utilization\s*=\s*(\d+)/i) || text.match(/\butil\s*=\s*(\d+)/i);
-  var mn  =text.match(/min_?replicas\s*=\s*(\d+)/i)       || text.match(/\bmin\s*=\s*(\d+)/i);
-  var mx  =text.match(/max_?replicas\s*=\s*(\d+)/i)       || text.match(/\bmax\s*=\s*(\d+)/i);
-  if(!cpu&&!util&&!mn) return {items:[]};
+  // 2) advise.py 앱별 블록. "권장:" 한 줄만 읽어 현재/CPU 설명의 숫자와 섞이지 않게 한다.
+  var block=/\[([a-z0-9][a-z0-9-]*)\]([\s\S]*?)(?=\n\s*\[[a-z0-9][a-z0-9-]*\]|$)/gi;
+  while((m=block.exec(text))!==null){
+    if(/변경\s*없음/.test(m[2]))continue;
+    var rec=m[2].match(/권장\s*:\s*([^\r\n]+)/i);
+    if(rec)add(parseFields(m[1],rec[1]));
+  }
+  if(items.length)return {items:items};
 
+  // 3) 구형 autotune 단일값 형식은 명시적인 대상 범위가 있을 때만 허용한다.
+  var one=parseFields(known[0],text);
+  if(!one)return {items:[],error:'request/min/max/average_utilization 네 값을 모두 읽지 못했습니다.'};
   var apps=[];
-  var scope=text.match(/반영값\s*\(([^)]*)\)/);
+  var scope=text.match(/반영값\s*\(([^)]*)\)/i);
   if(scope){
-    if(/모든\s*앱|all/i.test(scope[1])) apps=known.slice();
-    else { var w=scope[1].trim().split(/[\s,]+/)[0]; if(w) apps=[w]; }
+    if(/모든\s*앱|all/i.test(scope[1]))apps=known.slice();
+    else{
+      known.forEach(function(a){if(new RegExp('(?:^|[^a-z0-9-])'+a+'(?:[^a-z0-9-]|$)','i').test(scope[1]))apps.push(a);});
+    }
   }
-  if(!apps.length){                                    // "deploy/<앱>" 에서 유추
-    var seen={}, re3=/deploy\/([a-z0-9][a-z0-9-]*)/gi;
-    while((m=re3.exec(text))!==null) seen[m[1]]=1;
+  if(!apps.length){
+    var seen={}, dep=/deploy\/([a-z0-9][a-z0-9-]*)/gi;
+    while((m=dep.exec(text))!==null){if(known.indexOf(m[1].toLowerCase())>=0)seen[m[1].toLowerCase()]=1;}
     apps=Object.keys(seen);
   }
-  if(!apps.length) apps=known.slice();                 // 그래도 없으면 알려진 앱 전체
-  apps.forEach(function(a){
-    items.push({app:a, cpu:cpu?cpu[1]+'m':null, util:util?+util[1]:null,
-                min:mn?+mn[1]:null, max:mx?+mx[1]:null});
-  });
+  if(!apps.length)return {items:[],error:'대상 앱을 찾지 못했습니다. 앱별 권장 줄을 함께 붙여넣어 주세요. 전체 앱으로 추정 적용하지 않습니다.'};
+  apps.forEach(function(app){items.push({app:app,cpu:one.cpu,util:one.util,min:one.min,max:one.max});});
   return {items:items};
 }
 function tuneCmds(f){
   var items=(f&&f.items)?f.items:[];
   if(!items.length){
     return '<div class="tip warn"><h3>값을 못 읽었어요</h3><div class=why>'
-      +'advise.py 의 <code>권장: cpu=300m util=50% min=1 max=10</code> 줄이나, '
-      +'autotune.ps1 의 <code>requests.cpu = "300m", HPA averageUtilization = 45, min=3 max=12</code> 줄이 '
-      +'포함되도록 붙여넣어 주세요. (판정이 「유지 / 변경 없음」인 앱은 건너뜁니다)</div></div>';
+      +esc((f&&f.error)||'앱별 requests.cpu, min_replicas, max_replicas, average_utilization 네 값이 있는 줄을 붙여넣어 주세요.')
+      +'<br>대상 앱이 없는 단일값은 안전을 위해 전체 앱에 복제하지 않습니다.</div></div>';
   }
   var out='<div class="tip good"><h3>적용 대상: '+items.map(function(x){return x.app}).join(', ')+'</h3>'
     +'<div class=why>'+items.map(function(x){
@@ -471,8 +481,7 @@ function tuneCmds(f){
       }).join('\n')+'</div></div>';
 
   items.forEach(function(x){
-    var n=x.app, mn=(x.min!=null?x.min:2), mx=(x.max!=null?x.max:10),
-        util=(x.util!=null?x.util:60), cpu=x.cpu||'200m';
+    var n=x.app, mn=x.min, mx=x.max, util=x.util, cpu=x.cpu;
     var patch=JSON.stringify({spec:{minReplicas:mn,maxReplicas:mx,metrics:[{type:"Resource",resource:{name:"cpu",target:{type:"Utilization",averageUtilization:util}}}]}});
     // PowerShell 은 네이티브 exe 에 큰따옴표를 벗겨 넘겨서 -p '{"spec":...}' 가 깨진다
     // (kubectl: invalid character 's'). \" 로 이스케이프해야 그대로 전달된다.
@@ -497,9 +506,9 @@ function tuneRun(){
   document.getElementById('tune_out').innerHTML=tuneCmds(f);
 }
 function vTuneApply(){
-  return '<div class=card><h2>튜닝적용 — autotune 결과 붙여넣고 적용 명령 받기</h2>'
-   +'<div class=mut style="font-size:12px;margin-bottom:9px"><code>.\\autotune.ps1 -App stress</code> 등의 <b>마지막 "반영값" 출력</b>을 붙여넣고 [명령 생성]. kubectl(즉시)·k8s_apps.tf(영구) 명령을 뽑아준다. (라이브 자동판정은 「계산」 탭)</div>'
-   +'<textarea id=tune_in placeholder=\'예)  requests.cpu = "300m",  HPA averageUtilization = 45,  min=3 max=12   (반영값 (stress 만) 줄까지 같이 붙여넣으면 앱도 자동 인식)\' style="width:100%;height:130px;background:#f6f7f9;color:#1a1d23;border:1px solid var(--line);border-radius:8px;padding:10px;font-size:12px;font-family:monospace"></textarea>'
+  return '<div class=card><h2>튜닝적용 — 앱별 권장값으로 적용 명령 만들기</h2>'
+   +'<div class=mut style="font-size:12px;margin-bottom:9px"><code>.\\autotune.ps1 -Result baseline</code> 출력의 <b>「수동 반영할 값」 앱별 줄</b>을 붙여넣고 [명령 생성]. 출력에 없는 앱은 적용 대상에서 제외합니다. 대시보드는 값을 자동 적용하지 않습니다.</div>'
+   +'<textarea id=tune_in placeholder=\'예) stress: requests.cpu="375m", min_replicas=3, max_replicas=17, average_utilization=52\nuser: requests.cpu="200m", min_replicas=3, max_replicas=17, average_utilization=50\' style="width:100%;height:130px;background:#f6f7f9;color:#1a1d23;border:1px solid var(--line);border-radius:8px;padding:10px;font-size:12px;font-family:monospace"></textarea>'
    +'<button onclick="tuneRun()" style="margin-top:10px">명령 생성</button>'
    +'<div id=tune_out style="margin-top:15px"></div></div>';}
 

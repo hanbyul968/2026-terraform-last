@@ -211,18 +211,25 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "user" {
     }
     behavior {
       scale_up {
-        # 30s 완충: 순간 스파이크로는 안 늘리고, 부하가 "지속"될 때만 확장.
-        # (0 이면 CPU 튀자마자 파드 2배 → 노드 폭증의 주범이었음)
-        stabilization_window_seconds = 30
+        # 스케일업은 최대한 빠르게. 아래는 쿠버네티스 기본값과 동일하다.
+        #
+        # 이전에는 stabilization 30s + Percent 50 + Pods 2 로 '일부러 느리게' 잡아뒀는데,
+        # 노드 폭증을 막으려던 것이 실제로는 성능 점수를 깎았다:
+        #   트래픽이 T+1h 에 계단처럼 들어오므로 HPA 의 램프 구간이 그대로 실패로 집계된다
+        #   (실측: min 2 -> 8 까지 1분 45초, 그 사이 지연/실패가 누적 로그에 박힌다).
+        # 스케일업을 늦춰서 얻는 것은 없다 — 플래핑 억제는 아래 scale_down 의 90s 창이
+        # 이미 담당하고, 늘어난 파드는 부하가 빠지면 scale_down 이 되돌린다.
+        # 비용 위험도 없다: 스케일업은 사용률이 요구할 때만 일어난다.
+        stabilization_window_seconds = 0
         select_policy                = "Max"
         policy {
           type           = "Percent"
-          value          = 50 # 15초마다 최대 +50% (기존 100% = 2배씩)
+          value          = 100 # 15초마다 최대 2배
           period_seconds = 15
         }
         policy {
           type           = "Pods"
-          value          = 2 # 15초마다 최대 +2개 (기존 4)
+          value          = 4 # 15초마다 최대 +4개
           period_seconds = 15
         }
       }
@@ -460,18 +467,25 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "product" {
     }
     behavior {
       scale_up {
-        # 30s 완충: 순간 스파이크로는 안 늘리고, 부하가 "지속"될 때만 확장.
-        # (0 이면 CPU 튀자마자 파드 2배 → 노드 폭증의 주범이었음)
-        stabilization_window_seconds = 30
+        # 스케일업은 최대한 빠르게. 아래는 쿠버네티스 기본값과 동일하다.
+        #
+        # 이전에는 stabilization 30s + Percent 50 + Pods 2 로 '일부러 느리게' 잡아뒀는데,
+        # 노드 폭증을 막으려던 것이 실제로는 성능 점수를 깎았다:
+        #   트래픽이 T+1h 에 계단처럼 들어오므로 HPA 의 램프 구간이 그대로 실패로 집계된다
+        #   (실측: min 2 -> 8 까지 1분 45초, 그 사이 지연/실패가 누적 로그에 박힌다).
+        # 스케일업을 늦춰서 얻는 것은 없다 — 플래핑 억제는 아래 scale_down 의 90s 창이
+        # 이미 담당하고, 늘어난 파드는 부하가 빠지면 scale_down 이 되돌린다.
+        # 비용 위험도 없다: 스케일업은 사용률이 요구할 때만 일어난다.
+        stabilization_window_seconds = 0
         select_policy                = "Max"
         policy {
           type           = "Percent"
-          value          = 50 # 15초마다 최대 +50% (기존 100% = 2배씩)
+          value          = 100 # 15초마다 최대 2배
           period_seconds = 15
         }
         policy {
           type           = "Pods"
-          value          = 2 # 15초마다 최대 +2개 (기존 4)
+          value          = 4 # 15초마다 최대 +4개
           period_seconds = 15
         }
       }
@@ -701,18 +715,25 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "stress" {
     }
     behavior {
       scale_up {
-        # 30s 완충: 순간 스파이크로는 안 늘리고, 부하가 "지속"될 때만 확장.
-        # (0 이면 CPU 튀자마자 파드 2배 → 노드 폭증의 주범이었음)
-        stabilization_window_seconds = 30
+        # 스케일업은 최대한 빠르게. 아래는 쿠버네티스 기본값과 동일하다.
+        #
+        # 이전에는 stabilization 30s + Percent 50 + Pods 2 로 '일부러 느리게' 잡아뒀는데,
+        # 노드 폭증을 막으려던 것이 실제로는 성능 점수를 깎았다:
+        #   트래픽이 T+1h 에 계단처럼 들어오므로 HPA 의 램프 구간이 그대로 실패로 집계된다
+        #   (실측: min 2 -> 8 까지 1분 45초, 그 사이 지연/실패가 누적 로그에 박힌다).
+        # 스케일업을 늦춰서 얻는 것은 없다 — 플래핑 억제는 아래 scale_down 의 90s 창이
+        # 이미 담당하고, 늘어난 파드는 부하가 빠지면 scale_down 이 되돌린다.
+        # 비용 위험도 없다: 스케일업은 사용률이 요구할 때만 일어난다.
+        stabilization_window_seconds = 0
         select_policy                = "Max"
         policy {
           type           = "Percent"
-          value          = 50 # 15초마다 최대 +50% (기존 100% = 2배씩)
+          value          = 100 # 15초마다 최대 2배
           period_seconds = 15
         }
         policy {
           type           = "Pods"
-          value          = 2 # 15초마다 최대 +2개 (기존 4)
+          value          = 4 # 15초마다 최대 +4개
           period_seconds = 15
         }
       }

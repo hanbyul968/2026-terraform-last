@@ -281,6 +281,46 @@ def node_alloc_m():
     return min(vals) if vals else 0
 
 
+def system_cpu_req(ns):
+    """app 네임스페이스 밖(kube-system 등) 파드의 CPU request 합계(밀리코어).
+
+    min_replicas 상한을 계산할 때 노드 용량에서 먼저 빼야 하는 몫이다.
+    """
+    tot = 0
+    data = json.loads(run(["kubectl", "get", "pods", "-A", "-o", "json"]) or "{}")
+    for p in data.get("items", []):
+        md, st = p.get("metadata", {}), p.get("status", {})
+        if md.get("namespace") == ns or st.get("phase") != "Running":
+            continue
+        for c in p.get("spec", {}).get("containers", []):
+            v = (c.get("resources", {}).get("requests", {}) or {}).get("cpu")
+            m = cpu_m(v) if v else None
+            if m:
+                tot += m
+    return tot
+
+
+def min_headroom(alloc_m, nodes, sys_m, reqs):
+    """'노드를 늘리지 않고' 각 앱 min 을 몇 개까지 올릴 수 있나.
+
+    min 을 올리면 트래픽이 계단처럼 들어올 때의 HPA 램프 구간이 사라진다(실측: min 2 -> 8
+    까지 1분 45초. 그 구간의 지연/실패가 누적 로그에 그대로 박힌다). 공짜는 아니지만,
+    아래 부등식 안에서는 노드가 늘지 않으므로 비용이 그대로다:
+
+        sum(min_i x request_i) + 시스템요청  <=  노드수 x 노드당 할당가능
+
+    반환: (앱마다 동일하게 줄 수 있는 최대 min, 여유 밀리코어)
+    앱별 request 가 다르면 '모든 앱을 같은 수로' 올릴 때의 상한이다(보수적).
+    """
+    if not alloc_m or not nodes or not reqs:
+        return None, None
+    avail = alloc_m * nodes - sys_m
+    per_set = sum(reqs.values())
+    if per_set <= 0:
+        return None, avail
+    return max(1, avail // per_set), avail
+
+
 def node_types():
     """노드 타입 구성 문자열 (추정 근거 표시용)."""
     m = {}
@@ -446,6 +486,12 @@ def main():
     node_cpu = node_cpu_max()        # 노드 실사용 CPU 최대 % (노드 경쟁 판단)
     alloc_m = node_alloc_m()         # 노드 할당가능 CPU (0 이면 추정 생략)
     ntypes = node_types()
+    # '노드를 늘리지 않고' 올릴 수 있는 min 상한. 트래픽이 계단으로 들어올 때
+    # HPA 램프 구간을 없애는 가장 값싼 수단이다.
+    base_nodes = int(BASELINE_NODES) if BASELINE_NODES else 0
+    sys_m = system_cpu_req(a.ns)
+    reqs_now = {k: v.get("cpu") for k, v in live.items() if v.get("cpu")}
+    min_cap, avail_m = min_headroom(alloc_m, base_nodes, sys_m, reqs_now)
     have_live = bool(live)
 
     print("\n" + "=" * 72)
@@ -455,6 +501,13 @@ def main():
         ("%dm/대" % alloc_m) if alloc_m else "미확인(추정 생략)",
         ("%d%%" % node_cpu) if node_cpu is not None else "미확인"))
     print("  실사용 근거: %s" % basis)
+    if min_cap:
+        cur_min = sum((v.get("min") or 0) for v in live.values())
+        print("  min 여유: 기준 %d노드(%dm) - 시스템 %dm = %dm 여유"
+              % (base_nodes, alloc_m * base_nodes, sys_m, avail_m))
+        print("      -> 노드를 늘리지 않고 각 앱 min 을 최대 %d 까지 올릴 수 있다 (현재 합계 %d)"
+              % (min_cap, cur_min))
+        print("         트래픽이 계단처럼 들어오면 HPA 램프(실측 1분 45초)가 그대로 실패로 잡힌다.")
     if not win:
         print("      podcpu.csv 가 없다. 최신 loadtest.ps1 로 다시 측정하면 부하 창 p95 로 판정한다")
     if assumed:

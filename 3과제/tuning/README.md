@@ -1,4 +1,4 @@
-# tuning/ — 부하 측정 · 응답규약 검증 · 자동 튜닝
+# tuning/ — 부하 측정 · 응답규약 검증 · 비파괴 권장값 계산
 
 3과제 40점은 **전부 부하 테스트 결과**로 매겨진다. 이 폴더는 채점과 같은 방식으로 미리 재보고,
 어디를 고칠지 정해주는 도구 모음이다. Windows PowerShell 기준.
@@ -20,7 +20,7 @@
 | `config.ps1` | **대회날 여기만 고친다.** 엔드포인트·API 목록·SLO·게이트 |
 | `verify.ps1` | 응답코드 규약 검증 (정상 2xx / 비정상 403 / 미정의 404 / 이미지 200) |
 | `loadtest.ps1` | 채점 방식 부하 측정 → 리포트 + 권장값 (+ `podcpu.csv` 실사용 기록) |
-| `autotune.ps1` | request 고정 + 앱별 HPA min/max/target 실측 탐색 → 공식 총점 최고 후보 적용 |
+| `autotune.ps1` | 완료된 부하 결과로 requests.cpu + HPA min/max/target 권장값만 계산(자동 변경 없음) |
 | `score.py` | hey CSV 채점기 (`loadtest`/`autotune` 이 호출) |
 | `advise.py` | 측정 + 실사용 + 라이브 상태 → **원인 구분 후** 앱별 판정 |
 | `waf_header_stats.py` | WAF 로그 분석 → 아직 안 막힌 비정상 패턴 + tfvars 제안 |
@@ -38,7 +38,7 @@ kubectl -n app get pods                               # 클러스터 보이는�
 
 .\verify.ps1                                          # 1) 응답규약 4점 먼저
 .\loadtest.ps1 -Duration 180s -Label baseline          # 2) 가용성/성능/노드 측정
-.\autotune.ps1 -App stress -Duration 90s               # 3) 병목 앱만 정밀 튜닝
+.\autotune.ps1 -Result baseline                         # 3) request+HPA 권장값만 계산(변경 없음)
 ```
 
 엔드포인트는 자동으로 `..\terraform` 의 `terraform output -raw endpoint` 에서 읽는다.
@@ -183,136 +183,79 @@ user         99.2%    4.0   52.2%   1.0
 
 ---
 
-## advise.py — 앱별 판정
+## advise.py — 비파괴 request/HPA 계산
 
-`loadtest.ps1` 끝에서 자동 실행된다. 측정값 + 라이브 설정 + **부하 중 실사용 CPU** 를 합쳐
-앱마다 판정하고, 즉시 적용 명령과 terraform 반영값을 같이 출력한다.
+`loadtest.ps1` 끝에서 자동 실행된다. 측정 결과, 활성 부하창의 Pod/노드 CPU, 라이브
+Deployment/HPA 설정을 읽어서 앱별 `requests.cpu`, `min`, `max`, `target%` 권장값을 출력한다.
+클러스터나 Terraform은 변경하지 않는다.
 
-### request 를 다루는 원칙 (중요)
+핵심 공식:
 
-`requests.cpu` 는 **노드 예약량이지 파드 속도 상한이 아니다.** cpu limit 이 없는 앱은
-request 를 올려도 빨라지지 않는다. 올리면 오히려 두 방향으로 해롭다.
-
-- 노드당 파드 수가 줄어 **노드가 늘고 비용이 오른다**
-- HPA 사용률 = 실사용 ÷ request 가 작아져 **스케일업이 늦어진다** (성능이 더 나빠질 수 있다)
-
-그래서 "느리다 → request 올려" 는 틀린 처방이다. 원인을 먼저 가른다.
-
-| 상황 | 판정 · 원인 | request |
-|---|---|---|
-| `avail < 99%` + 파드가 max 에 붙음 | 늘려 · 파드 상한 도달 | 유지, `max+2` |
-| `avail < 99%` (상한 여유 있음) | 늘려 · 파드 부족/스케일 지연 | 유지, `min+1` · `util-10` |
-| 느림 + 파드가 max 에 붙음 | 늘려 · 파드 상한 도달 | 유지, `max+2` |
-| 느림 + 노드 CPU ≥ 80% | 늘려 · 노드 CPU 포화 | **올림** (노드 경쟁 완화. 이 경우만 유효) |
-| 느림 + 실사용 < request × 0.5 | 유지 · **CPU 병목 아님** | **올리지 않음** → DB·캐시·커넥션풀 확인 |
-| 느림 + 현재 사용률 < 목표 | 늘려 · 스케일 지연 | 유지, `util-15` · `min+1` |
-| 느림 + 실사용이 request 에 근접 | 늘려 · 파드 CPU 포화 | 실사용 × 1.3 |
-| 통과 + request ≫ 실사용 | 줄여 · 과투자 | 실사용 × 1.3 (비용↓) |
-| 그 외 | 유지 · 균형 | 유지 |
-
-권장 request 는 항상 **실사용 × 1.3** 이다. `×1.4` 같은 임의 배수를 쓰지 않는다.
-
-### 실사용을 무엇으로 재는가
-
-출력 첫 줄의 `실사용 근거` 를 반드시 확인한다.
-
-| 표시 | 의미 |
-|---|---|
-| `부하 창 p95 (podcpu.csv)` | 정상. 부하 중 5초 간격 표본의 **순위기반 p95** |
-| `지금 순간값 1회 [!] 근거 약함` | `podcpu.csv` 가 없어 폴백. **이 회차의 request 권고는 신뢰하지 말 것** |
-
-순간값 하나로 판단하면 찍히는 타이밍이 값을 정해버린다. 실제로 겪은 사고다.
-
-```
-실사용 132m 지속 + 230m 스파이크 1회
-순간값 230m  ->  request 300m 권고   (과대)
-부하 창 p95 132m  ->  request 175m   (정상)
+```text
+현재 파드당 목표 CPU = requests.cpu × target / 100
+필요 replica ≈ ceil(활성창 총 CPU p90 / 권장 파드당 목표 CPU)
 ```
 
-p95 는 **보간 없는 순위 기반**으로 계산한다. `statistics.quantiles` 같은 보간형은 표본이 적을 때
-상위 백분위가 최댓값으로 끌려간다(실측: 120~152m 표본 19개 + 400m 1개에서 p95 가 388m).
-5초 간격 180초면 표본이 36개뿐이라 이 차이가 그대로 권고값을 흔든다.
+request는 CPU 제한이 아니라 예약량이므로 성능이 낮다는 이유만으로 올리지 않는다. 활성 부하창에서
+노드 CPU가 90% 이상이고 파드 CPU p90이 현재 request보다 10% 이상 높을 때만, 한 회차 최대 25%씩
+올린다. request가 바뀌면 기존 HPA 민감도를 유지하도록 target을 역산한 뒤, 30% 성능 게이트 또는
+가용성 미달일 때만 파드당 목표 CPU를 5~10% 추가로 낮춘다.
 
-### 대회날 변경 대응
-
-앱 이름·개수·SLO·노드 타입을 코드에 박지 않는다.
-
-- **앱 목록**: 결과 폴더의 `<앱>.csv` 에서 자동 발견
-- **SLO**: `--slos user=0.2,product=0.2,stress=1.0`. 목록에 없는 앱은 `--default-slo`(기본 1.0초)를
-  쓰고 `[!] SLO 미지정 앱` 경고를 낸다 → 문제지 값으로 `--slos` 를 지정할 것
-- **노드 할당가능 CPU**: 라이브 `status.allocatable` 에서 읽는다. 여러 타입이 섞이면 가장 작은 노드
-  기준(노드 수 과소추정 방지). 못 읽으면 `미확인(추정 생략)` 으로 두고 틀린 숫자를 내지 않는다
+`podcpu.csv`와 `nodecpu.csv`는 반드시 `loadwindows.csv`의 start/end 안에 있는 표본만 사용한다.
+이 필터가 UTC+9가 중복 적용된 표본과 부하 종료 후 유휴 표본을 제거한다. 백분위는 표본 수가 적어도
+최댓값 보간에 끌려가지 않도록 nearest-rank 방식으로 계산한다.
 
 ```powershell
-python advise.py <label|폴더> [--slos user=0.2,...] [--default-slo 1.0] [--ns app]
+py -3 .\advise.py baseline --slos user=0.2,product=0.2,stress=1.0 --ns app
+py -3 .\advise.py baseline --slos user=0.2,product=0.2,stress=1.0 --ns app --app user
 ```
 
-### 적용
-
-`kubectl set resources` / `patch hpa` 는 **임시**다(apply 하면 사라짐). 확정된 값은
-`terraform/k8s_apps.tf` 의 `requests.cpu` / HPA `average_utilization`·`min_replicas`·`max_replicas`
-에 박고 `terraform apply`.
-
-⚠ **부하 측정 중에는 `requests` 를 바꾸지 않는다.** requests 변경은 파드 롤아웃을 일으키고,
-롤아웃 자체가 504 를 만들어 가용성 점수를 깎는다. 측정 중에 손대야 하면 **HPA 만** 만진다.
-advise.py 도 request 가 안 바뀌면 `set resources`·`rollout status` 를 아예 출력하지 않는다.
+출력은 다음 측정 회차를 위한 1-step 권장값이다. 사용자가 `k8s_apps.tf`에 직접 반영하고 apply한 뒤
+새 label로 180초 재측정한다. 부하 중 request 변경은 롤아웃을 일으키므로 공식 트래픽 전 작업한다.
 
 ---
 
-## autotune.ps1 — HPA-only 실제점수 탐색
+## autotune.ps1 — 비파괴 request + HPA 권장값 계산
 
-`requests.cpu`는 고정하고 선택한 앱의 **HPA min/max/CPU target 세 값만** 탐색한다.
-HPA patch는 Deployment 롤아웃을 일으키지 않으므로 request까지 바꾸던 예전 autotune보다 안전하다.
-
-```powershell
-# 후보만 확인 — 변경/부하 없음
-.\autotune.ps1 -App user -DryRun
-
-# 1차 동적 후보 6개, 후보당 90초
-.\autotune.ps1 -App user -Duration 90s
-
-# 1차 승자 주변 min±1 / max±2 / target±10 추가 탐색
-.\autotune.ps1 -App stress -Duration 90s -Refine
-
-# 비용 비교 정확도를 높이되 오래 걸림: 후보 사이 최대 10분 노드 회수 대기
-.\autotune.ps1 -App product -Duration 90s -DrainSeconds 600
-```
-
-후보는 고정 숫자가 아니라 **현재 라이브 HPA 값 주변**에서 만든다.
-
-| 후보 | 변경 |
-|---|---|
-| baseline | 현재 min/max/target |
-| target-down | target -15%p |
-| target-up | target +15%p |
-| warm-min | min +1 |
-| max-up | max +2 |
-| aggressive | min +1, max +2, target -15%p |
-
-각 후보마다 `loadtest.ps1`의 실제 분산키 부하를 실행하고 `score.py`의 공식 채점식으로 정렬한다.
+`autotune.ps1`은 완료된 `loadtest` 결과와 라이브 설정을 **읽기만** 하고 다음 값을 계산한다.
 
 ```text
-1순위: 공식 소계(가용성+성능+비용, 36점) 높은 값
-동점  : 평균 노드 수가 낮은 값
-재동점: 선택한 앱의 performance가 높은 값
+requests.cpu
+minReplicas
+maxReplicas
+CPU averageUtilization
 ```
 
-`-Refine`은 1차 승자 주변을 한 축씩 추가로 움직여 좌표 탐색한다. 앱 이름·현재 HPA 값·트래픽이
-바뀌어도 같은 방식으로 후보를 만든다. 승자는 라이브 HPA에 남기고 Terraform 반영값을 출력한다.
+```powershell
+# 먼저 측정
+.\loadtest.ps1 -Duration 180s -Label baseline
 
-### “완벽값”의 한계
+# 전체 앱 권장값만 출력
+.\autotune.ps1 -Result baseline
 
-부하·캐시·DB 상태와 Karpenter 회수 시간 때문에 단 한 번의 측정으로 수학적인 영구 최적값은 없다.
-이 도구는 **실제로 측정한 후보 중 공식 점수가 가장 높은 값**을 찾는다. 정확도를 높이려면:
+# 한 앱만 출력
+.\autotune.ps1 -Result baseline -App user
+```
 
-1. 한 번에 앱 하나만 `-App`으로 튜닝한다.
-2. 후보당 최소 90초, 최종 승자는 180초로 재검증한다.
-3. 비용까지 공정하게 비교하려면 `-DrainSeconds 600`을 쓴다. 0이면 빠르지만 이전 후보 노드가 남을 수 있다.
-4. `user → product → stress`처럼 앱별 실행 후, 마지막에 전체 180초를 한 번 더 측정한다.
-5. 트래픽/바이너리가 바뀌면 이전 승자를 정답으로 보지 말고 다시 실행한다.
+이 스크립트와 `advise.py`는 `kubectl patch`, `kubectl set resources`, rollout 또는
+`terraform apply`를 실행하지 않는다. 출력된 값을 사용자가 검토한 뒤
+`terraform/k8s_apps.tf`에 직접 반영하고 새 label로 재측정한다.
 
-대회 시간 안에는 `-Refine`과 긴 drain을 세 앱 모두 돌리기 어렵다. 먼저 현재 점수가 낮고 다음
-채점 구간까지 거리가 가까운 앱을 1차 6후보로 튜닝하고, 시간이 남을 때만 `-Refine`한다.
+계산 원칙:
+
+1. `loadwindows.csv`의 실제 활성 부하창에 해당하는 `podcpu.csv`/`nodecpu.csv` 표본만 사용한다.
+   UTC+9 오염 표본과 부하 종료 후 유휴 표본은 버린다.
+2. HPA의 실질 기준은 `requests.cpu × target%`인 파드당 목표 CPU다.
+3. 노드 CPU가 90% 이상이고 파드 CPU p90이 request를 10% 이상 넘을 때만 request를 올린다.
+   한 회차 조정폭은 최대 25%다.
+4. request가 바뀌면 기존 HPA 민감도를 보존하도록 target을 역산한다. 성능 30% 게이트나
+   가용성이 미달일 때만 파드당 목표 CPU를 추가로 5~10% 낮춘다.
+5. 활성창 총 CPU p90을 권장 파드당 목표 CPU로 나눠 필요 replica를 계산한다.
+   min은 초기 냉간구간을 완화하고, max는 한 회차 최대 25%만 늘린다.
+6. 세 앱 중 하나라도 성능 30% 미만이면 비용 12점이 전부 0이므로 30% 게이트 복구가 우선이다.
+
+권장값은 영구 정답이 아니라 **다음 측정 회차용 1-step 값**이다. 한 번 반영한 뒤 반드시
+다른 label로 180초 재측정하고 다시 계산한다. 앱·트래픽·바이너리가 바뀌면 이전 결과를 재사용하지 않는다.
 
 ## waf_header_stats.py — 안 막힌 비정상 찾기
 

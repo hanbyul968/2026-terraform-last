@@ -233,8 +233,35 @@ foreach ($a in $APIS) {
 
 if ($sampler) { Stop-Job $sampler -ErrorAction SilentlyContinue; Remove-Job $sampler -Force -ErrorAction SilentlyContinue }
 
-# --- 채점 (SLO 는 config.ps1 의 $SLOS) ---
-python (Join-Path $Here 'score.py') report $OUT $Label $SLOS
+# --- 채점 + 비파괴 권장값 계산 ---
+# Python 3.13은 한글 경로를 현재 prefix로 잘못 잡는 경우가 있어 Windows launcher(py -3)를 우선한다.
+$pythonExe = $null
+$pythonPrefix = @()
+if (Get-Command py -ErrorAction SilentlyContinue) {
+  $pythonExe = (Get-Command py).Source
+  $pythonPrefix = @('-3')
+} elseif (Get-Command python -ErrorAction SilentlyContinue) {
+  $pythonExe = (Get-Command python).Source
+} else {
+  Write-Error 'Python 없음 — py -3 또는 python이 필요합니다.'
+  exit 1
+}
 
-# --- 권장값 + 복붙 명령 (측정 → 앱별 늘려/줄여/유지 판정) ---
-python (Join-Path $Here 'advise.py') $OUT --slos $SLOS --ns $NS
+$oldConsoleEncoding = [Console]::OutputEncoding
+$oldOutputEncoding = $OutputEncoding
+try {
+  $utf8 = New-Object System.Text.UTF8Encoding($false)
+  [Console]::OutputEncoding = $utf8
+  $OutputEncoding = $utf8
+  $env:PYTHONIOENCODING = 'utf-8'
+
+  & $pythonExe @pythonPrefix (Join-Path $Here 'score.py') report $OUT $Label $SLOS
+  if ($LASTEXITCODE -ne 0) { Write-Error 'score.py 실패'; exit 1 }
+
+  # 측정값을 읽어 request/HPA 권장값만 출력한다. 클러스터를 변경하지 않는다.
+  & $pythonExe @pythonPrefix (Join-Path $Here 'advise.py') $OUT --slos $SLOS --ns $NS
+  if ($LASTEXITCODE -ne 0) { Write-Error 'advise.py 실패'; exit 1 }
+} finally {
+  [Console]::OutputEncoding = $oldConsoleEncoding
+  $OutputEncoding = $oldOutputEncoding
+}

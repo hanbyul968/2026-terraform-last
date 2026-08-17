@@ -41,6 +41,7 @@ import os
 import statistics
 import subprocess
 import sys
+import time
 
 # 노드 1대의 할당가능 CPU 는 어떤 상수도 두지 않는다. 특정 인스턴스 타입(t3.medium 등)을
 # 가정하면 대회날 타입이 바뀔 때 노드 수 추정이 조용히 틀어진다.
@@ -84,6 +85,29 @@ def pct_nearest(sorted_vals, q):
         return sorted_vals[0]
     idx = int(q / 100.0 * (len(sorted_vals) - 1))
     return sorted_vals[idx]
+
+
+# 채점 구간(가용성/성능 공통). 넘을 때마다 0.5점. score.py 의 RATE_BANDS 와 같아야 한다.
+RATE_BANDS = [90.0, 87.5, 85.0, 82.5, 80.0, 70.0, 50.0, 30.0]
+
+
+def band_of(v):
+    """현재 값이 몇 점인지(0.5 단위)."""
+    return 0.5 * sum(1 for b in RATE_BANDS if v >= b)
+
+
+def next_band(v):
+    """(다음 구간 값, 그때까지 필요한 %p). 이미 최상위면 (None, None).
+
+    구간 사이에는 점수가 없다. 70.0~80.0 처럼 넓은 죽은 구간이 있어서
+    79.9% 는 70.1% 와 같은 점수다. '조금 나아짐'이 점수로 안 바뀌므로,
+    개선 노력은 반드시 '다음 구간'을 넘기는 것을 목표로 해야 한다.
+    """
+    below = [b for b in RATE_BANDS if b > v]
+    if not below:
+        return None, None
+    tgt = min(below)
+    return tgt, round(tgt - v, 2)
 
 
 def right_size(base_m):
@@ -363,8 +387,67 @@ def live_state(ns):
     return state
 
 
+# ---------- 회차 이력 (max 판단에 필요) ----------
+# "파드를 늘리면 성능이 좋아지는가"는 한 회차만 보면 알 수 없다. 이전 회차보다 파드가
+# 많았는데 성능이 나아지지 않았다면, max 를 더 열어도 노드만 늘고 점수는 그대로다.
+#   실측(stress): 5개 76.9% -> 7개 75.0% 로 오히려 하락. 초당 1건 트래픽이라 p95 는
+#   동시성이 아니라 '단건 처리 시간'이 결정하기 때문이다.
+# 그래서 회차마다 (앱, 파드수, perf) 를 남겨 두고 다음 판정에서 참고한다.
+HIST_PATH = os.path.join(os.environ.get("TEMP", "/tmp"), "tune-history.jsonl")
+
+
+def hist_append(label, app, replicas, perf, avail, p95):
+    try:
+        with open(HIST_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": int(time.time()), "label": label, "app": app,
+                                "replicas": replicas, "perf": perf, "avail": avail,
+                                "p95": p95}, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def hist_load(app, limit=12):
+    out = []
+    try:
+        for line in open(HIST_PATH, encoding="utf-8", errors="replace"):
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            if d.get("app") == app:
+                out.append(d)
+    except OSError:
+        return []
+    return out[-limit:]
+
+
+def pods_helped(app, cur_replicas, cur_perf):
+    """더 많은 파드가 성능에 도움이 됐나? (도움됨 / 무의미 / 판단불가)
+
+    반환: (verdict, 근거문자열)
+      "no"      : 과거에 더 많은 파드로 돌렸는데 perf 가 나아지지 않았다 -> max 를 더 열지 말 것
+      "yes"     : 파드가 많을 때 perf 가 유의하게 높았다
+      "unknown" : 비교할 이력이 없다
+    """
+    h = [d for d in hist_load(app) if d.get("replicas") and d.get("perf") is not None]
+    more = [d for d in h if d["replicas"] > cur_replicas]
+    if not more:
+        return "unknown", ""
+    best = max(more, key=lambda d: d["perf"])
+    if best["perf"] <= cur_perf + 1.0:      # 1%p 이내면 개선 없음으로 본다
+        return "no", "과거 파드 %d개에서 perf %.1f%% (현재 %d개 %.1f%%) - 파드를 늘려도 개선 없음" % (
+            best["replicas"], best["perf"], cur_replicas, cur_perf)
+    return "yes", "과거 파드 %d개에서 perf %.1f%% (현재 %d개 %.1f%%)" % (
+        best["replicas"], best["perf"], cur_replicas, cur_perf)
+
+
 # ---------- 판정 ----------
-def judge(m, cur, peak_m=None, node_cpu=None):
+def keep_req_note(s):
+    """request 를 그대로 두는 판정의 근거 문구."""
+    return s
+
+
+def judge(m, cur, peak_m=None, node_cpu=None, pods_verdict=("unknown", "")):
     """(방향, 원인, 권장 cpu/util/min/max, 근거, 다음확인) 을 돌려준다.
 
     m       : 측정 {avail, perf, p95, slo}
@@ -412,6 +495,16 @@ def judge(m, cur, peak_m=None, node_cpu=None):
 
     if bad_perf:
         if at_max:
+            pv, pwhy = pods_verdict
+            if pv == "no":
+                # 파드를 늘려도 성능이 안 나아진 이력이 있으면 max 를 더 열지 않는다.
+                # 열어두면 노드만 늘어 비용을 깎고 점수는 그대로다.
+                #   실측(stress): 5개 76.9% -> 7개 75.0%. 초당 1건 트래픽이라 p95 는
+                #   동시성이 아니라 '단건 처리 시간'이 결정하기 때문이다.
+                capped = max(mn + 1, min(mx, rep))
+                return ("유지 (max 묶기)", "파드 증설 무효", cpu, util, mn, capped,
+                        f"p95 {m['p95']:.3f}s > SLO {m['slo']}s 이지만 {pwhy}. 파드/노드를 더 쓰면 비용만 늘어난다",
+                        "단건 처리 시간이 병목이면 파드 수로는 못 고친다. 앱 처리 경로(DB/외부호출/캐시)를 본다")
             # 상한이 병목이면 +2 로는 부족한 경우가 많다. 50% 증량(최소 +2).
             # HPA 는 '총실사용/target%' 로 평형을 찾는데 max 에 막히면 평형에 도달하지 못해
             # 파드마다 과부하가 걸린 채로 지연이 난다. 여유를 충분히 줘야 평형이 잡힌다.
@@ -428,10 +521,28 @@ def judge(m, cur, peak_m=None, node_cpu=None):
                     f"p95 {m['p95']:.3f}s > SLO 인데 실사용 피크 {peak_m}m 이 request {cpu}m 의 절반도 안 된다"
                     + (f", 노드도 {nc}%" if nc >= 0 else "") + ". CPU 가 병목이 아니라 request 를 올려도 안 나아진다(노드만 늘어 비용 손실)",
                     "DB(RDS CPU/커넥션/쿼리지연), CloudFront 캐시 히트율, 커넥션풀 borrow 대기, 외부 호출 지연을 본다")
-        if curp is not None and curp < util:
-            return ("늘려", "스케일 지연", cpu, max(40, util - 15), mn + 1, mx,
-                    f"p95 초과인데 현재 사용률 {curp}% 가 목표 {util}% 아래다 = HPA 가 아직 안 늘린 상태에서 지연 발생",
-                    "")
+        # curp(HPA 현재 사용률)가 0 이면 '부하가 없는 지금 시점'을 읽은 것이다.
+        # 측정은 과거 창(부하 중)인데 curp 는 라이브 스냅샷이라 시점이 다르다.
+        # 0 을 근거로 목표를 내리면 근거 없이 25% 같은 값이 나온다(실측 사고).
+        # 부하 중 실사용(peak_m)과 request 로 '측정 창의 사용률'을 복원해 쓴다.
+        util_measured = None
+        if peak_m and cpu:
+            util_measured = int(round(100.0 * peak_m / cpu))
+        eff = util_measured if (curp is None or curp <= 0) else curp
+        if eff is not None and eff < util:
+            # 이 분기가 'CPU 기반 HPA 가 안 맞는 앱'을 다루는 곳이다.
+            # user 처럼 요청 시간의 대부분이 대기(DB/외부호출)인 앱은 지연이 나빠도 CPU 는
+            # 안 올라간다. 목표를 70% 로 두면 HPA 가 가만히 있는다(실측: 64%/70%, SLA 59.7%).
+            # 정공법은 응답시간 기반 스케일링이지만 ALB TargetResponseTime 은 CloudWatch
+            # 경유라 1~3분 지연이 있어, 손실이 몰리는 '스파이크 진입 3~4분'에는 이미 늦다.
+            # 그래서 실효 수단은 '목표를 실측 사용률 아래로 내려' HPA 가 반응하게 만드는 것이다.
+            # 현재 사용률보다 확실히 낮게(10%p 아래) 잡아야 즉시 반응한다. 하한 25%.
+            newutil = max(25, min(util - 15, eff - 10))
+            src = "HPA 현재" if (curp and curp > 0) else "부하 창 실사용/request 로 복원"
+            return ("늘려", "스케일 지연 (CPU 기반 HPA 부적합)", cpu, newutil, mn + 1, mx,
+                    f"p95 초과인데 사용률 {eff}%({src}) 가 목표 {util}% 아래다 = HPA 가 안 늘리는 상태에서 지연 발생. "
+                    f"대기 위주 앱이면 CPU 사용률이 부하를 대표하지 못한다 -> 목표를 {newutil}% 로 내려 반응하게 만든다",
+                    "목표를 내려도 안 되면 응답시간 기반 스케일링(KEDA + CloudWatch)을 검토하되, CloudWatch 지연(1~3분) 때문에 진입 구간은 min 상향으로 덮어야 한다")
         return ("늘려", "파드 CPU 포화", fit or cpu, util, mn, mx,
                 f"실사용 피크 {peak_m}m 이 request {cpu}m 에 근접/초과, 노드는 여유. 피크x1.3 = {fit}m 으로 맞춘다",
                 "")
@@ -522,7 +633,12 @@ def main():
     for api in apps:
         cur = live.get(api, {})
         peak = peaks.get(api)
-        d, cause, rcpu, rutil, rmn, rmx, why, nextchk = judge(meas.get(api), cur, peak, node_cpu)
+        mm = meas.get(api)
+        rep_now = cur.get("replicas") or cur.get("min") or 0
+        pv = pods_helped(api, rep_now, mm["perf"]) if (mm and rep_now) else ("unknown", "")
+        d, cause, rcpu, rutil, rmn, rmx, why, nextchk = judge(mm, cur, peak, node_cpu, pv)
+        if mm and rep_now:
+            hist_append(os.path.basename(outdir), api, rep_now, mm["perf"], mm["avail"], mm["p95"])
         cpu, util = cur.get("cpu") or "?", cur.get("util") or "?"
         mn, mx = cur.get("min") or "?", cur.get("max") or 10
         mark = {"늘려": "↑", "줄여": "↓", "유지": "=", "관측필요": "?"}[d]
@@ -537,6 +653,16 @@ def main():
         else:
             print(f"  실사용: {peak if peak is not None else '-'}m (순간값)"
                   + (f" · 적정 request {right_size(peak)}m" if peak else ""))
+        if mm:
+            for label, val in (("perf", mm["perf"]), ("avail", mm["avail"])):
+                nb, gap = next_band(val)
+                cur_pt = band_of(val)
+                if nb is None:
+                    print(f"  {label:5} {val:5.1f}% -> {cur_pt:.1f}/4.0 (최상위 구간)")
+                else:
+                    print(f"  {label:5} {val:5.1f}% -> {cur_pt:.1f}/4.0   다음 구간 {nb}% 까지 +{gap}%p (넘기면 +0.5)")
+            if pv[0] != "unknown":
+                print(f"  파드 효과: {pv[1]}")
         print(f"  근거: {why}")
         if nextchk:
             print(f"  다음 확인: {nextchk}")

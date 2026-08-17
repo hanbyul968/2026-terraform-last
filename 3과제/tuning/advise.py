@@ -769,6 +769,28 @@ def main():
         ("%dm/대" % alloc_m) if alloc_m else "미확인(추정 생략)",
         ("%d%%" % node_cpu) if node_cpu is not None else "미확인"))
     print("  실사용 근거: %s" % basis)
+    # ★ 비용 게이트: 세 앱 중 하나라도 성능 30% 미달이면 비용 12점이 '전부' 0 이다.
+    # 이때 전략이 뒤집힌다 — 비용 점수가 이미 0 이므로 노드를 더 쓰는 것이 공짜다.
+    # 게이트를 여는 데 필요한 자원은 아끼지 말고 쏟아야 한다.
+    #   실측: 노드 2.9대(1.5배 = 원래 10점)인데 user 성능 29.5% 로 게이트가 걸려 비용 0점.
+    #         user 를 30% 위로만 올리면 성능 +0.5 와 비용 10점이 동시에 열린다.
+    gate_bad = sorted(k for k, v in meas.items() if v and v["perf"] < 30.0)
+    if gate_bad:
+        print("")
+        print("  " + "!" * 68)
+        print("  ★ 비용 게이트 발동: 성능 30%% 미달 앱 -> %s" % ", ".join(gate_bad))
+        print("     비용 12점이 '전부' 0 입니다. 노드 수와 무관합니다.")
+        for k in gate_bad:
+            nb, gap = next_band(meas[k]["perf"])
+            print("     %s 성능 %.1f%% -> 30%% 까지 +%.2f%%p 만 올리면 비용 12점이 열립니다"
+                  % (k, meas[k]["perf"], 30.0 - meas[k]["perf"]))
+        if ratio_now:
+            would = cost_points_of(ratio_now)
+            print("     현재 노드 평균이면 게이트만 열려도 비용 %d점을 즉시 회수합니다." % would)
+        print("     => 지금은 비용을 아낄 이유가 없습니다. 게이트를 여는 데 자원을 쏟으십시오:")
+        print("        min/max 상향, request 상향, 노드 증설 모두 '공짜'입니다(이미 0점).")
+        print("  " + "!" * 68)
+        print("")
     if ratio_now:
         cp = cost_points_of(ratio_now)
         print("  비용 현황: 노드 평균 %.2f대 -> ratio %.2f -> %d/12점" % (nodes_avg, ratio_now, cp))
@@ -856,6 +878,13 @@ def main():
             print(f"  [!] request {rcpu}m 는 노드당 {fpn}개만 들어간다(노드 전용화) -> {safe}m 로 제한")
             rcpu = safe
         cap = max_pods_in_budget(budget_nodes, alloc_m, sys_m, reqs_for_cap, usage_base, api)
+        if gate_bad:
+            # 게이트가 걸려 있으면 비용 점수가 이미 0 이라 예산 제한이 의미가 없다.
+            # 오히려 제한을 걸면 게이트를 여는 데 필요한 용량을 막는다.
+            if cap and rmx > cap:
+                print(f"  [게이트] 비용이 이미 0점이므로 max {rmx} 제한을 적용하지 않습니다"
+                      f" (예산 기준으로는 {cap})")
+            cap = None
         if cap and rmx > cap:
             print(f"  [!] max {rmx} 는 비용 예산({a.cost_points}점, 노드 {budget_nodes:.1f}대)을 넘긴다"
                   f" -> max {cap} 로 제한 (request {rcpu}m 기준)")

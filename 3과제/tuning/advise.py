@@ -91,6 +91,46 @@ def pct_nearest(sorted_vals, q):
 RATE_BANDS = [90.0, 87.5, 85.0, 82.5, 80.0, 70.0, 50.0, 30.0]
 
 
+# 비용 구간(채점기준). ratio 가 각 상한 이하일 때마다 1점 (누적 최대 12점).
+COST_LIMITS = [1.00, 1.25, 1.50, 1.75, 2.00, 2.25, 2.50, 2.75, 3.00, 3.25, 3.50, 3.75]
+COST_RATIO_FLOOR = 0.50
+
+
+def cost_points_of(ratio):
+    """cost ratio -> 비용 점수(하한 미달이면 0)."""
+    if ratio < COST_RATIO_FLOOR:
+        return 0
+    return sum(1 for lim in COST_LIMITS if ratio <= lim)
+
+
+def node_budget(target_points, base_nodes):
+    """비용 N점을 받으려면 노드 평균이 몇 대 이하여야 하나.
+
+    채점기준이 고정이므로 이 역산은 앱·트래픽이 바뀌어도 그대로 유효하다.
+    반환: (허용 ratio, 허용 노드 평균)
+    """
+    cands = [lim for lim in COST_LIMITS if cost_points_of(lim) >= target_points]
+    if not cands or not base_nodes:
+        return None, None
+    ratio = max(cands)          # 그 점수를 받는 가장 느슨한 상한
+    return ratio, ratio * base_nodes
+
+
+def max_pods_in_budget(nodes_allowed, alloc_m, sys_m, req_m):
+    """노드 예산 안에 들어가는 앱 1개의 최대 파드 수.
+
+    max_replicas 를 임의 숫자로 두면 안 되는 이유가 여기 있다. HPA 는 부하가 요구하면
+    상한까지 파드를 만들고, Karpenter 는 노드를 공급한다. 즉 '천장이 곧 비용'이 된다.
+      실측: max 6 -> 비용 8점(ratio 1.91) / max 30 -> 비용 4점(ratio 2.81).
+            성능은 +0.5 얻고 비용 -4.0 을 잃어 순손실이었다.
+    그래서 상한은 감으로 정하지 말고 비용 예산에서 역산한다.
+    """
+    if not (nodes_allowed and alloc_m and req_m):
+        return None
+    avail = alloc_m * nodes_allowed - sys_m
+    return max(1, int(avail // req_m))
+
+
 def band_of(v):
     """현재 값이 몇 점인지(0.5 단위)."""
     return 0.5 * sum(1 for b in RATE_BANDS if v >= b)
@@ -396,14 +436,52 @@ def live_state(ns):
 HIST_PATH = os.path.join(os.environ.get("TEMP", "/tmp"), "tune-history.jsonl")
 
 
-def hist_append(label, app, replicas, perf, avail, p95):
+def hist_append(label, app, replicas, perf, avail, p95, ratio=None, nodes_avg=None):
     try:
         with open(HIST_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps({"ts": int(time.time()), "label": label, "app": app,
                                 "replicas": replicas, "perf": perf, "avail": avail,
-                                "p95": p95}, ensure_ascii=False) + "\n")
+                                "p95": p95, "ratio": ratio, "nodes_avg": nodes_avg},
+                               ensure_ascii=False) + "\n")
     except OSError:
         pass
+
+
+def hist_runs():
+    """회차별로 묶어 (label, {앱: (perf, avail)}, ratio) 를 돌려준다.
+
+    성능과 비용은 서로 교환 관계라 '어느 방향이 이득인가'는 한 회차만 보면 알 수 없다.
+    회차들을 모아 실제 채점 총점으로 줄세우면 측정된 최적점이 드러난다.
+    """
+    runs = {}
+    try:
+        for line in open(HIST_PATH, encoding="utf-8", errors="replace"):
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            lb = d.get("label")
+            if not lb or d.get("perf") is None:
+                continue
+            r = runs.setdefault(lb, {"perf": {}, "avail": {}, "ratio": None, "nodes": None})
+            r["perf"][d["app"]] = d["perf"]
+            r["avail"][d["app"]] = d.get("avail")
+            if d.get("ratio"):
+                r["ratio"] = d["ratio"]
+            if d.get("nodes_avg"):
+                r["nodes"] = d["nodes_avg"]
+    except OSError:
+        return {}
+    return runs
+
+
+def run_total(perf, avail, ratio):
+    """회차의 채점 소계(비정상요청 4점 제외). score.py 의 rubric 과 같은 규칙."""
+    if not perf or not avail or not ratio:
+        return None
+    bad = [a for a, v in perf.items() if v < 30.0]
+    cp = 0 if bad else cost_points_of(ratio)
+    return sum(band_of(v) for v in avail.values()) + sum(band_of(v) for v in perf.values()) + cp
 
 
 def hist_load(app, limit=12):
@@ -567,6 +645,9 @@ def main():
     ap.add_argument("target", help="loadtest label 또는 결과 폴더 경로")
     ap.add_argument("--slos", default="user=0.2,product=0.2,stress=1.0")
     ap.add_argument("--ns", default="app")
+    ap.add_argument("--cost-points", type=int, default=8,
+                    help="비용에서 최소 몇 점을 확보할지(1~12). 이 예산에서 노드 상한과 "
+                         "max_replicas 를 역산한다. 채점기준이 고정이라 앱이 바뀌어도 유효하다.")
     ap.add_argument("--default-slo", type=float, default=DEFAULT_SLO,
                     help="--slos 에 없는 앱에 쓸 SLO(초). 대회날 새 앱이 나와도 죽지 않게 하는 폴백")
     a = ap.parse_args()
@@ -603,6 +684,11 @@ def main():
     sys_m = system_cpu_req(a.ns)
     reqs_now = {k: v.get("cpu") for k, v in live.items() if v.get("cpu")}
     min_cap, avail_m = min_headroom(alloc_m, base_nodes, sys_m, reqs_now)
+    # 비용 예산 -> 허용 노드 -> 앱별 max_replicas 역산
+    ns_hist_pre = load_nodes(outdir)
+    nodes_avg = (sum(ns_hist_pre) / len(ns_hist_pre)) if ns_hist_pre else None
+    ratio_now = (nodes_avg / BASELINE_NODES) if (nodes_avg and BASELINE_NODES) else None
+    budget_ratio, budget_nodes = node_budget(a.cost_points, base_nodes)
     have_live = bool(live)
 
     print("\n" + "=" * 72)
@@ -612,6 +698,12 @@ def main():
         ("%dm/대" % alloc_m) if alloc_m else "미확인(추정 생략)",
         ("%d%%" % node_cpu) if node_cpu is not None else "미확인"))
     print("  실사용 근거: %s" % basis)
+    if ratio_now:
+        cp = cost_points_of(ratio_now)
+        print("  비용 현황: 노드 평균 %.2f대 -> ratio %.2f -> %d/12점" % (nodes_avg, ratio_now, cp))
+        if budget_nodes:
+            print("      목표 %d점을 받으려면 노드 평균 %.1f대 이하 (ratio <= %.2f)"
+                  % (a.cost_points, budget_nodes, budget_ratio))
     if min_cap:
         cur_min = sum((v.get("min") or 0) for v in live.values())
         print("  min 여유: 기준 %d노드(%dm) - 시스템 %dm = %dm 여유"
@@ -638,7 +730,8 @@ def main():
         pv = pods_helped(api, rep_now, mm["perf"]) if (mm and rep_now) else ("unknown", "")
         d, cause, rcpu, rutil, rmn, rmx, why, nextchk = judge(mm, cur, peak, node_cpu, pv)
         if mm and rep_now:
-            hist_append(os.path.basename(outdir), api, rep_now, mm["perf"], mm["avail"], mm["p95"])
+            hist_append(os.path.basename(outdir), api, rep_now, mm["perf"], mm["avail"],
+                        mm["p95"], ratio_now, nodes_avg)
         cpu, util = cur.get("cpu") or "?", cur.get("util") or "?"
         mn, mx = cur.get("min") or "?", cur.get("max") or 10
         mark = {"늘려": "↑", "줄여": "↓", "유지": "=", "관측필요": "?"}[d]
@@ -673,6 +766,13 @@ def main():
             print("  → 변경 없음")
             sum_cpu += (cur.get("min") or 2) * (cur.get("cpu") or 200)
             continue
+        # max 는 비용 예산에서 역산한 값으로 덮는다. HPA 는 부하가 요구하면 상한까지
+        # 파드를 만들고 Karpenter 가 노드를 공급하므로 '천장이 곧 비용'이다.
+        cap = max_pods_in_budget(budget_nodes, alloc_m, sys_m, rcpu)
+        if cap and rmx > cap:
+            print(f"  [!] max {rmx} 는 비용 예산({a.cost_points}점, 노드 {budget_nodes:.1f}대)을 넘긴다"
+                  f" -> max {cap} 로 제한 (request {rcpu}m 기준)")
+            rmx = cap
         print(f"  권장: cpu={rcpu}m util={rutil}% min={rmn} max={rmx}")
         patch = json.dumps({"spec": {"minReplicas": rmn, "maxReplicas": rmx if rmx != "?" else 10,
                                      "metrics": [{"type": "Resource", "resource": {"name": "cpu",
@@ -713,6 +813,31 @@ def main():
         print("    cd ..\\terraform ; terraform apply -auto-approve")
     else:
         print("  변경 권장 없음 — 현 설정 유지.")
+    # ---- 회차 비교: 성능과 비용은 교환 관계라 총점으로 줄세워야 방향이 보인다 ----
+    runs = hist_runs()
+    scored = []
+    for lb, r in runs.items():
+        tot = run_total(r["perf"], r["avail"], r["ratio"])
+        if tot is not None:
+            scored.append((tot, lb, r))
+    if len(scored) >= 2:
+        scored.sort(reverse=True)
+        print("")
+        print("  회차 비교 (채점 소계 = 가용성+성능+비용, 비정상요청 4점 제외)")
+        print("  %-16s %7s %7s %7s %7s  %s" % ("회차", "가용성", "성능", "비용", "소계", "노드평균"))
+        for tot, lb, r in scored:
+            av = sum(band_of(v) for v in r["avail"].values() if v is not None)
+            pf = sum(band_of(v) for v in r["perf"].values())
+            cp = cost_points_of(r["ratio"]) if r["ratio"] else 0
+            mark = "  <== 최고" if (tot, lb, r) == scored[0] else ""
+            print("  %-16s %7.1f %7.1f %7.1f %7.1f  %8s%s"
+                  % (lb, av, pf, cp, tot, ("%.2f" % r["nodes"]) if r["nodes"] else "-", mark))
+        best = scored[0]
+        print("")
+        print("  성능 1구간(+0.5)과 비용 1구간(+1.0)의 교환비를 보십시오.")
+        print("  비용 구간은 노드 평균 0.5대마다 1점입니다 — 성능 한 구간보다 크게 움직입니다.")
+        if best[2]["nodes"]:
+            print("  최고 회차 '%s' 의 노드 평균은 %.2f대였습니다." % (best[1], best[2]["nodes"]))
     print("  검증: 적용 후  .\\loadtest.ps1 <ep> 180s after  로 재측정 (한 번에 한 앱만 바꾸면 원인 추적 쉬움)")
     print("-" * 72)
 

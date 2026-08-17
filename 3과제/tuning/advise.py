@@ -721,8 +721,15 @@ def main():
         peaks = {k: v["p90"] for k, v in win.items()}
         basis = "부하 창 p90 (podcpu.csv, 앱 파드만)"
     else:
+        # podcpu.csv 가 없으면 지금 순간값으로 폴백하되, 그 값이 '부하가 없을 때' 찍힌
+        # 것이면 request 판정 근거로 쓸 수 없다. 그대로 쓰면 다음 사고가 난다:
+        #   실측 — 부하가 끝난 뒤 전 앱이 1m 로 읽혀 "실사용 1m 이 request 150m 의 절반도
+        #   안 된다 -> CPU 병목 아님" 이라는 잘못된 판정이 나왔다. 같은 앱의 실제 부하 중
+        #   p90 은 231m 이었다.
+        # 그래서 request 의 일정 비율(20%) 미만이면 '측정 안 됨'으로 처리해 판정을 보류한다.
         peaks = pod_usage_live(a.ns)
-        basis = "지금 순간값 1회 [!] 근거 약함"
+        # request 대비 타당성 검사는 live(현재 설정)를 읽은 뒤에 한다.
+        basis = "지금 순간값 1회 [!] 근거 약함 (부하 중에 측정한 값이 아니면 신뢰 불가)"
     node_cpu = node_cpu_max()        # 노드 실사용 CPU 최대 % (노드 경쟁 판단)
     alloc_m = node_alloc_m()         # 노드 할당가능 CPU (0 이면 추정 생략)
     ntypes = node_types()
@@ -737,6 +744,18 @@ def main():
     nodes_avg = (sum(ns_hist_pre) / len(ns_hist_pre)) if ns_hist_pre else None
     ratio_now = (nodes_avg / BASELINE_NODES) if (nodes_avg and BASELINE_NODES) else None
     budget_ratio, budget_nodes = node_budget(a.cost_points, base_nodes)
+    # 폴백(순간값)이 request 의 20% 미만이면 '부하 없이 찍힌 값'으로 보고 판정을 보류한다.
+    # 부하 중이 아니면 파드 CPU 는 1~2m 로 떨어지므로, 그 값으로 request 를 논할 수 없다.
+    if not win:
+        dropped = []
+        for k in list(peaks):
+            req = (live.get(k) or {}).get("cpu")
+            if req and peaks[k] is not None and peaks[k] < req * 0.2:
+                dropped.append("%s %dm(<%dm의 20%%)" % (k, peaks[k], req))
+                peaks[k] = None
+        if dropped:
+            print("  [!] 부하 없이 찍힌 순간값으로 판단하지 않습니다: %s" % ", ".join(dropped))
+            print("      -> 최신 loadtest.ps1 로 다시 측정하면 podcpu.csv 가 남아 부하 창 p90 으로 판정합니다")
     # 예산 분배 비중에 쓸 '앱별 실사용 기준값'. 부하 창 p90 이 있으면 그것을 쓴다.
     usage_base = {k: (win[k]["p90"] if k in win else peaks.get(k)) for k in set(list(peaks) + list(win))}
     # 앱별 min 상한(균등 가정이 아니라 실사용 비중으로 분배)

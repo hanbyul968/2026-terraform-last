@@ -197,20 +197,6 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "user" {
     # 대체 파드가 뜨는 동안 서비스가 끊긴다. 2 이면 hostname spread 로 두 노드에 나뉘어
     # 한 노드가 빠져도 무중단이고 consolidation 도 정상 동작한다.
     min_replicas = 2
-    # max_replicas 는 '천장이 곧 비용'이다. 넉넉히 열면 안 된다.
-    #
-    # "부하가 없으면 파드를 안 만드니 높여도 무해하다"는 추론은 이 워크로드에서 틀렸다.
-    # 부하가 CPU 를 계속 요구하므로 HPA 는 상한까지 파드를 만들고 Karpenter 가 노드를 공급한다.
-    # 즉 천장까지 실제로 올라가고, 그만큼 비용 점수를 잃는다.
-    #
-    # 실측 (채점 소계 = 가용성+성능+비용):
-    #   max 6   -> 가용성 12.0  성능 6.0  비용 8.0  소계 26.0   노드평균 3.82
-    #   max 30  -> 가용성 12.0  성능 6.5  비용 4.0  소계 22.5   노드평균 5.62
-    #   성능 +0.5 를 얻고 비용 -4.0 을 잃어 순손실 3.5점이었다.
-    # 성능 구간은 0.5점인데 비용 구간은 노드 평균 0.5대마다 1.0점이라 교환비가 불리하다.
-    #
-    # 앱이 바뀌면 이 6 도 근거를 잃는다. 그때는 tuning/advise.py 가
-    # --cost-points(비용에서 확보할 점수)로부터 노드 예산과 앱별 max 를 역산해 준다.
     max_replicas = 6
     scale_target_ref {
       api_version = "apps/v1"
@@ -219,25 +205,18 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "user" {
     }
     behavior {
       scale_up {
-        # 스케일업은 최대한 빠르게. 아래는 쿠버네티스 기본값과 동일하다.
-        #
-        # 이전에는 stabilization 30s + Percent 50 + Pods 2 로 '일부러 느리게' 잡아뒀는데,
-        # 노드 폭증을 막으려던 것이 실제로는 성능 점수를 깎았다:
-        #   트래픽이 T+1h 에 계단처럼 들어오므로 HPA 의 램프 구간이 그대로 실패로 집계된다
-        #   (실측: min 2 -> 8 까지 1분 45초, 그 사이 지연/실패가 누적 로그에 박힌다).
-        # 스케일업을 늦춰서 얻는 것은 없다 — 플래핑 억제는 아래 scale_down 의 90s 창이
-        # 이미 담당하고, 늘어난 파드는 부하가 빠지면 scale_down 이 되돌린다.
-        # 비용 위험도 없다: 스케일업은 사용률이 요구할 때만 일어난다.
-        stabilization_window_seconds = 0
+        # 30s 완충: 순간 스파이크로는 안 늘리고, 부하가 "지속"될 때만 확장.
+        # (0 이면 CPU 튀자마자 파드 2배 → 노드 폭증의 주범이었음)
+        stabilization_window_seconds = 30
         select_policy                = "Max"
         policy {
           type           = "Percent"
-          value          = 100 # 15초마다 최대 2배
+          value          = 50 # 15초마다 최대 +50% (기존 100% = 2배씩)
           period_seconds = 15
         }
         policy {
           type           = "Pods"
-          value          = 4 # 15초마다 최대 +4개
+          value          = 2 # 15초마다 최대 +2개 (기존 4)
           period_seconds = 15
         }
       }
@@ -461,20 +440,6 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "product" {
     # 대체 파드가 뜨는 동안 서비스가 끊긴다. 2 이면 hostname spread 로 두 노드에 나뉘어
     # 한 노드가 빠져도 무중단이고 consolidation 도 정상 동작한다.
     min_replicas = 2
-    # max_replicas 는 '천장이 곧 비용'이다. 넉넉히 열면 안 된다.
-    #
-    # "부하가 없으면 파드를 안 만드니 높여도 무해하다"는 추론은 이 워크로드에서 틀렸다.
-    # 부하가 CPU 를 계속 요구하므로 HPA 는 상한까지 파드를 만들고 Karpenter 가 노드를 공급한다.
-    # 즉 천장까지 실제로 올라가고, 그만큼 비용 점수를 잃는다.
-    #
-    # 실측 (채점 소계 = 가용성+성능+비용):
-    #   max 6   -> 가용성 12.0  성능 6.0  비용 8.0  소계 26.0   노드평균 3.82
-    #   max 30  -> 가용성 12.0  성능 6.5  비용 4.0  소계 22.5   노드평균 5.62
-    #   성능 +0.5 를 얻고 비용 -4.0 을 잃어 순손실 3.5점이었다.
-    # 성능 구간은 0.5점인데 비용 구간은 노드 평균 0.5대마다 1.0점이라 교환비가 불리하다.
-    #
-    # 앱이 바뀌면 이 6 도 근거를 잃는다. 그때는 tuning/advise.py 가
-    # --cost-points(비용에서 확보할 점수)로부터 노드 예산과 앱별 max 를 역산해 준다.
     max_replicas = 6
     scale_target_ref {
       api_version = "apps/v1"
@@ -483,25 +448,18 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "product" {
     }
     behavior {
       scale_up {
-        # 스케일업은 최대한 빠르게. 아래는 쿠버네티스 기본값과 동일하다.
-        #
-        # 이전에는 stabilization 30s + Percent 50 + Pods 2 로 '일부러 느리게' 잡아뒀는데,
-        # 노드 폭증을 막으려던 것이 실제로는 성능 점수를 깎았다:
-        #   트래픽이 T+1h 에 계단처럼 들어오므로 HPA 의 램프 구간이 그대로 실패로 집계된다
-        #   (실측: min 2 -> 8 까지 1분 45초, 그 사이 지연/실패가 누적 로그에 박힌다).
-        # 스케일업을 늦춰서 얻는 것은 없다 — 플래핑 억제는 아래 scale_down 의 90s 창이
-        # 이미 담당하고, 늘어난 파드는 부하가 빠지면 scale_down 이 되돌린다.
-        # 비용 위험도 없다: 스케일업은 사용률이 요구할 때만 일어난다.
-        stabilization_window_seconds = 0
+        # 30s 완충: 순간 스파이크로는 안 늘리고, 부하가 "지속"될 때만 확장.
+        # (0 이면 CPU 튀자마자 파드 2배 → 노드 폭증의 주범이었음)
+        stabilization_window_seconds = 30
         select_policy                = "Max"
         policy {
           type           = "Percent"
-          value          = 100 # 15초마다 최대 2배
+          value          = 50 # 15초마다 최대 +50% (기존 100% = 2배씩)
           period_seconds = 15
         }
         policy {
           type           = "Pods"
-          value          = 4 # 15초마다 최대 +4개
+          value          = 2 # 15초마다 최대 +2개 (기존 4)
           period_seconds = 15
         }
       }
@@ -717,20 +675,6 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "stress" {
     # 대체 파드가 뜨는 동안 서비스가 끊긴다. 2 이면 hostname spread 로 두 노드에 나뉘어
     # 한 노드가 빠져도 무중단이고 consolidation 도 정상 동작한다.
     min_replicas = 2
-    # max_replicas 는 '천장이 곧 비용'이다. 넉넉히 열면 안 된다.
-    #
-    # "부하가 없으면 파드를 안 만드니 높여도 무해하다"는 추론은 이 워크로드에서 틀렸다.
-    # 부하가 CPU 를 계속 요구하므로 HPA 는 상한까지 파드를 만들고 Karpenter 가 노드를 공급한다.
-    # 즉 천장까지 실제로 올라가고, 그만큼 비용 점수를 잃는다.
-    #
-    # 실측 (채점 소계 = 가용성+성능+비용):
-    #   max 6   -> 가용성 12.0  성능 6.0  비용 8.0  소계 26.0   노드평균 3.82
-    #   max 30  -> 가용성 12.0  성능 6.5  비용 4.0  소계 22.5   노드평균 5.62
-    #   성능 +0.5 를 얻고 비용 -4.0 을 잃어 순손실 3.5점이었다.
-    # 성능 구간은 0.5점인데 비용 구간은 노드 평균 0.5대마다 1.0점이라 교환비가 불리하다.
-    #
-    # 앱이 바뀌면 이 6 도 근거를 잃는다. 그때는 tuning/advise.py 가
-    # --cost-points(비용에서 확보할 점수)로부터 노드 예산과 앱별 max 를 역산해 준다.
     max_replicas = 6
     scale_target_ref {
       api_version = "apps/v1"
@@ -739,25 +683,18 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "stress" {
     }
     behavior {
       scale_up {
-        # 스케일업은 최대한 빠르게. 아래는 쿠버네티스 기본값과 동일하다.
-        #
-        # 이전에는 stabilization 30s + Percent 50 + Pods 2 로 '일부러 느리게' 잡아뒀는데,
-        # 노드 폭증을 막으려던 것이 실제로는 성능 점수를 깎았다:
-        #   트래픽이 T+1h 에 계단처럼 들어오므로 HPA 의 램프 구간이 그대로 실패로 집계된다
-        #   (실측: min 2 -> 8 까지 1분 45초, 그 사이 지연/실패가 누적 로그에 박힌다).
-        # 스케일업을 늦춰서 얻는 것은 없다 — 플래핑 억제는 아래 scale_down 의 90s 창이
-        # 이미 담당하고, 늘어난 파드는 부하가 빠지면 scale_down 이 되돌린다.
-        # 비용 위험도 없다: 스케일업은 사용률이 요구할 때만 일어난다.
-        stabilization_window_seconds = 0
+        # 30s 완충: 순간 스파이크로는 안 늘리고, 부하가 "지속"될 때만 확장.
+        # (0 이면 CPU 튀자마자 파드 2배 → 노드 폭증의 주범이었음)
+        stabilization_window_seconds = 30
         select_policy                = "Max"
         policy {
           type           = "Percent"
-          value          = 100 # 15초마다 최대 2배
+          value          = 50 # 15초마다 최대 +50% (기존 100% = 2배씩)
           period_seconds = 15
         }
         policy {
           type           = "Pods"
-          value          = 4 # 15초마다 최대 +4개
+          value          = 2 # 15초마다 최대 +2개 (기존 4)
           period_seconds = 15
         }
       }

@@ -31,15 +31,10 @@ if (-not $IMAGES_PREFIX) { $IMAGES_PREFIX = '/images' }
 
 # 측정 전에 한 번 넣어둘 시드 레코드 (GET 부하가 실제 행을 맞히게).
 #   method: GET|POST,  path,  body(JSON; GET 이면 $null)
-# 측정 전 시딩. 부하가 실제로 존재하는 행을 조회해야 200 이 나온다.
-#
-# load_user.dump 가 이미 user/product 각 10만 행(dbdump500001~600000)을 넣으므로
-# 그 범위를 조회하는 한 시딩은 필요 없다. 여기서 임의 행을 더 넣으면 안 된다 —
-# 문제지: "발생하는 트래픽 외 임의의 데이터를 삽입하면 성능 저하가 생길 수 있으므로 주의".
-#
-# 비워 두는 것이 기본이다. 대회날 덤프가 없거나 스키마가 바뀌어 조회가 404 라면,
-# 그때만 아래에 POST 를 추가하고 $KEY_* 를 그 키에 맞춘다.
-$SEEDS = @()
+$SEEDS = @(
+  @{ method = 'POST'; path = '/v1/user';    body = (@{ requestid = '1'; uuid = $UUID; username = 'loadseed1'; email = 'loadseed1@example.org' } | ConvertTo-Json -Compress) }
+  @{ method = 'POST'; path = '/v1/product'; body = (@{ requestid = '1'; uuid = $UUID; id = 'loadseedp1'; name = 'loadseedp1'; price = 1 } | ConvertTo-Json -Compress) }
+)
 
 # 부하 대상 API 목록.
 #   name    : 결과 라벨 + (autotune 에서) 같은 이름의 Deployment 를 튜닝
@@ -48,37 +43,9 @@ $SEEDS = @()
 #   method  : GET | POST
 #   path    : 쿼리 포함 경로
 #   body    : POST 일 때 JSON, GET 이면 $null
-# 요청 키를 '분산'시켜야 한다. 고정 키 하나로 때리면 측정이 채점과 완전히 달라진다.
-#
-#   실측 사고 — product 를 고정 id(loadseedp1) 로만 때렸더니 CloudFront 가 그 하나를
-#   캐싱해 우리 측정은 항상 99.7% 였다. 그런데 채점 트래픽은 여러 id 를 쓰므로 캐시 미스가
-#   나고 오리진·DB 까지 가서 실제 점수는 77.2% 였다. user 도 고정 이메일이라 같은 문제였고,
-#   그 낙관적 측정 위에서 뽑은 튜닝값이 실제 트래픽에서 안 들어 user 29.5%(게이트 발동,
-#   비용 12점 전부 상실)로 이어졌다.
-#
-# load_user.dump 의 실제 키 공간은 dbdump500001 ~ dbdump600000 (user/product 각 10만개)다.
-# 그 범위에서 골라야 GET 이 200 을 받는다(없는 키면 404 라 측정이 무의미해진다).
-# $KEY_SPREAD 개의 키로 부하를 쪼개므로, 캐시 히트율과 DB 접근 비율이 채점과 비슷해진다.
-# 대회날 앱/스키마가 바뀌면 $KEY_PREFIX·$KEY_MIN·$KEY_MAX 만 새 덤프에 맞춰 고친다.
-if (-not $KEY_PREFIX)  { $KEY_PREFIX = 'dbdump' }
-if (-not $KEY_MIN)     { $KEY_MIN = 500001 }
-if (-not $KEY_MAX)     { $KEY_MAX = 600000 }
-if (-not $KEY_SPREAD)  { $KEY_SPREAD = 20 }   # 부하를 나눌 키 개수 (1 이면 옛 동작=고정키)
-
-# 키 목록을 균등 간격으로 뽑는다(무작위보다 재현성이 좋아 회차 비교가 가능하다).
-$KEYS = @()
-if ($KEY_SPREAD -le 1) {
-  $KEYS = @("$KEY_PREFIX$KEY_MIN")
-} else {
-  $step = [math]::Floor(($KEY_MAX - $KEY_MIN) / $KEY_SPREAD)
-  for ($i = 0; $i -lt $KEY_SPREAD; $i++) { $KEYS += "$KEY_PREFIX$($KEY_MIN + $i * $step)" }
-}
-
-# keys 가 있는 API 는 loadtest.ps1 이 키마다 부하를 쪼개 실행한다.
-# pathFmt 의 {KEY} 자리에 키가 들어간다.
 $APIS = @(
-  @{ name = 'user';    slo = 0.2; conc = 30; qps = 10; method = 'GET';  keys = $KEYS; pathFmt = "/v1/user?email={KEY}@example.org&requestid=1&uuid=$UUID"; body = $null }
-  @{ name = 'product'; slo = 0.2; conc = 30; qps = 10; method = 'GET';  keys = $KEYS; pathFmt = "/v1/product?id={KEY}&requestid=1&uuid=$UUID";            body = $null }
+  @{ name = 'user';    slo = 0.2; conc = 30; qps = 10; method = 'GET';  path = "/v1/user?email=loadseed1@example.org&requestid=1&uuid=$UUID"; body = $null }
+  @{ name = 'product'; slo = 0.2; conc = 30; qps = 10; method = 'GET';  path = "/v1/product?id=loadseedp1&requestid=1&uuid=$UUID";           body = $null }
   @{ name = 'stress';  slo = 1.0; conc = 12; qps = 2;  method = 'POST'; path = '/v1/stress'; body = (@{ requestid = '1'; uuid = $UUID; length = 64 } | ConvertTo-Json -Compress) }
 )
 

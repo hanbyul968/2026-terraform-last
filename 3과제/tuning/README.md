@@ -20,7 +20,7 @@
 | `config.ps1` | **대회날 여기만 고친다.** 엔드포인트·API 목록·SLO·게이트 |
 | `verify.ps1` | 응답코드 규약 검증 (정상 2xx / 비정상 403 / 미정의 404 / 이미지 200) |
 | `loadtest.ps1` | 채점 방식 부하 측정 → 리포트 + 권장값 (+ `podcpu.csv` 실사용 기록) |
-| `autotune.ps1` | cpu/HPA 조합 스윕 → 최고 조합 자동 적용 |
+| `autotune.ps1` | request 고정 + 앱별 HPA min/max/target 실측 탐색 → 공식 총점 최고 후보 적용 |
 | `score.py` | hey CSV 채점기 (`loadtest`/`autotune` 이 호출) |
 | `advise.py` | 측정 + 실사용 + 라이브 상태 → **원인 구분 후** 앱별 판정 |
 | `waf_header_stats.py` | WAF 로그 분석 → 아직 안 막힌 비정상 패턴 + tfvars 제안 |
@@ -259,42 +259,60 @@ advise.py 도 request 가 안 바뀌면 `set resources`·`rollout status` 를 �
 
 ---
 
-## autotune.ps1 — 조합 스윕
+## autotune.ps1 — HPA-only 실제점수 탐색
+
+`requests.cpu`는 고정하고 선택한 앱의 **HPA min/max/CPU target 세 값만** 탐색한다.
+HPA patch는 Deployment 롤아웃을 일으키지 않으므로 request까지 바꾸던 예전 autotune보다 안전하다.
 
 ```powershell
-.\autotune.ps1 -App stress -Duration 90s    # 권장: 병목 앱만
-.\autotune.ps1 -Duration 90s                # 전체 앱 균일 (방향 탐색용)
+# 후보만 확인 — 변경/부하 없음
+.\autotune.ps1 -App user -DryRun
+
+# 1차 동적 후보 6개, 후보당 90초
+.\autotune.ps1 -App user -Duration 90s
+
+# 1차 승자 주변 min±1 / max±2 / target±10 추가 탐색
+.\autotune.ps1 -App stress -Duration 90s -Refine
+
+# 비용 비교 정확도를 높이되 오래 걸림: 후보 사이 최대 10분 노드 회수 대기
+.\autotune.ps1 -App product -Duration 90s -DrainSeconds 600
 ```
 
-6개 조합(cpu × HPA util × min/max)을 돌려 **실제 채점 총점**으로 점수화하고, 최고 조합을
-라이브에 다시 적용한 뒤 terraform 반영값을 출력한다. 결과 폴더는 `tune-at-<조합명>` 이다
-(수동 실행 라벨과 겹치지 않게 `at-` 접두사를 붙인다).
+후보는 고정 숫자가 아니라 **현재 라이브 HPA 값 주변**에서 만든다.
 
-각 조합 측정 전에 **이전 조합이 띄운 노드가 회수될 때까지 기다린다.** 남아 있으면 다음 조합의
-`nodes_avg` 가 부풀어 비용 비교가 무의미해진다. 대기 시간은 NodePool 의 `consolidateAfter` 에서
-유도한다(현재 5m → **12분**). 고정 3분으로 두면 회수가 시작되기도 전에 포기해서 **항상 timeout**
-이 뜬다. 타임아웃 시 그 조합의 시작 노드 수를 `nodes_start` 로 기록하니 사후에 확인할 수 있다.
+| 후보 | 변경 |
+|---|---|
+| baseline | 현재 min/max/target |
+| target-down | target -15%p |
+| target-up | target +15%p |
+| warm-min | min +1 |
+| max-up | max +2 |
+| aggressive | min +1, max +2, target -15%p |
 
-### ⚠ 대회날에는 autotune 을 쓰기 어렵다
+각 후보마다 `loadtest.ps1`의 실제 분산키 부하를 실행하고 `score.py`의 공식 채점식으로 정렬한다.
 
-6조합 × (측정 90초 + 드레인 최대 12분) = **최대 80분**이다. 경기는 3시간이고 트래픽은 T+1h 부터
-들어온다. 대회날 권하는 방식은 `loadtest` → `advise` 반복이다.
-
-```powershell
-.\loadtest.ps1 -Duration 180s -Label t1     # 측정 + 채점 환산 + 원인 진단
-# advise.py 권고를 k8s_apps.tf 에 반영 -> terraform apply
-.\loadtest.ps1 -Duration 180s -Label t2     # 재측정
+```text
+1순위: 공식 소계(가용성+성능+비용, 36점) 높은 값
+동점  : 평균 노드 수가 낮은 값
+재동점: 선택한 앱의 performance가 높은 값
 ```
 
-`advise.py` 가 원인을 구분해 주므로(`파드 상한 도달` / `노드 CPU 포화` / `CPU 병목 아님` /
-`스케일 지연`) 6조합을 훑는 것보다 2~3회 반복이 빠르고 정확하다. autotune 은 시간이 남을 때
-단일 앱(`-App`)으로만 쓴다.
+`-Refine`은 1차 승자 주변을 한 축씩 추가로 움직여 좌표 탐색한다. 앱 이름·현재 HPA 값·트래픽이
+바뀌어도 같은 방식으로 후보를 만든다. 승자는 라이브 HPA에 남기고 Terraform 반영값을 출력한다.
 
-**`-App` 없이 돌린 우승값을 그대로 쓰지 말 것.** 전체 앱에 같은 값을 밀어넣은 결과라서, 앱마다
-부하 성격(user/product = DB I/O, stress = CPU)이 달라 최적값이 다르다. 실측 예: product 는 실사용
-16m 인데 300m 을 받고, stress 는 382m 인데 200m 을 받는다. 방향만 보고, 확정은 `-App` 으로 앱별로 한다.
+### “완벽값”의 한계
 
----
+부하·캐시·DB 상태와 Karpenter 회수 시간 때문에 단 한 번의 측정으로 수학적인 영구 최적값은 없다.
+이 도구는 **실제로 측정한 후보 중 공식 점수가 가장 높은 값**을 찾는다. 정확도를 높이려면:
+
+1. 한 번에 앱 하나만 `-App`으로 튜닝한다.
+2. 후보당 최소 90초, 최종 승자는 180초로 재검증한다.
+3. 비용까지 공정하게 비교하려면 `-DrainSeconds 600`을 쓴다. 0이면 빠르지만 이전 후보 노드가 남을 수 있다.
+4. `user → product → stress`처럼 앱별 실행 후, 마지막에 전체 180초를 한 번 더 측정한다.
+5. 트래픽/바이너리가 바뀌면 이전 승자를 정답으로 보지 말고 다시 실행한다.
+
+대회 시간 안에는 `-Refine`과 긴 drain을 세 앱 모두 돌리기 어렵다. 먼저 현재 점수가 낮고 다음
+채점 구간까지 거리가 가까운 앱을 1차 6후보로 튜닝하고, 시간이 남을 때만 `-Refine`한다.
 
 ## waf_header_stats.py — 안 막힌 비정상 찾기
 
@@ -333,6 +351,6 @@ WAF 가 ALLOW 한 요청**을 뽑아준다. tfvars 제안까지 출력한다. (C
 `CPU 병목 아님` 으로 판정하면 DB(RDS CPU·커넥션·쿼리지연)·CloudFront 캐시 히트율·커넥션풀
 borrow 대기를 본다.
 
-**`max_replicas` 는 천장이지 튜닝값이 아니다.** 낮으면 HPA 가 평형(`총실사용 / target%`)에 도달하지
-못해 파드마다 과부하가 걸리고, 높아도 부하가 없으면 HPA 가 파드를 만들지 않아 비용이 늘지 않는다.
-`advise.py` 가 `파드 상한 도달` 로 판정하면 망설이지 말고 올린다.
+**`max_replicas` 는 성능 천장이면서 비용 천장이다.** 너무 낮으면 HPA가 필요한 평형에 도달하지
+못하지만, 지속 부하에서는 높은 상한까지 실제로 파드와 노드가 늘 수 있다. 따라서 감으로 크게 열지
+말고 `autotune.ps1`의 실측 공식 점수와 평균 노드 수를 함께 보고 결정한다.

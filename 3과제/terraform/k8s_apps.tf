@@ -205,18 +205,18 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "user" {
     }
     behavior {
       scale_up {
-        # 30s 완충: 순간 스파이크로는 안 늘리고, 부하가 "지속"될 때만 확장.
-        # (0 이면 CPU 튀자마자 파드 2배 → 노드 폭증의 주범이었음)
-        stabilization_window_seconds = 30
+        # 계단식 트래픽의 초기 손실을 줄이기 위해 Kubernetes 기본 scale-up 속도를 사용한다.
+        # 비용 상한은 max_replicas가 담당하고, 플래핑은 scale_down 90초가 억제한다.
+        stabilization_window_seconds = 0
         select_policy                = "Max"
         policy {
           type           = "Percent"
-          value          = 50 # 15초마다 최대 +50% (기존 100% = 2배씩)
+          value          = 100 # 15초마다 최대 2배
           period_seconds = 15
         }
         policy {
           type           = "Pods"
-          value          = 2 # 15초마다 최대 +2개 (기존 4)
+          value          = 4 # 15초마다 최대 +4개
           period_seconds = 15
         }
       }
@@ -448,18 +448,18 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "product" {
     }
     behavior {
       scale_up {
-        # 30s 완충: 순간 스파이크로는 안 늘리고, 부하가 "지속"될 때만 확장.
-        # (0 이면 CPU 튀자마자 파드 2배 → 노드 폭증의 주범이었음)
-        stabilization_window_seconds = 30
+        # 계단식 트래픽의 초기 손실을 줄이기 위해 Kubernetes 기본 scale-up 속도를 사용한다.
+        # 비용 상한은 max_replicas가 담당하고, 플래핑은 scale_down 90초가 억제한다.
+        stabilization_window_seconds = 0
         select_policy                = "Max"
         policy {
           type           = "Percent"
-          value          = 50 # 15초마다 최대 +50% (기존 100% = 2배씩)
+          value          = 100 # 15초마다 최대 2배
           period_seconds = 15
         }
         policy {
           type           = "Pods"
-          value          = 2 # 15초마다 최대 +2개 (기존 4)
+          value          = 4 # 15초마다 최대 +4개
           period_seconds = 15
         }
       }
@@ -683,18 +683,18 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "stress" {
     }
     behavior {
       scale_up {
-        # 30s 완충: 순간 스파이크로는 안 늘리고, 부하가 "지속"될 때만 확장.
-        # (0 이면 CPU 튀자마자 파드 2배 → 노드 폭증의 주범이었음)
-        stabilization_window_seconds = 30
+        # 계단식 트래픽의 초기 손실을 줄이기 위해 Kubernetes 기본 scale-up 속도를 사용한다.
+        # 비용 상한은 max_replicas가 담당하고, 플래핑은 scale_down 90초가 억제한다.
+        stabilization_window_seconds = 0
         select_policy                = "Max"
         policy {
           type           = "Percent"
-          value          = 50 # 15초마다 최대 +50% (기존 100% = 2배씩)
+          value          = 100 # 15초마다 최대 2배
           period_seconds = 15
         }
         policy {
           type           = "Pods"
-          value          = 2 # 15초마다 최대 +2개 (기존 4)
+          value          = 4 # 15초마다 최대 +4개
           period_seconds = 15
         }
       }

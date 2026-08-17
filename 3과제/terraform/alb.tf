@@ -59,6 +59,9 @@ resource "aws_lb_target_group" "app" {
 
   deregistration_delay = 20
 
+  # 처리 중 요청이 가장 적은 타깃으로 전달. Target Group 속성만 바뀌므로 Pod 롤아웃 없음.
+  load_balancing_algorithm_type = "least_outstanding_requests"
+
   lifecycle {
     create_before_destroy = true
   }

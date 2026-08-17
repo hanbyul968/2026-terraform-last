@@ -1,170 +1,200 @@
 ﻿<#
-  config 기반 자동 튜너 (autotune.sh 의 PowerShell 판).
-  라이브 클러스터를 patch 하며 조합을 스윕하고(빠름, terraform 재적용 없음),
-  각 조합마다 채점 스타일 부하 테스트를 돌려 rubric(성능효율+고가용성+비용)으로 점수화,
-  최고 조합을 선언하고 그대로 적용해 둔다.
+  HPA 전용 실제점수 튜너.
 
-  두 가지 모드:
-    (기본)      각 조합을 config.ps1 의 모든 앱에 동일하게 적용 — 대략적인 방향 탐색.
-    -App <앱>   그 앱만 patch, 나머지 앱은 현재 설정 유지 — 앱별 정밀 튜닝.
-                점수도 그 앱의 perf 기준(가용성 게이트는 여전히 전체 최소값).
-                → 병목 앱을 loadtest 로 찾은 뒤, 그 앱만 -App 으로 돌리는 것을 권장.
+  requests.cpu 는 건드리지 않는다(Deployment 롤아웃 없음).
+  선택한 한 앱의 minReplicas / maxReplicas / CPU averageUtilization 만 후보별로 patch하고,
+  config.ps1 부하를 실행한 뒤 공식 채점식(가용성+성능+비용, 36점)으로 승자를 고른다.
 
   사용법:
-    .\autotune.ps1 [-Duration 90s] [-App stress] [-Url http://...]
-    (Url 생략 시 config.ps1 의 $ENDPOINT 사용)
+    .\autotune.ps1 -App user -Duration 90s
+    .\autotune.ps1 -App stress -Duration 90s -Refine
+    .\autotune.ps1 -App product -DryRun
+
+  -Refine : 1차 승자 주변(min ±1, max ±2, target ±10)을 추가 탐색한다.
+  -DrainSeconds N : 후보 사이에 원래 HPA로 복원하고 기준 노드+1 이하가 될 때까지 최대 N초 대기.
+                    0이면 빠르지만 이전 후보 노드가 비용 측정에 남을 수 있다.
 #>
 [CmdletBinding()]
 param(
+  [Parameter(Mandatory = $true)]
+  [string]$App,
   [string]$Duration = '90s',
-  [string]$App = '',
-  [string]$Url = ''   # 비우면 config.ps1 의 $ENDPOINT 사용 (-Url 로 이 실행만 override)
+  [string]$Url = '',
+  [int]$SettleSeconds = 20,
+  [int]$DrainSeconds = 0,
+  [switch]$Refine,
+  [switch]$DryRun,
+  [switch]$RestoreOriginal
 )
-$ErrorActionPreference = 'Continue'
+$ErrorActionPreference = 'Stop'
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $Here 'config.ps1')
 
 $bin = Join-Path $env:USERPROFILE 'bin'
 if ($env:Path -notlike "*$bin*") { $env:Path = "$bin;$env:Path" }
 if (-not $Url) { $Url = $ENDPOINT }
-if (-not $Url -or $Url -like '*REPLACE-ME*') {
-  Write-Error 'endpoint 미설정 — config.ps1 의 $ENDPOINT 를 채우거나 -Url http://... 로 전달'; exit 1
-}
+if (-not $Url -or $Url -like '*REPLACE-ME*') { throw 'config.ps1 ENDPOINT 또는 -Url 을 지정하세요' }
 $EP = $Url.TrimEnd('/')
+$APPS = @($APIS | ForEach-Object { $_.name })
+if ($APPS -notcontains $App) { throw "unknown app '$App' — config.ps1 앱: $($APPS -join ', ')" }
+if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) { throw 'kubectl 없음 — .\setup.ps1 먼저' }
+if (-not $DryRun -and -not (Get-Command hey -ErrorAction SilentlyContinue)) { throw 'hey 없음 — .\setup.ps1 먼저' }
 
-if (-not (Get-Command hey -ErrorAction SilentlyContinue) -or -not (Get-Command kubectl -ErrorAction SilentlyContinue)) {
-  Write-Error 'hey/kubectl 없음 — .\setup.ps1 먼저'; exit 1
-}
-$Results = Join-Path $env:TEMP 'autotune-results.csv'
-'combo,avg_perf,min_avail,nodes_avg,score,nodes_start' | Set-Content -Path $Results
-
-$APPS = $APIS | ForEach-Object { $_.name }
-
-# -App 지정 시 그 앱만 patch (나머지는 현재 설정 유지). 미지정이면 전체.
-if ($App) {
-  if ($APPS -notcontains $App) { Write-Error "unknown app '$App' — config.ps1 의 앱: $($APPS -join ', ')"; exit 1 }
-  $TUNE_APPS = @($App)
-} else {
-  $TUNE_APPS = $APPS
-}
-
-# --- 후보 그리드: name | cpu | util | min | max (모든 앱에 적용) ---
-$COMBOS = @(
-  @{ name = 'baseline';       cpu = '300m'; util = 55; min = 2; max = 10 }
-  @{ name = 'lean-cpu';       cpu = '200m'; util = 55; min = 2; max = 10 }
-  @{ name = 'rich-cpu';       cpu = '500m'; util = 55; min = 2; max = 10 }
-  @{ name = 'aggressive-hpa'; cpu = '300m'; util = 45; min = 3; max = 12 }
-  @{ name = 'calm-hpa';       cpu = '300m'; util = 65; min = 2; max = 8 }
-  @{ name = 'cost-min';       cpu = '200m'; util = 65; min = 2; max = 6 }
-)
-
-function Invoke-PatchAll {
-  param($cpu, $util, $min, $max)
-  foreach ($app in $TUNE_APPS) {
-    kubectl -n $NS set resources "deploy/$app" --requests=cpu=$cpu 2>$null | Out-Null
-    # ⚠ PowerShell 은 네이티브 exe 에 큰따옴표를 그대로 넘기지 못한다. -p $patch 로 주면
-    #    kubectl 에 {spec:...} 로 도착해 "invalid character 's'" 로 실패하는데,
-    #    2>$null 때문에 조용히 넘어가 HPA 가 전혀 안 바뀌던 버그가 있었다.
-    #    --patch-file 로 넘겨 따옴표 문제를 원천 제거하고, 실패는 표면화한다.
-    $patch = @{ spec = @{ minReplicas = $min; maxReplicas = $max; metrics = @(@{ type = 'Resource'; resource = @{ name = 'cpu'; target = @{ type = 'Utilization'; averageUtilization = $util } } }) } } | ConvertTo-Json -Depth 10 -Compress
-    $pf = Join-Path $env:TEMP "hpa-$app.json"
-    $patch | Set-Content -Path $pf -Encoding ascii -NoNewline
-    kubectl -n $NS patch hpa $app --type=merge --patch-file $pf | Out-Null
-    if ($LASTEXITCODE -ne 0) { Write-Warning "    HPA patch 실패 ($app) — util/min/max 가 반영되지 않았습니다" }
+function Get-HpaState([string]$name) {
+  $h = kubectl -n $NS get hpa $name -o json | ConvertFrom-Json
+  if ($LASTEXITCODE -ne 0 -or -not $h) { throw "HPA 조회 실패: $name" }
+  $metric = @($h.spec.metrics | Where-Object { $_.type -eq 'Resource' -and $_.resource.name -eq 'cpu' }) | Select-Object -First 1
+  if (-not $metric) { throw "CPU Utilization metric 없음: $name" }
+  [pscustomobject]@{
+    min = [int]$h.spec.minReplicas
+    max = [int]$h.spec.maxReplicas
+    target = [int]$metric.resource.target.averageUtilization
   }
-  foreach ($app in $TUNE_APPS) { kubectl -n $NS rollout status "deploy/$app" --timeout=180s 2>$null | Out-Null }
 }
 
-# 이전 조합이 띄운 노드가 남아 있으면 다음 조합의 nodes_avg 가 부풀어 비용 점수가
-# 뒤섞인다. Karpenter consolidation 이 기준선까지 회수할 때까지 기다려 조합 간
-# 이전 조합이 띄운 노드가 회수될 때까지 기다린다. 남아 있으면 다음 조합의 nodes_avg 가
-# 부풀어 비용 비교가 무의미해진다.
-#
-# 대기 시간은 Karpenter NodePool 의 consolidateAfter 에서 유도한다. 고정 3분으로 두면
-# 안 된다 — consolidateAfter 가 5분이면 회수가 '시작'되기도 전에 포기해서 항상
-# timeout 이 뜬다(실측: 항상 timeout, 실제 전량 회수까지는 12분 걸렸다).
-# disruption budget 이 Underutilized=1 이라 노드는 한 대씩 회수되므로 여유를 넉넉히 준다.
-function Get-DrainTimeoutSec {
-  $sec = 300
-  try {
-    $ca = (kubectl get nodepool default -o jsonpath='{.spec.disruption.consolidateAfter}' 2>$null)
-    if ($ca -match '^(\d+)m$') { $sec = [int]$Matches[1] * 60 }
-    elseif ($ca -match '^(\d+)s$') { $sec = [int]$Matches[1] }
-  } catch {}
-  # consolidateAfter + 노드 종료/한 대씩 회수 여유
-  return [int]($sec + 420)
-}
-
-function Invoke-Drain {
-  $target = [int]$COST_BASELINE_NODES + 1   # 기준선 + 여유 1대
-  $limit = Get-DrainTimeoutSec
-  $sw = [System.Diagnostics.Stopwatch]::StartNew()
-  $last = -1
-  while ($sw.Elapsed.TotalSeconds -lt $limit) {
-    try { $n = (kubectl get nodes --no-headers 2>$null | Select-String '\bReady').Count } catch { $n = -1 }
-    if ($n -ge 1 -and $n -le $target) {
-      Write-Host ("    nodes=$n (baseline 복귀, {0:N0}초 대기)" -f $sw.Elapsed.TotalSeconds)
-      return $n
+function Set-HpaState([string]$name, [int]$min, [int]$max, [int]$target) {
+  if ($min -lt 2) { $min = 2 } # PDB minAvailable=1 + 노드 장애 가용성
+  if ($max -lt $min) { $max = $min }
+  $target = [math]::Max(25, [math]::Min(90, $target))
+  $patch = @{
+    spec = @{
+      minReplicas = $min
+      maxReplicas = $max
+      metrics = @(@{
+        type = 'Resource'
+        resource = @{
+          name = 'cpu'
+          target = @{ type = 'Utilization'; averageUtilization = $target }
+        }
+      })
     }
-    if ($n -ne $last -and $n -ge 1) {
-      Write-Host ("    nodes=$n ... 회수 대기 ({0:N0}/{1}초)" -f $sw.Elapsed.TotalSeconds, $limit)
-      $last = $n
+  } | ConvertTo-Json -Depth 10 -Compress
+  $pf = Join-Path $env:TEMP "hpa-tune-$name.json"
+  $patch | Set-Content -Path $pf -Encoding ascii -NoNewline
+  kubectl -n $NS patch hpa $name --type=merge --patch-file $pf | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "HPA patch 실패: $name" }
+}
+
+function Wait-Drain([int]$seconds, $original) {
+  if ($seconds -le 0) { return }
+  Set-HpaState $App $original.min $original.max $original.target
+  $targetNodes = [int]$COST_BASELINE_NODES + 1
+  $sw = [Diagnostics.Stopwatch]::StartNew()
+  while ($sw.Elapsed.TotalSeconds -lt $seconds) {
+    $n = 0
+    try { $n = (kubectl get nodes --no-headers 2>$null | Select-String '\bReady').Count } catch {}
+    if ($n -ge 1 -and $n -le $targetNodes) {
+      Write-Host "    drain: nodes=$n (비교 기준 복귀)"
+      return
     }
     Start-Sleep -Seconds 10
   }
-  Write-Host ("    drain timeout ({0}초) — nodes={1} 로 시작하므로 이 조합의 nodes_avg 는 부풀어 있습니다" -f $limit, $last) -ForegroundColor Yellow
-  return $last
+  Write-Warning "drain ${seconds}s timeout — 이전 후보 노드가 비용 측정에 남을 수 있습니다"
 }
 
-function Get-TrialScore {
-  param($Label)
-  $out = Join-Path $env:TEMP "tune-$Label"
-  # score.py score -> "avg mav navg score" (-App 모드면 perf 는 그 앱 기준)
-  if ($App) {
-    (python (Join-Path $Here 'score.py') score $out $SLOS $AVAIL_GATE $COST_PENALTY $App) -split '\s+'
-  } else {
-    (python (Join-Path $Here 'score.py') score $out $SLOS $AVAIL_GATE $COST_PENALTY) -split '\s+'
+$Original = Get-HpaState $App
+if ($RestoreOriginal) {
+  Set-HpaState $App $Original.min $Original.max $Original.target
+  Write-Host "복원 완료: $App min=$($Original.min) max=$($Original.max) target=$($Original.target)%"
+  exit 0
+}
+
+$Candidates = New-Object System.Collections.Generic.List[object]
+$Seen = @{}
+function Add-Candidate([string]$name, [int]$min, [int]$max, [int]$target) {
+  $min = [math]::Max(2, $min)
+  $max = [math]::Max($min, $max)
+  $target = [math]::Max(25, [math]::Min(90, $target))
+  $key = "$min/$max/$target"
+  if (-not $Seen.ContainsKey($key)) {
+    $Seen[$key] = $true
+    $Candidates.Add([pscustomobject]@{ name=$name; min=$min; max=$max; target=$target })
   }
 }
 
-$modeDesc = if ($App) { "tuning ONLY [$App] (others untouched)" } else { "tuning ALL [$($APPS -join ' ')] uniformly" }
-Write-Host "### autotune: $($COMBOS.Count) combos x $Duration  $modeDesc  endpoint=$EP"
-foreach ($c in $COMBOS) {
-  Write-Host ''
-  Write-Host ">>> combo=$($c.name)  cpu=$($c.cpu) util=$($c.util) replicas=$($c.min)-$($c.max)"
-  Invoke-PatchAll $c.cpu $c.util $c.min $c.max
-  $startNodes = Invoke-Drain
-  # 라벨에 'at-' 접두사를 붙인다. 조합 이름(baseline, lean-cpu, ...)을 그대로 쓰면
-  # 사용자가 수동으로 돌린 '-Label baseline' 결과 폴더와 같은 경로가 되어 결과가 섞인다.
-  # (loadtest 가 폴더를 비우도록 고쳤지만, 애초에 겹치지 않게 하는 것이 안전하다)
-  $lbl = "at-$($c.name)"
-  & (Join-Path $Here 'loadtest.ps1') -Url $EP -Duration $Duration -Label $lbl *> $null
-  $r = Get-TrialScore -Label $lbl
-  $ap, $ma, $na, $sc = $r[0], $r[1], $r[2], $r[3]
-  Write-Host ("    perf_avg={0} avail_min={1} nodes_avg={2} SCORE={3}" -f $ap, $ma, $na, $sc)
-  "$($c.name),$ap,$ma,$na,$sc" | Add-Content -Path $Results
+# 현재점 주변의 독립 효과 + 결합 효과. 앱/트래픽이 바뀌어도 라이브 값을 중심으로 생성한다.
+Add-Candidate 'baseline'       $Original.min       $Original.max       $Original.target
+Add-Candidate 'target-down'    $Original.min       $Original.max       ($Original.target - 15)
+Add-Candidate 'target-up'      $Original.min       $Original.max       ($Original.target + 15)
+Add-Candidate 'warm-min'       ($Original.min + 1) $Original.max       $Original.target
+Add-Candidate 'max-up'         $Original.min       ($Original.max + 2) $Original.target
+Add-Candidate 'aggressive'     ($Original.min + 1) ($Original.max + 2) ($Original.target - 15)
+
+Write-Host "### HPA-only tune: app=$App original min=$($Original.min) max=$($Original.max) target=$($Original.target)%"
+Write-Host "### requests.cpu 변경 없음 / Deployment 롤아웃 없음"
+Write-Host "### 1차 후보 $($Candidates.Count)개 x $Duration"
+$Candidates | Format-Table name,min,max,target -AutoSize | Out-String | Write-Host
+if ($DryRun) { exit 0 }
+
+$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+$ResultsPath = Join-Path $env:TEMP "hpa-tune-$App-$stamp.csv"
+'name,min,max,target,focus_perf,min_avail,nodes_avg,total' | Set-Content $ResultsPath -Encoding ascii
+$Rows = New-Object System.Collections.Generic.List[object]
+
+function Invoke-Candidate($c) {
+  Write-Host ""
+  Write-Host ">>> $($c.name): min=$($c.min) max=$($c.max) target=$($c.target)%" -ForegroundColor Cyan
+  Wait-Drain $DrainSeconds $Original
+  Set-HpaState $App $c.min $c.max $c.target
+  if ($SettleSeconds -gt 0) { Start-Sleep -Seconds $SettleSeconds }
+  $label = "hpa-$App-$stamp-$($c.name)"
+  & (Join-Path $Here 'loadtest.ps1') -Url $EP -Duration $Duration -Label $label *> $null
+  if ($LASTEXITCODE -ne 0) { throw "loadtest 실패: $label" }
+  $out = Join-Path $env:TEMP "tune-$label"
+  $raw = python (Join-Path $Here 'score.py') score $out $SLOS $AVAIL_GATE $COST_PENALTY $App
+  if ($LASTEXITCODE -ne 0) { throw "score 실패: $label" }
+  $v = @($raw -split '\s+' | Where-Object { $_ })
+  if ($v.Count -lt 4) { throw "score 출력 오류: $raw" }
+  $row = [pscustomobject]@{
+    name=$c.name; min=$c.min; max=$c.max; target=$c.target
+    focus_perf=[double]$v[0]; min_avail=[double]$v[1]
+    nodes_avg=[double]$v[2]; total=[double]$v[3]
+  }
+  $Rows.Add($row)
+  "$($row.name),$($row.min),$($row.max),$($row.target),$($row.focus_perf),$($row.min_avail),$($row.nodes_avg),$($row.total)" | Add-Content $ResultsPath
+  Write-Host ("    perf={0:N1}% avail_min={1:N1}% nodes={2:N2} official={3:N1}/36" -f $row.focus_perf,$row.min_avail,$row.nodes_avg,$row.total)
 }
 
-Write-Host ''
-Write-Host '### ranked (higher = better)'
-$rows = Import-Csv $Results | Sort-Object { [double]$_.score } -Descending
-$rows | Format-Table -AutoSize | Out-String | Write-Host
-$WName = $rows[0].combo
+try {
+  $first = @($Candidates)
+  foreach ($c in $first) { Invoke-Candidate $c }
 
-Write-Host "### WINNER: $WName — re-applying to live cluster"
-$win = $COMBOS | Where-Object { $_.name -eq $WName } | Select-Object -First 1
-if ($win) {
-  Invoke-PatchAll $win.cpu $win.util $win.min $win.max
-  Write-Host ''
-  if ($App) {
-    Write-Host "### terraform/k8s_apps.tf 반영값 ($App 만):"
-  } else {
-    Write-Host '### terraform/k8s_apps.tf 반영값 (모든 앱 균일 — 방향 참고용, 실제 반영은 앱별로):'
+  if ($Refine) {
+    $best1 = $Rows | Sort-Object -Property `
+      @{Expression={[double]$_.total};Descending=$true}, `
+      @{Expression={[double]$_.nodes_avg};Ascending=$true}, `
+      @{Expression={[double]$_.focus_perf};Descending=$true} | Select-Object -First 1
+    Write-Host ""
+    Write-Host "### refine around $($best1.name): $($best1.min)/$($best1.max)/$($best1.target)"
+    $before = $Candidates.Count
+    Add-Candidate 'refine-min-down' ($best1.min - 1) $best1.max $best1.target
+    Add-Candidate 'refine-min-up'   ($best1.min + 1) $best1.max $best1.target
+    Add-Candidate 'refine-max-down' $best1.min ($best1.max - 2) $best1.target
+    Add-Candidate 'refine-max-up'   $best1.min ($best1.max + 2) $best1.target
+    Add-Candidate 'refine-target-down' $best1.min $best1.max ($best1.target - 10)
+    Add-Candidate 'refine-target-up'   $best1.min $best1.max ($best1.target + 10)
+    for ($i=$before; $i -lt $Candidates.Count; $i++) { Invoke-Candidate $Candidates[$i] }
   }
-  Write-Host ("  requests.cpu = `"{0}`",  HPA averageUtilization = {1},  min={2} max={3}" -f $win.cpu, $win.util, $win.min, $win.max)
-  if (-not $App) {
-    Write-Host '  TIP: 병목 앱만 정밀 튜닝하려면  .\autotune.ps1 <endpoint> -App <앱이름>'
+
+  $Ranked = @($Rows | Sort-Object -Property `
+    @{Expression={[double]$_.total};Descending=$true}, `
+    @{Expression={[double]$_.nodes_avg};Ascending=$true}, `
+    @{Expression={[double]$_.focus_perf};Descending=$true})
+  Write-Host ""
+  Write-Host '### ranked: official total desc, nodes asc, focused perf desc'
+  $Ranked | Format-Table name,min,max,target,focus_perf,min_avail,nodes_avg,total -AutoSize | Out-String | Write-Host
+  $Winner = $Ranked[0]
+  Set-HpaState $App $Winner.min $Winner.max $Winner.target
+  Write-Host "### WINNER applied: $App min=$($Winner.min) max=$($Winner.max) target=$($Winner.target)% total=$($Winner.total)/36" -ForegroundColor Green
+  Write-Host "### Terraform 반영: k8s_apps.tf 의 $App HPA min_replicas=$($Winner.min), max_replicas=$($Winner.max), average_utilization=$($Winner.target)"
+  if ($DrainSeconds -eq 0) {
+    Write-Warning 'DrainSeconds=0: 이전 후보가 만든 노드가 다음 후보 비용에 남을 수 있습니다. 최종 후보를 180s로 한 번 더 검증하세요.'
   }
+  Write-Host "results: $ResultsPath"
 }
-Write-Host ''
-Write-Host "Full results: $Results"
+catch {
+  Write-Error $_
+  Write-Warning "실패했으므로 원래 HPA로 복원합니다: $($Original.min)/$($Original.max)/$($Original.target)"
+  Set-HpaState $App $Original.min $Original.max $Original.target
+  exit 1
+}

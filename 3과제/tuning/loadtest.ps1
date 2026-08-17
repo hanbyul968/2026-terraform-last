@@ -120,26 +120,67 @@ foreach ($a in $APIS) {
     $bodyFile = Join-Path $OUT "$($a.name).body.json"
     $a.body | Set-Content -Path $bodyFile -Encoding ascii -NoNewline
   }
-  $jobs += Start-Job -ScriptBlock {
-    param($hey, $dur, $a, $EP, $OUT, $bodyFile)
-    $out = Join-Path $OUT "$($a.name).csv"
-    $err = Join-Path $OUT "$($a.name).err"
-    # ⚠ Start-Job 안에서 네이티브 exe(hey)의 stdout 을 '> $out' 로 파일 리다이렉트하면
-    #    출력이 통째로 사라져 0바이트 CSV → 채점기가 "NO DATA" 가 되는 버그가 있음.
-    #    → stdout 을 변수로 캡처($r)한 뒤 Out-File 로 기록해야 안정적으로 저장된다.
-    $url = "$EP$($a.path)"
-    if ($a.method -eq 'GET') {
-      $r = & $hey -z $dur -c $a.conc -q $a.qps -o csv $url 2>&1
-    } else {
-      $r = & $hey -z $dur -c $a.conc -q $a.qps -m $a.method -T application/json -D $bodyFile -o csv $url 2>&1
-    }
-    # ErrorRecord(진짜 에러)는 .err 로, 나머지(CSV 본문)는 .csv 로 분리 저장.
-    $r | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | Out-File -FilePath $err -Encoding ascii
-    $r | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } | Out-File -FilePath $out -Encoding ascii
-  } -ArgumentList $Hey, $Duration, $a, $EP, $OUT, $bodyFile
+  # 키가 여러 개면 키마다 hey 를 띄워 부하를 쪼갠다. 고정 키 하나로 때리면 CloudFront 가
+  # 그 키만 캐싱해 측정이 채점과 달라진다(실측: product 우리측정 99.7% vs 채점 77.2%).
+  # 동시성(conc)과 초당요청(qps)은 키 수만큼 나눠 총 부하량을 유지한다.
+  $keyList = if ($a.keys -and $a.keys.Count -gt 0) { $a.keys } else { @($null) }
+  $nk = $keyList.Count
+  $cPer = [math]::Max(1, [int][math]::Floor($a.conc / $nk))
+  $qPer = if ($a.qps) { [math]::Max(1, [int][math]::Floor($a.qps / $nk)) } else { $a.qps }
+  $ki = 0
+  foreach ($key in $keyList) {
+    $ki++
+    $pathForKey = if ($key -and $a.pathFmt) { $a.pathFmt.Replace('{KEY}', $key) } else { $a.path }
+    $jobs += Start-Job -ScriptBlock {
+      param($hey, $dur, $a, $EP, $OUT, $bodyFile, $pathForKey, $cPer, $qPer, $ki)
+      # 키별 부분 결과는 <앱>.part<N>.csv 로 저장하고, 부모가 하나로 합친다.
+      $out = Join-Path $OUT "$($a.name).part$ki.csv"
+      $err = Join-Path $OUT "$($a.name).part$ki.err"
+      # ⚠ Start-Job 안에서 네이티브 exe(hey)의 stdout 을 '> $out' 로 파일 리다이렉트하면
+      #    출력이 통째로 사라져 0바이트 CSV → 채점기가 "NO DATA" 가 되는 버그가 있음.
+      #    → stdout 을 변수로 캡처($r)한 뒤 Out-File 로 기록해야 안정적으로 저장된다.
+      $url = "$EP$pathForKey"
+      if ($a.method -eq 'GET') {
+        $r = & $hey -z $dur -c $cPer -q $qPer -o csv $url 2>&1
+      } else {
+        $r = & $hey -z $dur -c $cPer -q $qPer -m $a.method -T application/json -D $bodyFile -o csv $url 2>&1
+      }
+      $r | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | Out-File -FilePath $err -Encoding ascii
+      $r | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } | Out-File -FilePath $out -Encoding ascii
+    } -ArgumentList $Hey, $Duration, $a, $EP, $OUT, $bodyFile, $pathForKey, $cPer, $qPer, $ki
+  }
 }
 Wait-Job $jobs | Out-Null
 Remove-Job $jobs
+
+# 키별 부분 결과를 <앱>.csv 하나로 합친다. hey CSV 는 첫 줄이 헤더이므로 헤더는 한 번만 쓴다.
+foreach ($a in $APIS) {
+  $parts = Get-ChildItem -Path $OUT -Filter "$($a.name).part*.csv" -File -ErrorAction SilentlyContinue |
+           Sort-Object Name
+  if (-not $parts) { continue }
+  $merged = Join-Path $OUT "$($a.name).csv"
+  $wroteHeader = $false
+  $lines = New-Object System.Collections.Generic.List[string]
+  foreach ($f in $parts) {
+    $raw = Get-Content -Path $f.FullName -ErrorAction SilentlyContinue
+    if (-not $raw) { continue }
+    $i = 0
+    foreach ($ln in $raw) {
+      if ($i -eq 0) {
+        if (-not $wroteHeader) { $lines.Add($ln); $wroteHeader = $true }
+      } elseif ($ln.Trim()) {
+        $lines.Add($ln)
+      }
+      $i++
+    }
+  }
+  if ($lines.Count -gt 0) {
+    [System.IO.File]::WriteAllLines($merged, $lines)
+    $parts | Remove-Item -Force -ErrorAction SilentlyContinue
+    Get-ChildItem -Path $OUT -Filter "$($a.name).part*.err" -File -ErrorAction SilentlyContinue |
+      Remove-Item -Force -ErrorAction SilentlyContinue
+  }
+}
 
 if ($sampler) { Stop-Job $sampler -ErrorAction SilentlyContinue; Remove-Job $sampler -Force -ErrorAction SilentlyContinue }
 

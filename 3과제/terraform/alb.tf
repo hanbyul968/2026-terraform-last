@@ -59,6 +59,15 @@ resource "aws_lb_target_group" "app" {
 
   deregistration_delay = 20
 
+  # 최소 미해결 요청(LOR). 기본값 round_robin 은 파드가 지금 몇 건을 처리 중인지 무시한다.
+  # 이 워크로드는 (a) 처리시간 분산이 크고 (user p50 0.156s vs p95 1.795s),
+  # (b) 노드 CPU 경쟁 때문에 파드별 실질 용량이 다르고 (같은 노드에 stress 가 몇 개인지에 좌우),
+  # (c) 스케일아웃 직후 새 파드는 미해결 0 인데 round_robin 은 포화 파드와 똑같이 1/N 만 준다.
+  # LOR 은 세 경우 모두에서 유리하고, 균일한 워크로드면 round_robin 과 차이가 없다(하방 없음).
+  # 비용 0, 타깃그룹 속성이라 파드 롤아웃·타깃 재등록이 없어 트래픽 중에도 안전하게 켜고 끈다.
+  # slow_start 는 반대로 새 타깃 투입을 늦춰 진입 구간을 악화시키므로 쓰지 않는다.
+  load_balancing_algorithm_type = "least_outstanding_requests"
+
   lifecycle {
     create_before_destroy = true
   }

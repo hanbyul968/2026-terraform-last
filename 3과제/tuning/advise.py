@@ -382,6 +382,36 @@ def system_cpu_req(ns):
     return tot
 
 
+def min_headroom_per_app(alloc_m, nodes, sys_m, reqs, usage):
+    """앱별로 '노드를 늘리지 않는' min 상한을 나눠 준다.
+
+    모든 앱에 같은 min 을 가정하면 가장 무거운 앱 때문에 전체 상한이 낮아져 기회를 잃는다
+    (실측: product 는 성능 만점이라 min 2 로 충분한데 stress 300m 때문에 전체가 5 로 묶였다).
+    예산을 실사용 비중으로 쪼개면 앱마다 필요한 만큼 올릴 수 있다.
+    """
+    if not (alloc_m and nodes and reqs):
+        return {}, None
+    avail = alloc_m * nodes - sys_m
+    if avail <= 0:
+        return {}, avail
+    w = {a: (usage.get(a) or reqs.get(a) or 0) for a in reqs}
+    tot = sum(w.values())
+    out = {}
+    for a, q in reqs.items():
+        if not q:
+            continue
+        share = (avail * (w[a] / tot)) if tot else (avail / len(reqs))
+        out[a] = max(1, int(share // q))
+    return out, avail
+
+
+def fits_per_node(req_m, alloc_m, sys_per_node_m=400):
+    """request 가 노드당 몇 개 들어가나. 1 이면 '노드당 파드 1개'라 사실상 노드 전용이다."""
+    if not (req_m and alloc_m):
+        return None
+    return max(0, int((alloc_m - sys_per_node_m) // req_m))
+
+
 def min_headroom(alloc_m, nodes, sys_m, reqs):
     """'노드를 늘리지 않고' 각 앱 min 을 몇 개까지 올릴 수 있나.
 
@@ -709,6 +739,8 @@ def main():
     budget_ratio, budget_nodes = node_budget(a.cost_points, base_nodes)
     # 예산 분배 비중에 쓸 '앱별 실사용 기준값'. 부하 창 p90 이 있으면 그것을 쓴다.
     usage_base = {k: (win[k]["p90"] if k in win else peaks.get(k)) for k in set(list(peaks) + list(win))}
+    # 앱별 min 상한(균등 가정이 아니라 실사용 비중으로 분배)
+    min_cap_app, _ = min_headroom_per_app(alloc_m, base_nodes, sys_m, reqs_now, usage_base)
     have_live = bool(live)
 
     print("\n" + "=" * 72)
@@ -721,6 +753,10 @@ def main():
     if ratio_now:
         cp = cost_points_of(ratio_now)
         print("  비용 현황: 노드 평균 %.2f대 -> ratio %.2f -> %d/12점" % (nodes_avg, ratio_now, cp))
+        print("      [가정] ratio 분모(기준 %g대)는 node_desired_size 로 가정한 값이다."
+              % BASELINE_NODES)
+        print("             채점기준의 '인스턴스 비용 ratio' 기준값 정의가 문제지에 없으므로,"
+              " 실제 채점기가 다른 기준을 쓰면 이 점수는 어긋난다.")
         if budget_nodes:
             print("      목표 %d점을 받으려면 노드 평균 %.1f대 이하 (ratio <= %.2f)"
                   % (a.cost_points, budget_nodes, budget_ratio))
@@ -728,8 +764,10 @@ def main():
         cur_min = sum((v.get("min") or 0) for v in live.values())
         print("  min 여유: 기준 %d노드(%dm) - 시스템 %dm = %dm 여유"
               % (base_nodes, alloc_m * base_nodes, sys_m, avail_m))
-        print("      -> 노드를 늘리지 않고 각 앱 min 을 최대 %d 까지 올릴 수 있다 (현재 합계 %d)"
-              % (min_cap, cur_min))
+        print("      -> 균등 기준: 각 앱 min 최대 %d (현재 합계 %d)" % (min_cap, cur_min))
+        if min_cap_app:
+            detail = ", ".join("%s %d" % (a, v) for a, v in sorted(min_cap_app.items()))
+            print("      -> 실사용 비중 배분: %s   (무거운 앱 때문에 전체가 묶이지 않게)" % detail)
         print("         트래픽이 계단처럼 들어오면 HPA 램프(실측 1분 45초)가 그대로 실패로 잡힌다.")
     if not win:
         print("      podcpu.csv 가 없다. 최신 loadtest.ps1 로 다시 측정하면 부하 창 p95 로 판정한다")
@@ -773,7 +811,7 @@ def main():
                 if nb is None:
                     print(f"  {label:5} {val:5.1f}% -> {cur_pt:.1f}/4.0 (최상위 구간)")
                 else:
-                    print(f"  {label:5} {val:5.1f}% -> {cur_pt:.1f}/4.0   다음 구간 {nb}% 까지 +{gap}%p (넘기면 +0.5)")
+                    print(f"  {label:5} {val:5.1f}% -> {cur_pt:.1f}/4.0   다음 구간 {nb}% 까지 +{gap}%p (넘기면 +0.5점)")
             if pv[0] != "unknown":
                 print(f"  파드 효과: {pv[1]}")
         print(f"  근거: {why}")
@@ -792,6 +830,12 @@ def main():
         # 이 앱의 request 는 권장값(rcpu)을 반영해야 하므로 사본에 덮어쓴다.
         reqs_for_cap = dict(reqs_now)
         reqs_for_cap[api] = rcpu
+        # request 가 너무 커서 노드당 1개밖에 안 들어가면 노드를 전용으로 먹는다 -> 비용 폭증.
+        fpn = fits_per_node(rcpu, alloc_m)
+        if fpn is not None and fpn <= 1 and rcpu > (cur.get("cpu") or 0):
+            safe = max(50, int((alloc_m - 400) // 2 // 25) * 25)
+            print(f"  [!] request {rcpu}m 는 노드당 {fpn}개만 들어간다(노드 전용화) -> {safe}m 로 제한")
+            rcpu = safe
         cap = max_pods_in_budget(budget_nodes, alloc_m, sys_m, reqs_for_cap, usage_base, api)
         if cap and rmx > cap:
             print(f"  [!] max {rmx} 는 비용 예산({a.cost_points}점, 노드 {budget_nodes:.1f}대)을 넘긴다"
@@ -860,6 +904,32 @@ def main():
         print("")
         print("  성능 1구간(+0.5)과 비용 1구간(+1.0)의 교환비를 보십시오.")
         print("  비용 구간은 노드 평균 0.5대마다 1점입니다 — 성능 한 구간보다 크게 움직입니다.")
+        # 지금 상태에서 각 방향의 기대 점수를 실제로 계산해 나란히 보여준다.
+        if ratio_now and meas:
+            perf_now = {k: v["perf"] for k, v in meas.items() if v}
+            avail_now = {k: v["avail"] for k, v in meas.items() if v}
+            base_tot = run_total(perf_now, avail_now, ratio_now)
+            print("")
+            print("  지금 소계 %.1f점. 각 방향의 기대치:" % base_tot)
+            # 비용만 개선
+            for step in (0.5, 1.0, 1.5):
+                nn = max(0.1, nodes_avg - step)
+                r2 = nn / BASELINE_NODES
+                tot = run_total(perf_now, avail_now, r2)
+                print("    노드 평균 -%.1f대 (%.2f -> %.2f대, ratio %.2f) -> %.1f점  (%+.1f)"
+                      % (step, nodes_avg, nn, r2, tot, tot - base_tot))
+            # 성능만 개선: 각 앱을 다음 구간까지 올렸을 때
+            for app, mv in sorted(meas.items()):
+                if not mv:
+                    continue
+                nb, gap = next_band(mv["perf"])
+                if nb is None:
+                    continue
+                p2 = dict(perf_now)
+                p2[app] = nb
+                tot = run_total(p2, avail_now, ratio_now)
+                print("    %s perf %.1f%% -> %.1f%% (+%.2f%%p) -> %.1f점  (%+.1f)"
+                      % (app, mv["perf"], nb, gap, tot, tot - base_tot))
         if best[2]["nodes"]:
             print("  최고 회차 '%s' 의 노드 평균은 %.2f대였습니다." % (best[1], best[2]["nodes"]))
     print("  검증: 적용 후  .\\loadtest.ps1 <ep> 180s after  로 재측정 (한 번에 한 앱만 바꾸면 원인 추적 쉬움)")

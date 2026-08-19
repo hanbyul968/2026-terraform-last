@@ -1,5 +1,10 @@
 # kube-prometheus-stack values (문제지 Reference02)
 
+# (11-4) 기본 kube-prometheus-stack 알림 비활성화 → Active Alerts에 커스텀 알림만 표시
+#         (안 끄면 Watchdog/TargetDown/CPUThrottlingHigh/KubePod* 가 끼어들어 채점지 사진과 불일치)
+defaultRules:
+  create: false
+
 prometheus:
   prometheusSpec:
     retention: 7d
@@ -41,6 +46,10 @@ prometheus-node-exporter:
 kube-state-metrics:
   nodeSelector:
     wsc2026/node: addon
+  # (11-3 Available Nodes) 노드의 nodegroup 라벨을 메트릭으로 노출
+  #   → kube_node_labels{label_eks_amazonaws_com_nodegroup} 생성(nodegroup별 Available Nodes 패널용)
+  metricLabelsAllowlist:
+    - "nodes=[eks.amazonaws.com/nodegroup]"
 
 grafana:
   adminUser: admin

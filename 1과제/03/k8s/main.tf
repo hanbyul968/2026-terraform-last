@@ -362,6 +362,54 @@ resource "helm_release" "fluentbit" {
   ]
 }
 
+# ── Fluent Bit 설정 오버라이드(two-branch) + 메트릭 ServiceMonitor ──
+#   차트가 생성한 configmap을 fb/ 의 실제 설정으로 교체한다:
+#     - logfmt → Reference02 JSON(`INFO {json}`) 재구성 (11-3 로그 형식)
+#     - /v1/book 로그만 CloudWatch 전송 (채점 확정: 그 외 경로 차단)
+#     - log_to_metrics 로 http_requests_total 생성 → HighErrorRate
+#   fb-metrics-sm.yaml: :2021 노출 메트릭을 Prometheus가 수집하도록 Service + ServiceMonitor(relabel).
+resource "null_resource" "fluentbit_config" {
+  triggers = {
+    conf   = filesha256("${path.module}/fb/fluent-bit.conf")
+    parser = filesha256("${path.module}/fb/parser_extra.conf")
+    lua    = filesha256("${path.module}/fb/reformat.lua")
+    sm     = filesha256("${path.module}/fb/fb-metrics-sm.yaml")
+    fb     = helm_release.fluentbit.id
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    environment = {
+      REGION  = var.region
+      CLUSTER = var.cluster_name
+      NS      = var.obs_namespace
+      DIR     = "${path.module}/fb"
+    }
+    command = <<-EOT
+      set -eu
+      export KUBECONFIG=$(mktemp)
+      trap 'rm -f "$KUBECONFIG"' EXIT
+      aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER" >/dev/null
+
+      # 차트 configmap을 two-branch 설정으로 교체
+      kubectl create configmap fluent-bit-aws-for-fluent-bit -n "$NS" \
+        --from-file=fluent-bit.conf="$DIR/fluent-bit.conf" \
+        --from-file=parser_extra.conf="$DIR/parser_extra.conf" \
+        --from-file=reformat.lua="$DIR/reformat.lua" \
+        --dry-run=client -o yaml | kubectl apply -f -
+
+      # 새 설정 반영
+      kubectl rollout restart daemonset/fluent-bit-aws-for-fluent-bit -n "$NS"
+      kubectl rollout status  daemonset/fluent-bit-aws-for-fluent-bit -n "$NS" --timeout=120s
+
+      # log_to_metrics(:2021) 스크레이프용 Service + ServiceMonitor
+      kubectl apply -f "$DIR/fb-metrics-sm.yaml"
+    EOT
+  }
+
+  depends_on = [helm_release.fluentbit]
+}
+
 # ═══════════════════════════════════════════════════════════════
 # ingress 가 만든 ALB 가 active 가 될 때까지 대기 (root CloudFront origin 용)
 # ═══════════════════════════════════════════════════════════════
@@ -467,6 +515,7 @@ resource "null_resource" "private_only" {
     helm_release.lb_controller,
     helm_release.kps,
     helm_release.fluentbit,
+    null_resource.fluentbit_config,
     null_resource.wait_alb,
   ]
 }

@@ -4,115 +4,132 @@
   "tags": ["wsc2026"],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 2,
+  "version": 3,
   "refresh": "15s",
   "time": { "from": "now-30m", "to": "now" },
   "panels": [
     { "id": 100, "title": "Node", "type": "row", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }, "panels": [] },
     {
-      "id": 1, "title": "All Node CPU", "type": "timeseries", "gridPos": { "h": 7, "w": 9, "x": 0, "y": 1 },
+      "id": 1, "title": "Node CPU (%)", "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 60 }, { "color": "red", "value": 80 }] }, "color": { "mode": "thresholds" } }, "overrides": [] },
-      "targets": [{ "refId": "A", "expr": "100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m])))", "legendFormat": "{{instance}}" }]
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 60 }, { "color": "red", "value": 80 } ] }, "color": { "mode": "thresholds" } }, "overrides": [] },
+      "targets": [ { "refId": "A", "expr": "100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m]))) * on(instance) group_left(nodename) node_uname_info", "legendFormat": "{{nodename}}" } ]
     },
     {
-      "id": 2, "title": "All Node Memory", "type": "timeseries", "gridPos": { "h": 7, "w": 9, "x": 9, "y": 1 },
+      "id": 2, "title": "Node Memory (%)", "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 60 }, { "color": "red", "value": 80 }] }, "color": { "mode": "thresholds" } }, "overrides": [] },
-      "targets": [{ "refId": "A", "expr": "100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)", "legendFormat": "{{instance}}" }]
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 60 }, { "color": "red", "value": 80 } ] }, "color": { "mode": "thresholds" } }, "overrides": [] },
+      "targets": [ { "refId": "A", "expr": "100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * on(instance) group_left(nodename) node_uname_info", "legendFormat": "{{nodename}}" } ]
     },
     {
-      "id": 3, "title": "All Available Nodes", "type": "stat", "gridPos": { "h": 7, "w": 6, "x": 18, "y": 1 },
+      "id": 3, "title": "Available Nodes", "type": "stat",
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 8 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] } }, "overrides": [] },
-      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "values": false } },
-      "targets": [{ "refId": "A", "expr": "sum(kube_node_status_condition{condition=\"Ready\",status=\"true\"}) or vector(0)", "instant": true }]
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] } }, "overrides": [] },
+      "options": { "orientation": "horizontal", "colorMode": "value", "graphMode": "area", "textMode": "value_and_name", "reduceOptions": { "calcs": ["lastNotNull"], "values": false } },
+      "targets": [ { "refId": "A", "expr": "count by (label_eks_amazonaws_com_nodegroup) (kube_node_labels)", "legendFormat": "{{label_eks_amazonaws_com_nodegroup}}", "instant": true } ]
     },
-
-    { "id": 101, "title": "Pod", "type": "row", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 8 }, "panels": [] },
+    { "id": 101, "title": "Pod", "type": "row", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 12 }, "panels": [] },
     {
-      "id": 4, "title": "All Pod CPU", "type": "timeseries", "gridPos": { "h": 7, "w": 8, "x": 0, "y": 9 },
+      "id": 4, "title": "Pod CPU", "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 13 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 60 }, { "color": "red", "value": 80 }] }, "color": { "mode": "thresholds" } }, "overrides": [] },
-      "targets": [{ "refId": "A", "expr": "100 * sum by (namespace, pod) (rate(container_cpu_usage_seconds_total{container!=\"\",image!=\"\"}[5m])) / clamp_min(sum by (namespace, pod) (kube_pod_container_resource_limits{resource=\"cpu\"}), 0.001)", "legendFormat": "{{namespace}}/{{pod}}" }]
-    },
-    {
-      "id": 5, "title": "All Pod Memory", "type": "timeseries", "gridPos": { "h": 7, "w": 8, "x": 8, "y": 9 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 60 }, { "color": "red", "value": 80 }] }, "color": { "mode": "thresholds" } }, "overrides": [] },
-      "targets": [{ "refId": "A", "expr": "100 * sum by (namespace, pod) (container_memory_working_set_bytes{container!=\"\",image!=\"\"}) / clamp_min(sum by (namespace, pod) (kube_pod_container_resource_limits{resource=\"memory\"}), 1)", "legendFormat": "{{namespace}}/{{pod}}" }]
+      "fieldConfig": { "defaults": { "min": 0, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 0.6 }, { "color": "red", "value": 0.8 } ] }, "color": { "mode": "thresholds" } }, "overrides": [] },
+      "targets": [ { "refId": "A", "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"wsc2026\",container!=\"\"}[5m])) / clamp_min(sum by (pod) (kube_pod_container_resource_limits{namespace=\"wsc2026\",resource=\"cpu\"}), 0.001)", "legendFormat": "{{pod}}" } ]
     },
     {
-      "id": 6, "title": "All Pending Pods", "type": "stat", "gridPos": { "h": 7, "w": 4, "x": 16, "y": 9 },
+      "id": 5, "title": "Pod Memory", "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 13 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] }, "color": { "mode": "thresholds" } }, "overrides": [] },
-      "targets": [{ "refId": "A", "expr": "sum(kube_pod_status_phase{phase=\"Pending\"} == 1) or vector(0)", "instant": true }]
+      "fieldConfig": { "defaults": { "unit": "bytes", "min": 0, "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "targets": [ { "refId": "A", "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=\"wsc2026\",container!=\"\"})", "legendFormat": "{{pod}}" } ]
     },
     {
-      "id": 7, "title": "All Pod restarts", "type": "stat", "gridPos": { "h": 7, "w": 4, "x": 20, "y": 9 },
+      "id": 6, "title": "Pending Pods", "type": "stat",
+      "gridPos": { "h": 7, "w": 6, "x": 0, "y": 20 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 1 }] }, "color": { "mode": "thresholds" } }, "overrides": [] },
-      "targets": [{ "refId": "A", "expr": "sum(kube_pod_container_status_restarts_total) or vector(0)", "instant": true }]
-    },
-
-    { "id": 102, "title": "Application Pod", "type": "row", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 16 }, "panels": [] },
-    {
-      "id": 8, "title": "App Pod CPU", "type": "timeseries", "gridPos": { "h": 7, "w": 7, "x": 0, "y": 17 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 60 }, { "color": "red", "value": 80 }] }, "color": { "mode": "thresholds" } }, "overrides": [] },
-      "targets": [{ "refId": "A", "expr": "100 * sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"wsc2026\",pod=~\"wsc2026-book-deploy.*\",container!=\"\"}[5m])) / clamp_min(sum by (pod) (kube_pod_container_resource_limits{namespace=\"wsc2026\",pod=~\"wsc2026-book-deploy.*\",resource=\"cpu\"}), 0.001)", "legendFormat": "{{pod}}" }]
+      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] }, "color": { "mode": "thresholds" } }, "overrides": [] },
+      "targets": [ { "refId": "A", "expr": "sum(kube_pod_status_phase{namespace=\"wsc2026\",phase=\"Pending\"} == 1) or vector(0)", "instant": true } ]
     },
     {
-      "id": 9, "title": "App Pod Memory", "type": "timeseries", "gridPos": { "h": 7, "w": 7, "x": 7, "y": 17 },
+      "id": 7, "title": "Pod Restarts", "type": "stat",
+      "gridPos": { "h": 7, "w": 18, "x": 6, "y": 20 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 60 }, { "color": "red", "value": 80 }] }, "color": { "mode": "thresholds" } }, "overrides": [] },
-      "targets": [{ "refId": "A", "expr": "100 * sum by (pod) (container_memory_working_set_bytes{namespace=\"wsc2026\",pod=~\"wsc2026-book-deploy.*\",container!=\"\"}) / clamp_min(sum by (pod) (kube_pod_container_resource_limits{namespace=\"wsc2026\",pod=~\"wsc2026-book-deploy.*\",resource=\"memory\"}), 1)", "legendFormat": "{{pod}}" }]
+      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] }, "color": { "mode": "thresholds" } }, "overrides": [] },
+      "options": { "orientation": "horizontal", "colorMode": "value", "graphMode": "area", "textMode": "value_and_name", "reduceOptions": { "calcs": ["lastNotNull"], "values": false } },
+      "targets": [ { "refId": "A", "expr": "sum by (pod) (kube_pod_container_status_restarts_total{namespace=\"wsc2026\"})", "legendFormat": "{{pod}}", "instant": true } ]
+    },
+    { "id": 102, "title": "Application Pod", "type": "row", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 27 }, "panels": [] },
+    {
+      "id": 8, "title": "App Pod CPU", "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "min": 0, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 0.6 }, { "color": "red", "value": 0.8 } ] }, "color": { "mode": "thresholds" } }, "overrides": [] },
+      "targets": [ { "refId": "A", "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"wsc2026\",pod=~\"wsc2026-book-deploy.*\",container!=\"\"}[5m])) / clamp_min(sum by (pod) (kube_pod_container_resource_limits{namespace=\"wsc2026\",pod=~\"wsc2026-book-deploy.*\",resource=\"cpu\"}), 0.001)", "legendFormat": "{{pod}}" } ]
     },
     {
-      "id": 10, "title": "App Running", "type": "stat", "gridPos": { "h": 7, "w": 3, "x": 14, "y": 17 },
+      "id": 9, "title": "App Pod Memory", "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 28 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [{ "refId": "A", "expr": "sum(kube_pod_status_phase{namespace=\"wsc2026\",pod=~\"wsc2026-book-deploy.*\",phase=\"Running\"} == 1) or vector(0)", "instant": true }]
+      "fieldConfig": { "defaults": { "unit": "bytes", "min": 0, "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "targets": [ { "refId": "A", "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=\"wsc2026\",pod=~\"wsc2026-book-deploy.*\",container!=\"\"})", "legendFormat": "{{pod}}" } ]
     },
     {
-      "id": 11, "title": "App restarts", "type": "stat", "gridPos": { "h": 7, "w": 4, "x": 17, "y": 17 },
+      "id": 10, "title": "App Running", "type": "stat",
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 35 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 1 }] }, "color": { "mode": "thresholds" } }, "overrides": [] },
-      "targets": [{ "refId": "A", "expr": "sum(kube_pod_container_status_restarts_total{namespace=\"wsc2026\",pod=~\"wsc2026-book-deploy.*\"}) or vector(0)", "instant": true }]
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "values": false } },
+      "targets": [ { "refId": "A", "expr": "sum(kube_pod_status_phase{namespace=\"wsc2026\",pod=~\"wsc2026-book-deploy.*\",phase=\"Running\"} == 1) or vector(0)" } ]
     },
     {
-      "id": 12, "title": "App Pending", "type": "stat", "gridPos": { "h": 7, "w": 3, "x": 21, "y": 17 },
+      "id": 11, "title": "App Restarts", "type": "stat",
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 35 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] }, "color": { "mode": "thresholds" } }, "overrides": [] },
-      "targets": [{ "refId": "A", "expr": "sum(kube_pod_status_phase{namespace=\"wsc2026\",pod=~\"wsc2026-book-deploy.*\",phase=\"Pending\"} == 1) or vector(0)", "instant": true }]
+      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] }, "color": { "mode": "thresholds" } }, "overrides": [] },
+      "options": { "orientation": "horizontal", "colorMode": "value", "graphMode": "area", "textMode": "value_and_name", "reduceOptions": { "calcs": ["lastNotNull"], "values": false } },
+      "targets": [ { "refId": "A", "expr": "sum by (pod) (kube_pod_container_status_restarts_total{namespace=\"wsc2026\",pod=~\"wsc2026-book-deploy.*\"})", "legendFormat": "{{pod}}", "instant": true } ]
     },
-
-    { "id": 103, "title": "Application Traffic", "type": "row", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 }, "panels": [] },
     {
-      "id": 13, "title": "App Request Count", "type": "timeseries", "gridPos": { "h": 8, "w": 8, "x": 0, "y": 25 },
+      "id": 12, "title": "App Pending", "type": "stat",
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 35 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] }, "color": { "mode": "thresholds" } }, "overrides": [] },
+      "targets": [ { "refId": "A", "expr": "sum(kube_pod_status_phase{namespace=\"wsc2026\",pod=~\"wsc2026-book-deploy.*\",phase=\"Pending\"} == 1) or vector(0)", "instant": true } ]
+    },
+    { "id": 103, "title": "Application Traffic", "type": "row", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 42 }, "panels": [] },
+    {
+      "id": 13, "title": "Request Count", "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 43 },
       "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
-      "targets": [{ "refId": "A", "queryMode": "Logs", "region": "ap-northeast-2", "logGroupNames": ["/wsc2026/app/log"], "expression": "filter @message not like /health/ | stats count(*) as requests by bin(1m)" }]
+      "targets": [ { "refId": "A", "queryMode": "Logs", "region": "ap-northeast-2", "logGroupNames": ["/wsc2026/app/log"], "expression": "filter @message not like /health/ | stats count(*) as requests by bin(1m)" } ]
     },
     {
-      "id": 14, "title": "App Response Time", "type": "timeseries", "gridPos": { "h": 8, "w": 8, "x": 8, "y": 25 },
+      "id": 14, "title": "Response Time", "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 43 },
       "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
       "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
-      "targets": [{ "refId": "A", "queryMode": "Logs", "region": "ap-northeast-2", "logGroupNames": ["/wsc2026/app/log"], "expression": "parse @message /duration=(?<d>[0-9.]+)(?<u>[a-zµ]+)/ | filter @message not like /health/ | fields (u=\"µs\")*d/1000000 + (u=\"ms\")*d/1000 + (u=\"s\")*d as sec | stats avg(sec) as avg_seconds by bin(1m)" }]
+      "targets": [ { "refId": "A", "queryMode": "Logs", "region": "ap-northeast-2", "logGroupNames": ["/wsc2026/app/log"], "expression": "parse @message /\"duration\":\"(?<d>[0-9.]+)(?<u>[a-zµ]+)\"/ | filter @message not like /health/ | fields (u=\"µs\")*d/1000000 + (u=\"ms\")*d/1000 + (u=\"s\")*d as sec | stats avg(sec) as avg_seconds by bin(1m)" } ]
     },
     {
-      "id": 15, "title": "App Status Code", "type": "timeseries", "gridPos": { "h": 8, "w": 8, "x": 16, "y": 25 },
+      "id": 15, "title": "Status Codes", "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 43 },
       "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
-      "targets": [{ "refId": "A", "queryMode": "Logs", "region": "ap-northeast-2", "logGroupNames": ["/wsc2026/app/log"], "expression": "parse @message /status=(?<status>[0-9]+)/ | filter @message not like /health/ | stats count(*) by status, bin(1m)" }]
+      "targets": [ { "refId": "A", "queryMode": "Logs", "region": "ap-northeast-2", "logGroupNames": ["/wsc2026/app/log"], "expression": "parse @message /\"status\":\"(?<status>[0-9]+)\"/ | filter @message not like /health/ | fields concat(substr(status,0,1),\"XX\") as class | stats count(*) by class, bin(1m)" } ]
     },
     {
-      "id": 16, "title": "App Application Logs", "type": "logs", "gridPos": { "h": 8, "w": 24, "x": 0, "y": 33 },
+      "id": 16, "title": "Application Logs", "type": "logs",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 51 },
       "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
       "options": { "showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true },
-      "targets": [{ "refId": "A", "queryMode": "Logs", "region": "ap-northeast-2", "logGroupNames": ["/wsc2026/app/log"], "expression": "fields @timestamp, @message | filter @message not like /\\/health/ | sort @timestamp desc | limit 100" }]
+      "targets": [ { "refId": "A", "queryMode": "Logs", "region": "ap-northeast-2", "logGroupNames": ["/wsc2026/app/log"], "expression": "fields @timestamp, @message | filter @message not like /\\/health/ | sort @timestamp desc | limit 100" } ]
     },
-
-    { "id": 104, "title": "Alert", "type": "row", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 41 }, "panels": [] },
+    { "id": 104, "title": "Alert", "type": "row", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 59 }, "panels": [] },
     {
-      "id": 17, "title": "Active Alerts", "type": "alertlist", "gridPos": { "h": 10, "w": 24, "x": 0, "y": 42 },
+      "id": 17, "title": "Active Alerts", "type": "alertlist",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 60 },
       "options": { "viewMode": "list", "groupMode": "default", "maxItems": 20, "sortOrder": 3, "dashboardAlerts": false, "alertName": "", "alertInstanceLabelFilter": "", "datasource": "prometheus", "stateFilter": { "firing": true, "pending": false, "noData": false, "normal": false, "error": false } }
     }
   ]

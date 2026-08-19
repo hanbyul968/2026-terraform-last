@@ -30,35 +30,11 @@ cloudWatchLogs:
   autoCreateGroup: false
   autoRetryRequests: true
 
-# book 앱의 `INFO {json}` 로그에서 구조화 필드를 추출하되 원본 log도 보존한다.
-service:
-  extraParsers: |
-    [PARSER]
-        Name         book_json
-        Format       regex
-        Regex        ^(?<level>[A-Z]+)\s+(?<payload>\{.*\})$
-
-# aws-for-fluent-bit 차트에서 완전한 FILTER 블록은 additionalFilters 키를 사용한다.
-additionalFilters: |
-  [FILTER]
-      Name         grep
-      Match        kube.*
-      Regex        $kubernetes['namespace_name'] ^wsc2026$
-  [FILTER]
-      Name         parser
-      Match        kube.*
-      Key_Name     log
-      Parser       book_json
-      Reserve_Data On
-      Preserve_Key On
-  [FILTER]
-      Name         parser
-      Match        kube.*
-      Key_Name     payload
-      Parser       json
-      Reserve_Data On
-      Preserve_Key On
-  [FILTER]
-      Name         grep
-      Match        kube.*
-      Exclude      path ^/health$
+# 파싱/필터/메트릭은 helm values로 넣지 않는다.
+# 지급 book 앱은 logfmt(`YYYY/MM/DD HH:MM:SS access method=.. path=.. status=.. duration=..`)라
+# 기존 book_json(=INFO {json} 기대) 파서가 맞지 않고, Lua 재구성 + log_to_metrics + prometheus_exporter는
+# 차트 values로 주입이 어렵다. → helm 설치 후 main.tf 의 null_resource.fluentbit_config 가
+# configmap(fb/fluent-bit.conf, parser_extra.conf, reformat.lua)을 직접 교체하고 DaemonSet을 재시작한다.
+#   - logfmt → Reference02 JSON(`INFO {json}`) 재구성 (11-3 로그 형식)
+#   - /v1/book 로그만 CloudWatch 전송 (채점 확정: 그 외 경로 차단)
+#   - log_to_metrics 로 http_requests_total 생성 → HighErrorRate (fb/fb-metrics-sm.yaml 의 ServiceMonitor로 수집)

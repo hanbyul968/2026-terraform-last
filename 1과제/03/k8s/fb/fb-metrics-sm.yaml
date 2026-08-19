@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: fluent-bit-metrics
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: aws-for-fluent-bit-metrics
+spec:
+  selector:
+    app.kubernetes.io/name: aws-for-fluent-bit
+  ports:
+    - name: metrics
+      port: 2021
+      targetPort: 2021
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: fluent-bit-metrics
+  namespace: observability
+  labels:
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: aws-for-fluent-bit-metrics
+  namespaceSelector:
+    matchNames: [observability]
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 15s
+      honorLabels: true
+      metricRelabelings:
+        # FB는 log_metric_counter_http_requests_total로 노출 -> 알림 expr과 맞게 rename + namespace 부여
+        - sourceLabels: [__name__]
+          regex: 'log_metric_counter_http_requests_total'
+          targetLabel: __name__
+          replacement: 'http_requests_total'
+        - targetLabel: namespace
+          replacement: 'wsc2026'

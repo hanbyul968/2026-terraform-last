@@ -8,7 +8,6 @@ ec2_client = boto3.client("ec2")
 sns_client = boto3.client("sns")
 
 SNS_TOPIC_ARN = os.environ.get("SNS_TOPIC_ARN")
-# role 복구 시 붙일 인스턴스 프로파일 이름(=역할명과 동일하게 생성됨)
 ORIGINAL_PROFILE_NAME = os.environ.get("ROLE_NAME", "wsc2026-event-ec2-role")
 ORIGINAL_INSTANCE_TYPE = os.environ.get("INSTANCE_TYPE", "t3.micro")
 INSTANCE_NAME_TAG = os.environ.get("INSTANCE_NAME_TAG", "wsc2026-event-ec2")
@@ -29,7 +28,7 @@ def _topic_arn():
 
 
 def publish_alert(event_type, detail, action):
-    # SNS 발행 + 3-5 채점용 마커('sns_publish')를 로그에 남긴다.
+    # SNS 발행 + 채점(3-5)용 마커('sns_publish')를 로그에 남긴다.
     arn = _topic_arn()
     payload = {
         "event": event_type,
@@ -115,12 +114,11 @@ def role_remediation(detail, request_params):
     return {"status": "role_restored", "instanceId": instance_id}
 
 
-# ===== wsc2026-termination-protection-remediation : 종료방지 재활성화 =====
-def termination_protection_remediation(detail, request_params):
-    instance_id = _target_instance_id(request_params)
-    ec2_client.modify_instance_attribute(InstanceId=instance_id, DisableApiTermination={"Value": True})
-    publish_alert("TERMINATION_PROTECTION_DISABLED", f"Termination protection re-enabled on {instance_id}", "RESTORED")
-    return {"status": "termination_protection_restored", "instanceId": instance_id}
+# ===== wsc2026-ec2-terminate-alert : EC2 종료 알림만 발송 =====
+def ec2_terminate_alert(detail):
+    instance_id = detail.get("instance-id", "unknown")
+    publish_alert("EC2_TERMINATED", f"EC2 instance {instance_id} was terminated", "ALERT_ONLY")
+    return {"status": "terminate_alert_sent", "instanceId": instance_id}
 
 
 # ===== wsc2026-ec2-type-remediation : 인스턴스 타입 원복 =====
@@ -132,14 +130,10 @@ def ec2_type_remediation(detail, request_params):
         return {"status": "type_noop", "instanceId": instance_id}
 
     if instance["State"]["Name"] != "stopped":
-        # 채점(3-4)은 180초 안에 t3.micro 로 돌아와야 한다. graceful shutdown 을 기다리면
-        # 시간이 초과되므로 강제 종료로 OS 셧다운을 생략한다.
         try:
-            ec2_client.stop_instances(InstanceIds=[instance_id], Force=True, SkipOsShutdown=True)
-        except Exception as error:
-            # SkipOsShutdown 미지원 런타임(boto3 구버전) 대비
-            print("stop with SkipOsShutdown failed, retrying with Force only:", repr(error))
             ec2_client.stop_instances(InstanceIds=[instance_id], Force=True)
+        except Exception as error:
+            print("stop failed:", repr(error))
         ec2_client.get_waiter("instance_stopped").wait(
             InstanceIds=[instance_id], WaiterConfig={"Delay": 2, "MaxAttempts": 60}
         )
@@ -150,10 +144,19 @@ def ec2_type_remediation(detail, request_params):
     return {"status": "type_restored", "instanceId": instance_id}
 
 
-# ===== 단일 진입점: 4개 함수 모두 event_lambda.handler 사용, 이벤트로 분기 =====
+# ===== 단일 진입점: 4개 함수 모두 index.handler 사용, 이벤트로 분기 =====
 def handler(event, context):
     print("EVENT:", json.dumps(event, default=str))
     detail = event.get("detail", {}) or {}
+    detail_type = event.get("detail-type", "")
+
+    # EC2 종료 이벤트 (상태변경 알림)
+    if detail_type == "EC2 Instance State-change Notification":
+        if detail.get("state") in ("shutting-down", "terminated"):
+            return ec2_terminate_alert(detail)
+        return {"status": "ignored", "state": detail.get("state")}
+
+    # 나머지는 CloudTrail API 호출 이벤트
     name = detail.get("eventName", "")
     request_params = detail.get("requestParameters", {}) or {}
     try:
@@ -161,8 +164,6 @@ def handler(event, context):
             return sg_remediation(detail, request_params)
         if name in ("AssociateIamInstanceProfile", "ReplaceIamInstanceProfileAssociation", "DisassociateIamInstanceProfile"):
             return role_remediation(detail, request_params)
-        if name == "ModifyInstanceAttribute" and "disableApiTermination" in request_params:
-            return termination_protection_remediation(detail, request_params)
         if name == "ModifyInstanceAttribute" and "instanceType" in request_params:
             return ec2_type_remediation(detail, request_params)
         print("No matching remediation:", name)

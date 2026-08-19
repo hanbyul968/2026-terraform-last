@@ -1,7 +1,7 @@
 # 2과제 (02) — Small Challenge (Workflow / Analytics / Cloud Event Handling / MSK)
 
-인천 제2과제 4개 요구사항을 **모듈별·리전별 Terraform**으로 구성한다. 채점기준표(vf)·과제지(vf) 기준으로
-리소스 이름/런타임/포트/핸들러를 맞췄다.
+인천 제2과제 4개 요구사항을 **모듈별·리전별 Terraform**으로 구성한다. **과제지_v8 + 수정사항(질의답변)** 기준으로
+리소스 이름/런타임/포트/핸들러를 맞췄다. (module3는 과제지_v8의 CloudTrail 설계 기준 — §7 참고)
 
 | 모듈 | 내용 | 리전 | apply 위치 |
 |------|------|------|-----------|
@@ -76,13 +76,13 @@ terraform apply -auto-approve            # module1, module4 는 -var="bibunho=60
 - SG `wsc2026-event-sg` — 인바운드 **tcp 80 0.0.0.0/0**, 아웃바운드 전체(최소구성)
 - SNS `wsc2026-event-alert`
 - CloudTrail `wsc2026-event-trail` (Management **Read/Write**), 로그 S3 **`wsc2026-event-s3`**
-- Lambda **4개** — 모두 **python3.14**, handler **`event_lambda.handler`**(단일 dispatcher, 소스 `lambda/event_lambda.py`), role `wsc2026-event-lambda-role`(+`iam:PassRole`)
+- Lambda **4개** — 모두 **python3.12**, handler **`index.handler`**(단일 dispatcher, 소스 `lambda/index.py`), role `wsc2026-event-lambda-role`(+`iam:PassRole`)
   - `wsc2026-sg-remediation` ← `wsc2026-sg-change-rule` (SG 인바운드 추가 → 회수)
   - `wsc2026-role-remediation` ← `wsc2026-role-change-rule` (IAM 프로파일 변경 → 원복)
-  - `wsc2026-termination-protection-remediation` ← `wsc2026-termination-protection-change-rule` (종료방지 해제 → 재활성)
+  - `wsc2026-ec2-terminate-alert` ← `wsc2026-ec2-terminate-rule` (EC2 종료 감지 → 알림만, `ALERT_ONLY`)
   - `wsc2026-ec2-type-remediation` ← `wsc2026-ec2-type-change-rule` (타입 변경 → t3.micro 원복)
-  - 각 Lambda는 복구 후 SNS 발행(로그에 `sns_publish` 마커 → 3‑5)
-- 채점값: 3‑1 4 Lambda `python3.14`·`event_lambda.handler`, trail `IsLogging=True`, S3 `wsc2026-event-s3` / 3‑2 4 rule ENABLED→대응 Lambda / 3‑3 hostname·tcp80·userdata·프로파일 `wsc2026-event-ec2-role` / 3‑4 위반 주입 후 SG·Role·Termination·Type 전부 복구 / 3‑5 각 Lambda 로그 `sns_publish`
+  - 각 Lambda는 복구/알림 후 SNS 발행(로그에 `sns_publish` 마커)
+- 채점값(과제지_v8 기준): 3‑1 4 Lambda `python3.12`, trail `IsLogging=True`, S3 `wsc2026-event-s3` / 3‑2 4 rule ENABLED→대응 Lambda / 3‑3 hostname·tcp80·userdata·프로파일 `wsc2026-event-ec2-role` / 3‑4 위반 주입 후 SG·Role·Type 복구 + EC2 종료 시 알림 / 3‑5 각 Lambda 로그 `sns_publish`
 
 ### module4 — MSK (ap-northeast-1) · 배점 7.5
 - VPC `msk-vpc` 192.168.0.0/16 — pub-a/b(0/1.0/24), priv-a/b(10/11.0/24), NAT `msk-ngw`
@@ -92,6 +92,7 @@ terraform apply -auto-approve            # module1, module4 는 -var="bibunho=60
   - userdata: **`kafka-python==2.2.15`** 고정 설치(→`kafka.sasl.oauth`), 토픽 생성, **IAM Python producer(`producer-iam`)만 실행** (Go `producer`는 TLS 미지원이라 미사용)
 - Consumer Lambda×2 — **python3.14**, handler **`wsc2026.consumer_handler`**(소스 `lambda/{raw,alert}/wsc2026.py`), role `wsc2026-msk-lambda-role`(최소권한), MSK 트리거
   - `wsc2026-sensor-consumer` ← `wsc2026-sensor-raw` → 정상은 DynamoDB, 이상치는 `wsc2026-sensor-alert` 토픽으로 전달
+    - ⚠ DynamoDB 저장 시 `temperature`·`humidity`는 **문자열(String, 타입 S)** 로 저장한다 — 채점 4‑5‑A가 `temperature.S`로 조회하므로 Decimal(N)로 저장하면 `null`이 나온다. (소스 `lambda/raw/wsc2026.py`)
   - `wsc2026-sensor-alert-consumer` ← `wsc2026-sensor-alert` → S3 `alert/<sensorId>/<date>/<ts>.json` + SNS
 - DynamoDB `wsc2026-sensor-data` (PK `sensorId`, SK `timestamp`), S3 `wsc2026-sensor-alert-bucket-608`, SNS `wsc2026-sensor-alert`
 - 이상치 기준: temp>80 / <10, humidity>90 / <20 → `status=ALERT`, `alert_reason`
@@ -113,7 +114,7 @@ terraform apply -auto-approve            # module1, module4 는 -var="bibunho=60
 
 ## 5. 검증 상태
 - `terraform init -backend=false && terraform validate`: **module1~4 전부 통과**.
-- Lambda 코드 문법(`py_compile`): module3 `event_lambda.py`, module4 `wsc2026.py` **통과**.
+- Lambda 코드 문법(`py_compile`): module3 `index.py`, module4 `wsc2026.py` **통과**.
 - ⚠ 실제 4개 리전 apply·엔드투엔드 채점은 배포 후 직접 확인 필요(MSK/Flink 수 분, Flink SQL은 콘솔 수동).
 
 ## 6. 삭제 (destroy)
@@ -131,3 +132,54 @@ cd C:\Users\competitor\2026-terraform\2과제\02\bastion
 terraform destroy -auto-approve
 ```
 > IAM 역할 등 잔여물이 남으면 `wsc2026-{lambda-student,stepfunction-student,alaytics-ec2,analytics-flink,event-ec2,event-lambda,msk-ec2,msk-lambda}-role` 및 인스턴스 프로파일을 확인해 정리.
+
+
+---
+
+## 7. 채점 이름이 바뀌면 수정할 위치 (module3 = 과제지_v8 CloudTrail 설계)
+
+> module3는 **과제지_v8 + 배포파일 `lambda.md`** 기준으로 맞췄다.
+> (채점기준표_v8 PDF/채점스크립트는 AWS Config 설계로 과제지와 **모순**이라 채택하지 않음.)
+> 채점 이름이 또 바뀌면 아래 위치의 **`name`/`bucket`/`tags.Name` 속성값만** 고치면 된다.
+> ⚠ terraform **리소스 라벨/`locals` 키**(예: `termination`, `termination_protection_change`)는 내부 식별자라 그대로 두고 **`name` 값만** 바꾼다(참조가 깨지지 않게).
+
+### 7-1. module3 Lambda 이름 → `module3/main.tf`
+| 채점 이름 | 수정 위치 (main.tf) |
+|---|---|
+| `wsc2026-sg-remediation` | `locals.event_lambdas.sg.name` |
+| `wsc2026-role-remediation` | `locals.event_lambdas.role.name` |
+| `wsc2026-ec2-terminate-alert` | `locals.event_lambdas.termination.name` (내부 키 `termination` 유지) |
+| `wsc2026-ec2-type-remediation` | `locals.event_lambdas.type.name` |
+| Runtime `python3.12` / handler `index.handler` | `resource "aws_lambda_function" "event"` 의 `runtime`/`handler` |
+| handler 파일명 `index.py` | `lambda/index.py` (handler가 `index.handler`이므로 **파일명 index.py 유지 필수**) |
+
+### 7-2. module3 EventBridge Rule 이름 → `module3/main.tf`
+| 채점 이름 | 수정 위치 (main.tf) | 탐지 대상 |
+|---|---|---|
+| `wsc2026-sg-change-rule` | `aws_cloudwatch_event_rule "sg_change".name` | AuthorizeSecurityGroupIngress |
+| `wsc2026-role-change-rule` | `aws_cloudwatch_event_rule "role_change".name` | Associate/Replace/Disassociate IamInstanceProfile |
+| `wsc2026-ec2-terminate-rule` | `aws_cloudwatch_event_rule "termination_protection_change".name` (내부 라벨 유지) | EC2 State-change `terminated`/`shutting-down` |
+| `wsc2026-ec2-type-change-rule` | `aws_cloudwatch_event_rule "ec2_type_change".name` | ModifyInstanceAttribute + instanceType |
+
+> Rule↔Lambda 연결(타깃)과 invoke 권한은 `locals.event_targets` + `aws_lambda_permission "events"`에서 위 라벨을 그대로 참조하므로, **`name` 값만** 바꾸면 자동으로 따라간다.
+
+### 7-3. module3 기타 리소스 이름 → `module3/main.tf`
+| 채점 이름 | 수정 위치 (main.tf) |
+|---|---|
+| SNS `wsc2026-event-alert` | `aws_sns_topic "alert".name` |
+| CloudTrail `wsc2026-event-trail` | `aws_cloudtrail "main".name` |
+| S3(트레일) `wsc2026-event-s3` | `aws_s3_bucket "trail".bucket` (버킷 정책의 이름도 참조로 자동) |
+| EC2 `wsc2026-event-ec2` | `aws_instance "ec2".tags.Name` |
+| SG `wsc2026-event-sg` | `aws_security_group "ec2".name` (+ `tags.Name`) |
+| Role/Profile `wsc2026-event-ec2-role` | `aws_iam_role "ec2".name` + `aws_iam_instance_profile "ec2".name` (동일해야 3‑3 통과) |
+| Lambda Role `wsc2026-event-lambda-role` | `aws_iam_role "lambda".name` |
+
+### 7-4. module4 4‑5‑A (temperature) 관련
+| 항목 | 수정 위치 |
+|---|---|
+| DynamoDB `temperature`/`humidity`를 문자열(S)로 저장 | `module4/lambda/raw/wsc2026.py` 의 `item["temperature"]=str(...)`, `item["humidity"]=str(...)` |
+| 재배포 반영 | `module4` apply 시 `raw-consumer.zip` 재생성(`archive_file.raw_lambda`) → Lambda 코드 갱신. 기존 N타입 아이템이 남아있으면 채점 전 `wsc2026-sensor-data` 비우고 producer 재적재 |
+
+> 재배포하지 않고 라이브 Lambda만 갱신하려면: `raw/` 디렉터리를 zip으로 다시 싸서
+> `aws lambda update-function-code --function-name wsc2026-sensor-consumer --zip-file fileb://raw-consumer.zip --region ap-northeast-1`
+> (PowerShell `Compress-Archive`는 Lambda가 못 읽는 zip을 만들 수 있으니 `terraform apply`로 재패키징 권장.)

@@ -201,8 +201,8 @@ locals {
       environment = { INSTANCE_ID = aws_instance.ec2.id, ROLE_NAME = aws_iam_instance_profile.ec2.name }
     }
     termination = {
-      name        = "wsc2026-termination-protection-remediation"
-      environment = { INSTANCE_ID = aws_instance.ec2.id }
+      name        = "wsc2026-ec2-terminate-alert"
+      environment = {}
     }
     type = {
       name        = "wsc2026-ec2-type-remediation"
@@ -215,8 +215,8 @@ resource "aws_lambda_function" "event" {
   for_each         = local.event_lambdas
   function_name    = each.value.name
   role             = aws_iam_role.lambda.arn
-  handler          = "event_lambda.handler"
-  runtime          = "python3.14"
+  handler          = "index.handler"
+  runtime          = "python3.12"
   filename         = data.archive_file.lambda.output_path
   source_code_hash = data.archive_file.lambda.output_base64sha256
   timeout          = 300
@@ -307,24 +307,16 @@ resource "aws_cloudwatch_event_target" "role_change" {
   arn  = aws_lambda_function.event["role"].arn
 }
 
-# 3) EC2 인스턴스 삭제방지 비활성화 (ModifyInstanceAttribute + disableApiTermination)
-# 주의: CloudTrail 이벤트는 requestParameters.disableApiTermination = {"value": false} 형태의
-#       "중첩 객체"다. EventBridge 의 exists 연산자는 leaf 노드에만 동작하므로
-#       { disableApiTermination = [{exists=true}] } 로 쓰면 절대 매칭되지 않는다.
-#       반드시 한 단계 더 들어가 value 리프에 매칭해야 한다.
+# 3) EC2 인스턴스 종료 (EC2 Instance State-change Notification, state=terminated/shutting-down)
+#    과제지 wsc2026-ec2-terminate-rule -> wsc2026-ec2-terminate-alert (알림만 발송).
+#    CloudTrail API 이벤트가 아니라 EC2 상태변경 이벤트이므로 detail.state 로 매칭한다.
 resource "aws_cloudwatch_event_rule" "termination_protection_change" {
-  name = "wsc2026-termination-protection-change-rule"
+  name = "wsc2026-ec2-terminate-rule"
   event_pattern = jsonencode({
     source      = ["aws.ec2"]
-    detail-type = ["AWS API Call via CloudTrail"]
+    detail-type = ["EC2 Instance State-change Notification"]
     detail = {
-      eventSource = ["ec2.amazonaws.com"]
-      eventName   = ["ModifyInstanceAttribute"]
-      requestParameters = {
-        disableApiTermination = {
-          value = [{ exists = true }]
-        }
-      }
+      state = ["shutting-down", "terminated"]
     }
   })
 }

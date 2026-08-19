@@ -88,8 +88,10 @@ def consumer_handler(event, context):
             continue
 
         item = dict(record)
-        item["temperature"] = Decimal(str(record["temperature"]))
-        item["humidity"] = Decimal(str(record["humidity"]))
+        # 채점(4-5-A)은 temperature.S(String)로 조회하므로 문자열로 저장한다.
+        # (Decimal 로 저장하면 DynamoDB 타입이 N 이 되어 temperature.S 가 null 로 조회됨)
+        item["temperature"] = str(record["temperature"])
+        item["humidity"] = str(record["humidity"])
         item["status"] = "NORMAL"
         table.put_item(Item=item)
         normal_count += 1

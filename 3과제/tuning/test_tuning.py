@@ -125,6 +125,10 @@ class SharedEngineTests(unittest.TestCase):
         self.assertLessEqual(stuck.idle_nodes(recovered), 2)
         for name, v in recovered.items():
             self.assertLessEqual(v["request"], engine._current_dict(stuck.apps[name])["request"])
+        # plan은 이 축소 묶음을 presize(부하 전 1회 적용)로 노출한다.
+        plan = engine.plan(stuck)
+        self.assertIsNotNone(plan["presize"])
+        self.assertLessEqual(plan["idle_nodes_after_presize"], 2)
 
     def test_one_failing_app_does_not_block_other_apps(self):
         """한 앱이 기준 미달이어도 다른 앱 후보가 나와야 한다(회차 독식 방지)."""
@@ -498,6 +502,11 @@ class PowerShellRunnerContractTests(unittest.TestCase):
         self.assertIn("nodes=[int]$candidate.predicted_nodes", self.script)
         self.assertIn("robocopy", self.script)  # 잠긴 CSV에 견디는 복사
         self.assertNotIn("CPU하한", self.script)
+
+    def test_presize_applied_once_before_hpa_loop(self):
+        self.assertIn("부하 전 request 사이징", self.script)
+        self.assertIn("if($first.presize){", self.script)
+        self.assertIn("Set-TuningSet $first.presize", self.script)
 
     def test_live_loop_is_hpa_only_and_rollout_is_non_fatal(self):
         self.assertIn("[switch]$AllowRequestChange", self.script)

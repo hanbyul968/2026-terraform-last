@@ -124,9 +124,25 @@ try {
   $bestKnobs=$first.knobs
   Write-Host ("[baseline] {0:N1}/36 ratio={1:N2} elapsed={2:N1}m" -f $bestScore.total,$bestScore.cost_ratio,$sw.Elapsed.TotalMinutes)
   if(-not $Apply){
+    Write-Host ("유휴 노드 {0}대 (baseline {1}대)" -f $first.idle_nodes,$first.baseline_node_count)
+    if($first.presize){
+      Write-Host "부하 전 1회 request 사이징(적용 시 유휴 $($first.idle_nodes_after_presize)대):" -ForegroundColor Green
+      foreach($n in $first.presize.PSObject.Properties.Name){$k=$first.presize.$n;Write-Host ("  {0}: request={1}m target={2}%" -f $n,$k.request,$k.target)}
+    }
     if($first.done){Write-Host "수렴: $($first.reason)" -ForegroundColor Green}
-    else{Write-Host ("후보 [{0}] {1}: request={2}m target={3}% min={4} max={5}" -f $first.kind,$first.app,$first.knob.request,$first.knob.target,$first.knob.min,$first.knob.max) -ForegroundColor Green;Write-Host $first.reason}
+    else{Write-Host ("HPA 후보 [{0}] {1}: target={2}% min={3} max={4}" -f $first.kind,$first.app,$first.knob.target,$first.knob.min,$first.knob.max) -ForegroundColor Green;Write-Host $first.reason}
     return
+  }
+  # 트래픽 전 1회: request 사이징(rollout 동반). 유휴 노드를 baseline로 맞추고 과소/과대 예약 교정.
+  # 이 단계만 request를 바꾼다. 이후 시행은 HPA-only라 rollout이 없다.
+  if($first.presize){
+    Write-Host ("--- 부하 전 request 사이징: 유휴 {0}->{1}대" -f $first.idle_nodes,$first.idle_nodes_after_presize) -ForegroundColor Cyan
+    Set-TuningSet $first.presize
+    foreach($n in $first.presize.PSObject.Properties.Name){ if($bestKnobs.$n){ $bestKnobs.$n.request=$first.presize.$n.request; $bestKnobs.$n.target=$first.presize.$n.target } }
+    Start-Sleep -Seconds $CostSettleSeconds
+    & $loadtest @ltArgs | Out-Null
+    $bestScore=Get-Score $out; Save-Snapshot $out $bestOut
+    Write-Host ("사이징 후 {0:N1}/36 ratio={1:N2}" -f $bestScore.total,$bestScore.cost_ratio)
   }
   for($i=1;$i -le $candidateLimit;$i++){
     $step=Get-NextStep $bestOut $rejFile

@@ -368,11 +368,13 @@ CPU averageUtilization
   예: `user 600 + stress 750 + product 250 = 1600 > 1480` → AZ당 2노드 → 유휴 4노드가 대회날 부하
   없이도 상주(Karpenter 회수 불가). `idle-fit` 후보가 이를 감지해 min replica 파드가 baseline 노드에
   담기도록 request를 실사용 하한까지 비례 축소한다(부하 전 1회). baseline를 넘기는 다른 후보는 제외한다.
-- **부하 중 라이브 루프는 HPA(target/min/max)만 만진다(기본값).** request 변경은 rollout을
-  일으켜 적용·롤백에 각각 몇 분이 걸리고, rollout 자체가 가용성을 깎는다. 그래서 루프는 즉시
-  적용/롤백되는 HPA 후보만 시험한다(회차당 settle 25초, rollout 없음). request 사이징은 **부하 전
-  1회**로 끝낸다(아래 순서 참고). rollout을 감수하고 부하 중에도 request를 바꾸려면
-  `-AllowRequestChange`를 명시한다.
+- **`optimize.ps1 -Apply`는 트래픽 전에 돌린다(0:40~0:58).** 두 단계로 동작한다:
+  1. **부하 전 request 사이징 1회** — 유휴 노드가 baseline를 넘으면 `idle-fit`(AZ 노드에 min 파드가
+     담기도록 request 축소), 아니면 실측 과소/과대 예약 교정을 **한 번** 적용한다(rollout 동반).
+     값은 상수가 아니라 **그때 측정한 실사용·라이브 usable CPU로 계산**하므로 앱/트래픽이 바뀌어도
+     맞는 값이 나온다. Terraform에 request 상수를 박아두지 않는다.
+  2. **HPA-only 시행** — 이후 회차는 target/min/max만 즉시 조정(rollout 없음)한다.
+  request 사이징은 트래픽 전 1회뿐이고, 실제 채점 트래픽(1:00~) 중에는 절대 request를 바꾸지 않는다.
 - 선형 지연 모델을 신뢰할 수 있는 범위는 제한적이므로 한 회차 외삽은 공급 부족 1.5배까지만
   허용한다. 더 내려가야 하면 그 값을 120초 실측한 뒤 다음 회차가 이어서 판단한다.
 - **목표 부하 필요 CPU보다 공급이 적어지는 노드 수는 균형 모드에서 제안하지 않는다.** 실측

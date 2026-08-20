@@ -1325,6 +1325,19 @@ def plan(snapshot: TuningSnapshot, rejected=None, namespace="app", rejected_node
         # 비용을 더 줄일 수 없으면 노드 감소를 노린 후보는 시험 자체가 시간 낭비다.
         candidates = [c for c in candidates
                       if c.kind in ("gate-recovery", "usage-sized") or c.predicted_delta > 0]
+    # 트래픽 전 1회 적용할 request 사이징(rollout 동반). 유휴 노드가 baseline를 넘으면 idle-fit,
+    # 아니면 실측 과소/과대 예약 교정(usage-sized). HPA-only 루프와 별개로 runner가 먼저 적용한다.
+    presize = _idle_fit(snapshot)
+    if not presize:
+        presize = {}
+        for name, app in snapshot.apps.items():
+            if not app.measured:
+                continue
+            cur = _current_dict(app)
+            sz = _usage_sized(snapshot, app, cur)
+            if sz and sz["request"] != cur["request"]:
+                presize[name] = sz
+        presize = presize or None
     return {
         "schema_version": 1,
         "done": not candidates,
@@ -1333,8 +1346,10 @@ def plan(snapshot: TuningSnapshot, rejected=None, namespace="app", rejected_node
         "score": score.to_dict(), "apps": apps,
         "cluster": asdict(snapshot.cluster),
         "idle_nodes": snapshot.idle_nodes(),
+        "idle_nodes_after_presize": snapshot.idle_nodes(presize) if presize else snapshot.idle_nodes(),
         "baseline_node_count": snapshot.cluster.baseline_node_count,
         "reservation_fit": fit,
+        "presize": presize,
         "cost_locked": cost_locked,
         "candidates": [c.to_dict() for c in candidates[:5]],
         "best": candidates[0].to_dict() if candidates else None,

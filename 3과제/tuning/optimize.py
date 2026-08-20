@@ -140,6 +140,10 @@ def main():
         "avail_floor": snapshot.avail_floor if snapshot.cost_first else args.avail_gate,
         "perf_floor": snapshot.perf_floor if snapshot.cost_first else rubric.COST_PERF_GATE,
         "cost_locked": data.get("cost_locked", ""),
+        "presize": data.get("presize"),
+        "idle_nodes": data.get("idle_nodes"),
+        "idle_nodes_after_presize": data.get("idle_nodes_after_presize"),
+        "baseline_node_count": data.get("baseline_node_count"),
         "reservation_fit": data.get("reservation_fit"),
     }
     if args.json:

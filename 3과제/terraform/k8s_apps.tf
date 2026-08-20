@@ -140,10 +140,10 @@ resource "kubernetes_deployment" "user" {
             config_map_ref { name = kubernetes_config_map.s3.metadata[0].name }
           }
           resources {
-            # 2026-08-20 실측 적용값. 발동점 775m x 90% = 697.5m로 HPA가 max에 상시 붙지 않게 한다.
-            # 이전 70m x 33% = 23.1m은 발동점이 실사용보다 훨씬 낮아 항상 max(32파드)였다.
-            # 파드 수가 줄어 파드당 메모리 예약(128Mi) 합계도 함께 줄어든다.
-            requests = { cpu = "775m", memory = "128Mi" }
+            # 2026-08-20 실측 적용값. 발동점 600m x 90% = 540m.
+            # 775m로 올리면 stress 750m과 한 노드(앱 여유 1480m)에 못 앉아 유휴에도 노드가
+            # 4대로 떠 비용 ratio가 오른다. 600m이면 min replica 파드가 baseline 2노드에 담긴다.
+            requests = { cpu = "600m", memory = "128Mi" }
             limits   = { memory = "256Mi" }
           }
           readiness_probe {
@@ -233,7 +233,7 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "user" {
       resource {
         name = "cpu"
         target {
-          # 2026-08-20 실측 적용값. 발동점 775m x 90% = 697.5m.
+          # 2026-08-20 실측 적용값. 발동점 600m x 90% = 540m.
           # 낮은 target은 HPA를 상시 max로 만들어 탄력성을 없앤다.
           type                = "Utilization"
           average_utilization = 90

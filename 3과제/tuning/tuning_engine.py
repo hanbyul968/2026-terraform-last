@@ -50,6 +50,24 @@ def nearest_rank(values: Sequence[float], quantile: float):
     return ordered[min(len(ordered) - 1, max(0, math.ceil(quantile * len(ordered)) - 1))]
 
 
+def bin_pack_nodes(pod_requests, node_capacity_m):
+    """파드 request 리스트를 노드 용량에 first-fit-decreasing으로 담아 필요한 노드 수를 센다.
+
+    노드 수는 '총 예약 합 / 용량'(=평균)이 아니라 실제 스케줄링으로 정해진다.
+    예: 용량 1480m에 [775,775,750,750]은 합 3050m라 2노드처럼 보이지만, 775+750=1525>1480이라
+    같은 노드에 못 앉아 4노드가 뜬다. 이 함수가 그 차이를 계산한다.
+    """
+    caps = []
+    for req in sorted((int(r) for r in pod_requests if r), reverse=True):
+        for i in range(len(caps)):
+            if caps[i] + req <= node_capacity_m:
+                caps[i] += req
+                break
+        else:
+            caps.append(req)
+    return len(caps)
+
+
 def cpu_m(value) -> Optional[int]:
     if value in (None, "", "-"):
         return None
@@ -214,6 +232,8 @@ class ClusterSnapshot:
     cluster_cpu_p95_m: int = 0
     system_reserved_m: int = 0
     node_types: Tuple[str, ...] = ()
+    # 관리형 노드그룹 고정 대수(node_desired_size). 이 수를 넘으면 Karpenter 노드가 상주한다.
+    baseline_node_count: int = 2
 
     @property
     def daemonset_per_node_m(self):
@@ -257,6 +277,23 @@ class TuningSnapshot:
 
     def app_required_cpu_m(self, name):
         return self.apps[name].required_cpu_m(self.app_target_rps(name))
+
+    def idle_nodes(self, plan_map=None):
+        """유휴(min replicas) 상태에서 실제로 뜨는 노드 수. bin-packing으로 계산한다.
+
+        대회날 '아무것도 안 하는데' 뜨는 노드가 이 값이다. 파드당 request가 커서 baseline
+        노드(관리형 NG)에 min replica들이 안 들어가면, Karpenter 노드가 상주해 회수되지 않는다.
+        총 예약 합으로는 안 보이고 개별 파드가 노드에 담기는지를 봐야 한다.
+        """
+        plan_map = plan_map or {}
+        cap = self.cluster.usable_cpu_per_node_m
+        pods = []
+        for name, app in self.apps.items():
+            change = plan_map.get(name)
+            req = int(change["request"]) if change else int(app.request_m or REQUEST_MIN_M)
+            mn = int((change or {}).get("min", app.min_replicas or 1))
+            pods += [req] * max(1, mn)
+        return bin_pack_nodes(pods, cap)
 
     def required_cluster_cpu_m(self):
         """목표 부하에서 필요한 앱 CPU 합계. 측정 부하가 아니라 목표 부하 기준이다."""
@@ -364,7 +401,9 @@ def live_state(namespace="app"):
                 if metric.get("type") == "Resource" and resource.get("name") == "cpu":
                     current["target"] = resource.get("target", {}).get("averageUtilization")
         alloc, types, mem_alloc = [], [], []
+        baseline_ng = 0
         for item in nodes.get("items", []):
+            labels = item.get("metadata", {}).get("labels", {}) or {}
             allocatable = item.get("status", {}).get("allocatable", {}) or {}
             value = cpu_m(allocatable.get("cpu"))
             if value:
@@ -372,11 +411,14 @@ def live_state(namespace="app"):
             memory = mem_mi(allocatable.get("memory"))
             if memory:
                 mem_alloc.append(memory)
-            types.append((item.get("metadata", {}).get("labels", {}) or {}).get(
-                "node.kubernetes.io/instance-type", "?"))
+            types.append(labels.get("node.kubernetes.io/instance-type", "?"))
+            # 관리형 노드그룹 노드(고정 대수) = Karpenter가 회수하지 않는 baseline.
+            if "eks.amazonaws.com/nodegroup" in labels and "karpenter.sh/nodepool" not in labels:
+                baseline_ng += 1
         state["__cluster__"] = {"node_alloc_m": min(alloc) if alloc else 0,
                                "node_mem_alloc_mi": min(mem_alloc) if mem_alloc else 0,
                                "node_count": len(nodes.get("items", [])),
+                               "baseline_node_count": baseline_ng or 2,
                                "node_types": sorted(types),
                                "system_reserved_m": _system_reserved_m(namespace)}
     except Exception:
@@ -541,6 +583,7 @@ def _cluster_csv(outdir, windows, baseline_nodes, live):
         node_cpu_p95=int(nearest_rank(node_cpu, .95) or 0),
         node_types=tuple(cluster.get("node_types") or ()),
         system_reserved_m=int(cluster.get("system_reserved_m") or 0),
+        baseline_node_count=int(cluster.get("baseline_node_count") or 2),
     )
 
 
@@ -658,6 +701,7 @@ def _reservation_nodes(snapshot: TuningSnapshot, changed, proposed=None):
         return snapshot.cluster.node_count or int(math.ceil(snapshot.cluster.node_average))
     total = 0
     total_mem = 0
+    pod_reqs = []
     for name, app in snapshot.apps.items():
         change = plan_map.get(name)
         req = int(change["request"]) if change else int(app.request_m or REQUEST_MIN_M)
@@ -670,7 +714,10 @@ def _reservation_nodes(snapshot: TuningSnapshot, changed, proposed=None):
             pods = observed
         total += req * pods
         total_mem += int(app.memory_request_mi or 0) * pods
-    cpu_nodes = int(math.ceil(total / snapshot.cluster.usable_cpu_per_node_m))
+        pod_reqs += [req] * pods
+    # bin-packing으로 실제 스케줄링을 반영한다. 총합/용량(평균)은 큰 파드가 노드에 안 들어가는
+    # 경우를 놓친다(예: 775+750>1480이라 같은 노드 불가 -> 노드가 더 뜬다).
+    cpu_nodes = bin_pack_nodes(pod_reqs, snapshot.cluster.usable_cpu_per_node_m)
     mem_nodes = 0
     if snapshot.cluster.node_mem_alloc_mi > 0 and total_mem > 0:
         # 파드당 메모리 요청도 노드 수를 만든다. 파드 수를 줄이면 여기서 이득이 난다.
@@ -952,6 +999,13 @@ def _make_candidate(snapshot, app, kind, proposed, reason, priority, namespace="
             for name in knobs)
     if not snapshot.acceptable(predicted_score) and not exempt:
         return None
+    # 유휴(min replicas) 상태에서 baseline 노드그룹을 넘기면 대회날 아무 부하가 없어도
+    # Karpenter 노드가 상주해 비용 ratio가 올라간다. 이 조합은 제안하지 않는다.
+    idle_before = snapshot.idle_nodes()
+    idle_after = snapshot.idle_nodes(knobs)
+    baseline_ng = snapshot.cluster.baseline_node_count
+    if idle_after > max(baseline_ng, idle_before) and not exempt:
+        return None
     delta = predicted_score.total - result.total
     if kind in ("gate-recovery", "performance-band"):
         delta = max(delta, priority)
@@ -1185,6 +1239,8 @@ def plan(snapshot: TuningSnapshot, rejected=None, namespace="app", rejected_node
                   + ("개선 후보 없음 — 현재 측정에서 안전하게 공식 점수를 올릴 수 없음" if not candidates else ""),
         "score": score.to_dict(), "apps": apps,
         "cluster": asdict(snapshot.cluster),
+        "idle_nodes": snapshot.idle_nodes(),
+        "baseline_node_count": snapshot.cluster.baseline_node_count,
         "reservation_fit": fit,
         "cost_locked": cost_locked,
         "candidates": [c.to_dict() for c in candidates[:5]],

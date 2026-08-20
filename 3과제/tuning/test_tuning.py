@@ -69,6 +69,35 @@ class SharedEngineTests(unittest.TestCase):
         step = (high - low) / (count - 1)
         return tuple(round(low + step * i, 4) for i in range(count))
 
+    def test_bin_packing_idle_nodes_and_baseline_guard(self):
+        """총 예약 합이 아니라 실제 스케줄링으로 유휴 노드를 센다(user 775m 사고 재현)."""
+        self.assertEqual(engine.bin_pack_nodes([775, 775, 750, 750, 50, 50], 1480), 4)
+        self.assertEqual(engine.bin_pack_nodes([600, 600, 750, 750, 50, 50], 1480), 2)
+
+        def app(name, req, mn):
+            return engine.AppSnapshot(
+                name=name, slo_seconds=1.0, samples=2000, window_seconds=120.0,
+                availability=100, performance=95, request_m=req, memory_request_mi=128,
+                cpu_limit_m=2000, target=55, min_replicas=mn, max_replicas=8, replicas=mn,
+                pods_p90=mn, pods_max=mn, per_pod_p90=int(req * .5), per_pod_p95=int(req * .6),
+                total_cpu_p90=req * mn, total_cpu_p95=req * mn, cpu_samples=60,
+                latencies=tuple([.3] * 200))
+        cluster = dict(baseline_nodes=2, node_average=2, node_count=2, node_alloc_m=1930,
+                       node_mem_alloc_mi=3292, cluster_cpu_p95_m=1700, system_reserved_m=900,
+                       baseline_node_count=2)
+        fit = engine.TuningSnapshot(
+            {"user": app("user", 600, 2), "product": app("product", 50, 2),
+             "stress": app("stress", 750, 2)}, engine.ClusterSnapshot(**cluster))
+        self.assertEqual(fit.idle_nodes(), 2)
+        # user 775m는 stress 750m과 한 노드에 못 앉아 유휴 4노드를 만든다.
+        raised = fit.idle_nodes({"user": {"request": 775, "target": 90, "min": 2, "max": 9}})
+        self.assertEqual(raised, 4)
+        # 그런 조합은 후보에서 걸러진다.
+        c = engine._make_candidate(fit, fit.apps["user"], "request-optimal",
+                                   {"request": 775, "target": 90, "min": 2, "max": 9,
+                                    "replicas": 2}, "", 0.0, "app")
+        self.assertIsNone(c)
+
     def test_one_failing_app_does_not_block_other_apps(self):
         """한 앱이 기준 미달이어도 다른 앱 후보가 나와야 한다(회차 독식 방지)."""
         def app(name, perf, avail, req, tgt, pods, cpu, mx):

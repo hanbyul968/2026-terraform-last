@@ -195,7 +195,7 @@ def main():
         samples = nodes(out)
         navg = sum(samples) / len(samples)
         print(json.dumps(score_summary(perf, avail, navg, focus, availability_gate),
-                         ensure_ascii=False, separators=(",", ":")))
+                         ensure_ascii=True, separators=(",", ":")))
     else:
         sys.exit(f"unknown mode: {mode}")
 

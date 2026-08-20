@@ -212,7 +212,7 @@ def _cli():
     step["knobs"] = knobs
 
     if args.json:
-        print(json.dumps(step, ensure_ascii=False))
+        print(json.dumps(step, ensure_ascii=True))
         return
 
     print("\n=== 닫힌 루프 최적화: 다음 한 수 ===")

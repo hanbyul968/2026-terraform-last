@@ -45,7 +45,13 @@ $py = if (Get-Command py -ErrorAction SilentlyContinue) { @((Get-Command py).Sou
 
 function Invoke-Py { param([string[]]$PyArgs)
   $env:PYTHONIOENCODING = 'utf-8'
-  & $py[0] @($py[1..($py.Count-1)]) @PyArgs
+  $old = [Console]::OutputEncoding
+  try {
+    [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+    & $py[0] @($py[1..($py.Count-1)]) @PyArgs
+  } finally {
+    [Console]::OutputEncoding = $old
+  }
 }
 
 function Get-Score { param([string]$OutDir)

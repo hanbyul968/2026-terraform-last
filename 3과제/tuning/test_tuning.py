@@ -113,7 +113,7 @@ class SharedEngineTests(unittest.TestCase):
         # 측정이 없으면 보수적으로 CPU 바운드로 간주한다.
         self.assertEqual(self.app(window_seconds=0.0).cpu_bound_fraction, 1.0)
 
-    def test_latest_stress_measurement_lowers_request_to_300m(self):
+    def test_latest_stress_measurement_lowers_request_within_safe_nodes(self):
         """2026-08-20 17:56 실측 재현.
 
         stress는 CPU 바운드(요청당 약 0.4 CPU-s, limit 2 CPU)이므로 request를 내려도
@@ -153,13 +153,33 @@ class SharedEngineTests(unittest.TestCase):
         )
         optimal = next(c for c in engine.generate_candidates(snapshot)
                        if c.kind == "request-optimal" and c.app == "stress")
-        self.assertEqual(optimal.proposed["request"], 300)
+        self.assertLess(optimal.proposed["request"], 750)
         self.assertEqual(optimal.proposed["target"], 55)
         self.assertEqual(optimal.proposed["estimated_replicas"], 8)
-        self.assertEqual(optimal.predicted_nodes, 4)
+        # 실측 CPU 수요(10695m/1930m = 6대)보다 낮은 노드는 제안하지 않는다.
+        self.assertGreaterEqual(optimal.predicted_nodes, 6)
         self.assertLessEqual(optimal.cpu_supply_ratio, engine.MAX_EXTRAPOLATED_SLOWDOWN)
         self.assertGreater(optimal.predicted_delta, 0)
         self.assertEqual(optimal.settle_seconds, 105)
+
+    def test_measured_rejection_blocks_repeating_the_same_node_count(self):
+        measured = tuple([.45] * 400)
+        app = self.app(name="svc", slo_seconds=1.0, samples=1000, window_seconds=120.0,
+                       request_m=750, cpu_limit_m=2000, target=55, min_replicas=2,
+                       max_replicas=8, replicas=8, pods_p90=8, pods_max=8,
+                       total_cpu_p90=4000, cpu_samples=60, latencies=measured)
+        snapshot = engine.TuningSnapshot(
+            {"svc": app}, engine.ClusterSnapshot(baseline_nodes=2, node_average=5,
+                                                 node_count=5, node_alloc_m=1930,
+                                                 cluster_cpu_p95_m=5000,
+                                                 system_reserved_m=900))
+        first = next(c for c in engine.generate_candidates(snapshot)
+                     if c.kind == "request-optimal")
+        again = [c for c in engine.generate_candidates(
+            snapshot, rejected_nodes=[first.predicted_nodes])
+            if c.kind == "request-optimal"]
+        for candidate in again:
+            self.assertGreater(candidate.predicted_nodes, first.predicted_nodes)
 
     def test_dynamic_app_names_and_no_hardcoded_min(self):
         app = self.app(name="checkout-v2", min_replicas=4, max_replicas=9,
@@ -236,7 +256,13 @@ class PowerShellRunnerContractTests(unittest.TestCase):
         self.assertIn("$safetyImproved -or ($gate -and $score.total -gt $bestScore.total)", self.script)
         self.assertIn("안전 게이트 미복구", self.script)
         self.assertIn("$durationSec=ConvertTo-DurationSeconds $Duration", self.script)
-        self.assertIn("$settle+$durationSec+150", self.script)
+        self.assertIn("$settle*2+$durationSec+150", self.script)
+
+    def test_plans_from_accepted_snapshot_and_settles_after_rollback(self):
+        self.assertIn("Save-Snapshot $out $bestOut", self.script)
+        self.assertIn("$step=Get-NextStep $bestOut $rejFile", self.script)
+        self.assertIn("nodes=[int]$candidate.predicted_nodes", self.script)
+        self.assertNotIn("CPU하한", self.script)
 
     def test_transactional_rollback_and_no_terraform_mutation(self):
         self.assertIn("finally {", self.script)

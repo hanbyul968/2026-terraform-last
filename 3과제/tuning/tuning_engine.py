@@ -538,7 +538,7 @@ def _current_dict(app):
             "replicas": int(app.replicas or app.min_replicas or 1)}
 
 
-def _estimated_nodes(snapshot: TuningSnapshot, changed_app: str, proposed: dict):
+def _reservation_nodes(snapshot: TuningSnapshot, changed_app: str, proposed: dict):
     alloc = snapshot.cluster.node_alloc_m
     if alloc <= 0:
         return snapshot.cluster.node_count or int(math.ceil(snapshot.cluster.node_average))
@@ -550,6 +550,24 @@ def _estimated_nodes(snapshot: TuningSnapshot, changed_app: str, proposed: dict)
             pods = int(app.pods_p90 or app.replicas or app.min_replicas or 1)
         total += req * pods
     return max(1, int(math.ceil(total / alloc)))
+
+
+def _node_calibration(snapshot: TuningSnapshot):
+    """예약 기반 예측을 실측 평균 노드 수에 맞춘 보정 계수.
+
+    bin-packing 손실, HPA 과도 구간, Karpenter 지연 때문에 실제 노드는 예약 계산보다 많다
+    (실측: 예측 6대 vs 실제 평균 7대). 비용은 실제 노드로 채점되므로 이 계수를 곱해야
+    예측 이득이 낙관적으로 나오지 않는다.
+    """
+    baseline = _reservation_nodes(snapshot, "", {})
+    if baseline <= 0 or snapshot.cluster.node_average <= 0:
+        return 1.0
+    return max(1.0, snapshot.cluster.node_average / baseline)
+
+
+def _estimated_nodes(snapshot: TuningSnapshot, changed_app: str, proposed: dict):
+    raw = _reservation_nodes(snapshot, changed_app, proposed)
+    return max(1, int(math.ceil(raw * _node_calibration(snapshot))))
 
 
 def _predicted_replicas(app, proposed):
@@ -577,7 +595,23 @@ def _predicted_score(snapshot: TuningSnapshot, nodes: int):
             round(max(slowdown, 0.0), 3))
 
 
-def _optimal_request_target(snapshot: TuningSnapshot, app: AppSnapshot, current: dict):
+def _safe_node_floor(snapshot: TuningSnapshot, current_nodes: int):
+    """줄여도 되는 노드 수의 하한.
+
+    실측 CPU 수요를 공급이 못 받치면(ρ>1) 대기열이 폭발해 게이트가 깨진다(실측: 4노드에서
+    가용성 게이트 실패, 6~7노드는 정상). 그래서 수요 기준 노드 미만으로는 내리지 않는다.
+    동시에 **하한을 채우려고 request를 올리지는 않는다.** 이미 현재 예약이 그보다 낮으면
+    현재 노드 수를 그대로 하한으로 쓴다.
+    """
+    demand = snapshot.cluster.cluster_cpu_p95_m
+    alloc = snapshot.cluster.node_alloc_m
+    if demand <= 0 or alloc <= 0:
+        return 1
+    return max(1, min(current_nodes, int(math.ceil(demand / alloc))))
+
+
+def _optimal_request_target(snapshot: TuningSnapshot, app: AppSnapshot, current: dict,
+                            node_floor=None):
     """실측값으로 공식 점수가 최대인 request/target 조합을 탐색한다.
 
     핵심 모델(실측 근거):
@@ -596,7 +630,7 @@ def _optimal_request_target(snapshot: TuningSnapshot, app: AppSnapshot, current:
         min(current["max"], int(app.pods_p90 or app.replicas or current["min"])),
     )
     upper = int(app.cpu_limit_m or max(current["request"], app.per_pod_p95 or 0) * 2) or current["request"]
-    upper = min(8000, max(REQUEST_MIN_M, upper))
+    upper = min(current["request"], max(REQUEST_MIN_M, min(8000, upper)))
     options = []
     for request_m in range(REQUEST_MIN_M, upper + 1, REQUEST_UNIT_M):
         for target in range(TARGET_MIN, TARGET_MAX + 1):
@@ -607,6 +641,8 @@ def _optimal_request_target(snapshot: TuningSnapshot, app: AppSnapshot, current:
                 continue
             proposed["estimated_replicas"] = replicas
             nodes = _estimated_nodes(snapshot, app.name, proposed)
+            if node_floor is not None and nodes < node_floor:
+                continue
             predicted, slowdown = _predicted_score(snapshot, nodes)
             if slowdown > MAX_EXTRAPOLATED_SLOWDOWN:
                 continue
@@ -681,8 +717,11 @@ def _make_candidate(snapshot, app, kind, proposed, reason, priority, namespace="
     )
 
 
-def generate_candidates(snapshot: TuningSnapshot, rejected=None, namespace="app"):
+def generate_candidates(snapshot: TuningSnapshot, rejected=None, namespace="app",
+                        rejected_nodes=None):
     rejected = set(rejected or ())
+    # 실측으로 거절된 노드 수는 다시 시도하지 않는다(같은 회차 안에서 학습).
+    min_nodes_allowed = (max(rejected_nodes) + 1) if rejected_nodes else 1
     candidates = []
     any_gate_failure = any(app.performance < rubric.COST_PERF_GATE or app.availability < snapshot.availability_gate
                            for app in snapshot.apps.values())
@@ -716,20 +755,22 @@ def generate_candidates(snapshot: TuningSnapshot, rejected=None, namespace="app"
                 candidates.append(c)
         # request/target 최적화: 실측 CPU와 replica를 보존하면서 물리 CPU 하한 이상인
         # 모든 25m request × 1% target 조합을 탐색하고 공식 점수가 최대인 값을 선택한다.
-        optimal = _optimal_request_target(snapshot, app, current)
+        current_probe = dict(current)
+        current_probe["estimated_replicas"] = _predicted_replicas(app, current_probe)
+        current_nodes = _estimated_nodes(snapshot, app.name, current_probe)
+        node_floor = max(_safe_node_floor(snapshot, current_nodes), min_nodes_allowed)
+        optimal = _optimal_request_target(snapshot, app, current, node_floor)
         if optimal:
             _, proposed, searched_nodes, searched_total, slowdown, protected_replicas = optimal
             changed = proposed["request"] != current["request"] or proposed["target"] != current["target"]
-            current_probe = dict(current)
-            current_probe["estimated_replicas"] = _predicted_replicas(app, current_probe)
-            current_nodes = _estimated_nodes(snapshot, app.name, current_probe)
             if changed and searched_nodes <= current_nodes:
                 warning = (f", CPU 공급 {slowdown:.2f}배 부족 예상(지연 증가 반영됨)"
                            if slowdown > 1.0 else "")
                 reason = (f"실측 최적값: request {current['request']}→{proposed['request']}m, "
                           f"target {current['target']}→{proposed['target']}%, "
                           f"replica {protected_replicas}개 유지, "
-                          f"예약 기준 노드 {current_nodes}→{searched_nodes}대, "
+                          f"예약 기준 노드 {current_nodes}→{searched_nodes}대"
+                          f"(안전 하한 {node_floor}대), "
                           f"공식 예상 {searched_total:.1f}/36{warning}")
                 c = _make_candidate(snapshot, app, "request-optimal", proposed,
                                     reason, 0.0, namespace)
@@ -754,9 +795,9 @@ def generate_candidates(snapshot: TuningSnapshot, rejected=None, namespace="app"
     return candidates
 
 
-def plan(snapshot: TuningSnapshot, rejected=None, namespace="app"):
+def plan(snapshot: TuningSnapshot, rejected=None, namespace="app", rejected_nodes=None):
     score = snapshot.score()
-    candidates = generate_candidates(snapshot, rejected, namespace)
+    candidates = generate_candidates(snapshot, rejected, namespace, rejected_nodes)
     apps = []
     for name, app in sorted(snapshot.apps.items()):
         apps.append({

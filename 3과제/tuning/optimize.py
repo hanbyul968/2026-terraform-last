@@ -51,21 +51,27 @@ def plan_step(knobs, summary, rejected=None, avail_gate=99.0):
 
 def _rejected_keys(path):
     if not path or not os.path.isfile(path):
-        return []
+        return [], []
     try:
         with open(path, encoding="utf-8") as f:
             rows = json.load(f)
     except Exception:
-        return []
-    keys = []
+        return [], []
+    keys, nodes = [], []
     for row in rows if isinstance(rows, list) else []:
         if isinstance(row, str):
             keys.append(row)
-        elif row.get("key"):
+            continue
+        if row.get("key"):
             keys.append(row["key"])
         elif row.get("app") and row.get("kind"):
             keys.append(f"{row['app']}|{row['kind']}")
-    return keys
+        try:
+            if int(row.get("nodes") or 0) > 0:
+                nodes.append(int(row["nodes"]))
+        except (TypeError, ValueError):
+            pass
+    return keys, nodes
 
 
 def main():
@@ -87,8 +93,8 @@ def main():
     slos = {kv.split("=")[0]: float(kv.split("=")[1]) for kv in args.slos.split(",") if kv}
     snapshot = engine.snapshot_from_outdir(outdir, slos, args.ns, BASELINE_NODES,
                                            availability_gate=args.avail_gate)
-    rejected = _rejected_keys(args.rejected)
-    data = engine.plan(snapshot, rejected, args.ns)
+    rejected, rejected_nodes = _rejected_keys(args.rejected)
+    data = engine.plan(snapshot, rejected, args.ns, rejected_nodes)
     best = data.get("best")
     knobs = {row["app"]: {"request": row["request"], "target": row["target"],
                            "min": row["min"], "max": row["max"],

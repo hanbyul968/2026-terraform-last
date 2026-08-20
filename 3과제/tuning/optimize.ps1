@@ -59,6 +59,12 @@ function Set-Tuning { param([string]$App,$Knob)
 function Write-Rejected { param($Rows,[string]$Path)
   $items=@($Rows|ForEach-Object{$_|ConvertTo-Json -Compress}); ('['+($items -join ',')+']')|Set-Content $Path -Encoding ascii
 }
+function Save-Snapshot { param([string]$From,[string]$To)
+  # 거절된 회차의 측정으로 다음 후보를 계획하면 엉뚱한 값이 나온다(실측 사고).
+  # 채택된 상태의 결과만 따로 보관해 계획 입력으로 쓴다.
+  if(Test-Path $To){ Remove-Item -Recurse -Force $To }
+  Copy-Item -Recurse -Force $From $To
+}
 
 if(-not $Url){$Url=$ENDPOINT}
 $loadtest=Join-Path $Here 'loadtest.ps1'
@@ -85,6 +91,7 @@ try {
   }
   & $loadtest @ltArgs | Out-Null
   $out=Join-Path $env:TEMP 'tune-opt';$bestScore=Get-Score $out;$first=Get-NextStep $out $null
+  $bestOut=Join-Path $env:TEMP 'tune-opt-best'; Save-Snapshot $out $bestOut
   $bestKnobs=$first.knobs
   Write-Host ("[baseline] {0:N1}/36 ratio={1:N2} elapsed={2:N1}m" -f $bestScore.total,$bestScore.cost_ratio,$sw.Elapsed.TotalMinutes)
   if(-not $Apply){
@@ -93,16 +100,16 @@ try {
     return
   }
   for($i=1;$i -le $candidateLimit;$i++){
-    $step=Get-NextStep $out $rejFile
+    $step=Get-NextStep $bestOut $rejFile
     if($step.done){Write-Host "수렴: $($step.reason)" -ForegroundColor Green;break}
     $candidate=$step.candidate;$settle=[int]$candidate.settle_seconds
     if($step.kind -eq 'cost-reclaim'){$settle=[Math]::Max($settle,$CostSettleSeconds)}elseif(-not $candidate.disruptive){$settle=[Math]::Max($settle,$SettleSeconds)}
     $durationSec=ConvertTo-DurationSeconds $Duration
-    # request rollback은 rollout까지 필요하므로 150초를 항상 예약한다.
-    $required=[TimeSpan]::FromSeconds($settle+$durationSec+150)
+    # request rollback은 rollout + 재settle 까지 필요하므로 넉넉히 예약한다.
+    $required=[TimeSpan]::FromSeconds($settle*2+$durationSec+150)
     if($sw.Elapsed+$required -ge $deadline){Write-Host '남은 예산이 측정+롤백 시간보다 짧아 종료' -ForegroundColor Yellow;break}
     $app=$step.app;$pending=$app
-    Write-Host ("--- {0}/{1} [{2}] {3}: request {4}->{5}m target {6}->{7}% nodes {8} (CPU하한 {9})" -f $i,$candidateLimit,$step.kind,$app,$candidate.current.request,$candidate.proposed.request,$candidate.current.target,$candidate.proposed.target,$candidate.predicted_nodes,$candidate.observed_cpu_floor)
+    Write-Host ("--- {0}/{1} [{2}] {3}: request {4}->{5}m target {6}->{7}% 예약노드 {8}대 CPU공급부족 {9}배" -f $i,$candidateLimit,$step.kind,$app,$candidate.current.request,$candidate.proposed.request,$candidate.current.target,$candidate.proposed.target,$candidate.predicted_nodes,$candidate.cpu_supply_ratio)
     Set-Tuning $app $step.knob
     Start-Sleep -Seconds $settle
     & $loadtest @ltArgs | Out-Null
@@ -116,10 +123,14 @@ try {
     if($safetyImproved -or ($gate -and $score.total -gt $bestScore.total)){
       Write-Host ("채택 {0:N1}->{1:N1}, ratio={2:N2}, safetyImproved={3}" -f $bestScore.total,$score.total,$score.cost_ratio,$safetyImproved) -ForegroundColor Green
       $bestScore=$score;$bestKnobs.$app=$step.knob;$pending=$null
+      Save-Snapshot $out $bestOut
     }else{
-      Write-Host ("거절 score={0:N1} gate={1}; snapshot 롤백" -f $score.total,$gate) -ForegroundColor Yellow
+      Write-Host ("거절 score={0:N1} gate={1}; snapshot 롤백 후 {2}초 안정화" -f $score.total,$gate,$settle) -ForegroundColor Yellow
       Set-Tuning $app $bestKnobs.$app;$pending=$null
-      $rejected+=@{key=$candidate.key;app=$app;kind=$step.kind};Write-Rejected $rejected $rejFile
+      # 롤백 직후 바로 재측정하면 Karpenter/HPA가 정리되기 전 값이 잡혀 다음 회차가 오염된다.
+      Start-Sleep -Seconds $settle
+      $rejected+=@{key=$candidate.key;app=$app;kind=$step.kind;nodes=[int]$candidate.predicted_nodes}
+      Write-Rejected $rejected $rejFile
     }
   }
   Write-Host ("`n=== 종료 {0:N1}분 / best {1:N1}/36 ratio={2:N2} ===" -f $sw.Elapsed.TotalMinutes,$bestScore.total,$bestScore.cost_ratio) -ForegroundColor Green

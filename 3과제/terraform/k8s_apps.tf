@@ -140,9 +140,10 @@ resource "kubernetes_deployment" "user" {
             config_map_ref { name = kubernetes_config_map.s3.metadata[0].name }
           }
           resources {
-            # 38점 재현 프로파일: 낮은 request로 Pod 밀도를 높이고 CPU limit은 두지 않는다.
-            # HPA 발동점은 70m x 33% = 23.1m이며 당일 측정 후 advise.py가 재계산한다.
-            requests = { cpu = "70m", memory = "128Mi" }
+            # 2026-08-20 실측 적용값. 발동점 775m x 90% = 697.5m로 HPA가 max에 상시 붙지 않게 한다.
+            # 이전 70m x 33% = 23.1m은 발동점이 실사용보다 훨씬 낮아 항상 max(32파드)였다.
+            # 파드 수가 줄어 파드당 메모리 예약(128Mi) 합계도 함께 줄어든다.
+            requests = { cpu = "775m", memory = "128Mi" }
             limits   = { memory = "256Mi" }
           }
           readiness_probe {
@@ -191,9 +192,10 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "user" {
     namespace = kubernetes_namespace.app.metadata[0].name
   }
   spec {
-    # 38점 재현 프로파일. user는 빠른 확장을 위해 2~20 범위를 사용한다.
+    # 2026-08-20 실측 적용값. 775m x 90% 발동점이면 파드가 6개 근처에서 균형을 이룬다.
+    # 이전 2~20은 발동점이 낮아 상시 max였고, 파드 수만큼 메모리 예약이 노드를 늘렸다.
     min_replicas = 2
-    max_replicas = 20
+    max_replicas = 9
     scale_target_ref {
       api_version = "apps/v1"
       kind        = "Deployment"
@@ -231,10 +233,10 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "user" {
       resource {
         name = "cpu"
         target {
-          # 60%: CPU가 더 차야 확장 → 파드/노드 덜 늘어남 (55는 과민했음).
-          # 꼬리지연 생기면 그 앱만 낮추기 — advise.py/autotune 이 판정해줌.
+          # 2026-08-20 실측 적용값. 발동점 775m x 90% = 697.5m.
+          # 낮은 target은 HPA를 상시 max로 만들어 탄력성을 없앤다.
           type                = "Utilization"
-          average_utilization = 33
+          average_utilization = 90
         }
       }
     }
@@ -379,9 +381,9 @@ resource "kubernetes_deployment" "product" {
             config_map_ref { name = kubernetes_config_map.s3.metadata[0].name }
           }
           resources {
-            # 38점 재현 프로파일: CPU limit 없이 70m로 밀도를 높인다.
-            # HPA 발동점은 70m x 29% = 20.3m이며 당일 측정 후 advise.py가 재계산한다.
-            requests = { cpu = "70m", memory = "128Mi" }
+            # 2026-08-20 실측 적용값. 발동점 250m x 70% = 175m.
+            # 이전 70m x 29% = 20.3m은 발동점이 너무 낮아 부하 시 max(20파드)까지 붙었다.
+            requests = { cpu = "250m", memory = "128Mi" }
             limits   = { memory = "256Mi" }
           }
           readiness_probe {
@@ -430,9 +432,9 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "product" {
     namespace = kubernetes_namespace.app.metadata[0].name
   }
   spec {
-    # 38점 재현 프로파일. product는 빠른 확장을 위해 2~20 범위를 사용한다.
+    # 2026-08-20 실측 적용값. 250m x 70% 발동점이면 파드가 4개 근처에서 균형을 이룬다.
     min_replicas = 2
-    max_replicas = 20
+    max_replicas = 8
     scale_target_ref {
       api_version = "apps/v1"
       kind        = "Deployment"
@@ -473,10 +475,9 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "product" {
           # 60%: CPU가 더 차야 확장 → 파드/노드 덜 늘어남 (55는 과민했음).
           # 꼬리지연 생기면 그 앱만 낮추기 — advise.py/autotune 이 판정해줌.
           type = "Utilization"
-          # product는 CloudFront 캐시로 오리진/DB 부하가 거의 없어(측정 perf 105.3% 만점)
-          # 파드를 적게 띄워도 성능이 안 떨어진다. 29% -> 60%로 올려 replica/노드 수를
-          # 줄여 비용 ratio(측정 2.1배)를 낮춘다. 성능 손실 위험이 가장 낮은 비용 레버다.
-          average_utilization = 60
+          # 2026-08-20 실측 적용값. 발동점 250m x 70% = 175m.
+          # 이전 60%는 request 70m과 겹쳐 발동점이 20m이라 부하 시 상시 max(20파드)였다.
+          average_utilization = 70
         }
       }
     }
@@ -608,9 +609,9 @@ resource "kubernetes_deployment" "stress" {
           image_pull_policy = "IfNotPresent"
           port { container_port = var.container_port }
           resources {
-            # 38점 재현 프로파일: stress는 600m를 예약하고 2 CPU로 이웃 앱을 보호한다.
-            # HPA 발동점은 600m x 55% = 330m이며 당일 측정 후 advise.py가 재계산한다.
-            requests = { cpu = "600m", memory = "128Mi" }
+            # 라이브 적용값(2026-08-20). 발동점 750m x 55% = 412.5m.
+            # 파드당 실사용이 request를 넘으므로(limit 2 CPU로 burst) 이보다 낮추면 경합이 커진다.
+            requests = { cpu = "750m", memory = "128Mi" }
             limits   = { cpu = "2", memory = "512Mi" }
           }
           readiness_probe {
@@ -662,7 +663,7 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "stress" {
     # min 2로 시작 용량을 확보한다. advise.py도 항상 min 2를 권고(recommended_min=2).
     # 노드 비용 영향은 user/product 대비 작다(관리형 NG 2노드에 흡수됨).
     min_replicas = 2
-    max_replicas = 6
+    max_replicas = 8
     scale_target_ref {
       api_version = "apps/v1"
       kind        = "Deployment"

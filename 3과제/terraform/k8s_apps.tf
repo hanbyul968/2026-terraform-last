@@ -141,9 +141,12 @@ resource "kubernetes_deployment" "user" {
           }
           resources {
             # 2026-08-20 실측 적용값. 발동점 600m x 90% = 540m.
-            # 775m로 올리면 stress 750m과 한 노드(앱 여유 1480m)에 못 앉아 유휴에도 노드가
-            # 4대로 떠 비용 ratio가 오른다. 600m이면 min replica 파드가 baseline 2노드에 담긴다.
-            requests = { cpu = "600m", memory = "128Mi" }
+            # AZ topology spread로 AZ 노드 1대에 user+product+stress 파드가 각 1개씩 앉는다.
+            # 그 합이 노드 앱 여유 1480m(=allocatable 1930 - 시스템 예약 450)을 넘으면 유휴에도
+            # Karpenter 노드가 상주해 회수되지 않는다. user 575 + product 250 + stress 650 = 1475m
+            # 으로 맞춰 유휴 2노드(관리형 NG)로 유지한다. request는 예약량이라 성능엔 영향 없고,
+            # 부하 시 HPA가 replica를 늘려 Karpenter 노드로 확장한다(부하 구간에만 비용 발생).
+            requests = { cpu = "575m", memory = "128Mi" }
             limits   = { memory = "256Mi" }
           }
           readiness_probe {
@@ -609,9 +612,10 @@ resource "kubernetes_deployment" "stress" {
           image_pull_policy = "IfNotPresent"
           port { container_port = var.container_port }
           resources {
-            # 라이브 적용값(2026-08-20). 발동점 750m x 55% = 412.5m.
-            # 파드당 실사용이 request를 넘으므로(limit 2 CPU로 burst) 이보다 낮추면 경합이 커진다.
-            requests = { cpu = "750m", memory = "128Mi" }
+            # 발동점 650m x 55% = 357.5m. request는 예약량이고 limit 2 CPU로 burst하므로
+            # 성능은 유지된다. user 575 + product 250 + stress 650 = 1475m <= 노드 앱 여유 1480m
+            # 이라 AZ 노드 1대에 세 앱 파드가 다 앉아 유휴 2노드로 회수된다.
+            requests = { cpu = "650m", memory = "128Mi" }
             limits   = { cpu = "2", memory = "512Mi" }
           }
           readiness_probe {

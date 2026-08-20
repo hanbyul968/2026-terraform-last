@@ -167,18 +167,32 @@ class SharedEngineTests(unittest.TestCase):
         top_apps = [tuple(sorted(c.knobs)) for c in candidates[:3]]
         self.assertGreater(len({a for group in top_apps for a in group}), 1)
 
-    def test_usage_sized_request_is_one_division_not_a_search(self):
-        """500m 예약에 250m만 쓰면 250m로, 750m에 1800m 쓰면 올린다."""
-        over = self.app(name="over", slo_seconds=1.0, samples=1000, window_seconds=120.0,
+    def test_usage_sized_request_follows_target_load_not_measurement_load(self):
+        """부하를 세게 넣고 측정했다고 request가 과대해지면 안 된다."""
+        over = self.app(name="over", slo_seconds=1.0, samples=1200, window_seconds=120.0,
                         request_m=500, target=50, min_replicas=2, max_replicas=8,
                         replicas=4, pods_p90=4, pods_max=4, per_pod_p90=250,
                         per_pod_p95=250, total_cpu_p90=1000, total_cpu_p95=1000,
                         cpu_samples=60, latencies=tuple([.10] * 200))
-        self.assertEqual(engine._usage_sized(over, engine._current_dict(over))["request"], 250)
-        under = self.app(name="under", request_m=750, target=55, pods_p90=8,
-                         per_pod_p90=1800, per_pod_p95=1956, total_cpu_p90=6600,
-                         total_cpu_p95=7392, cpu_limit_m=2000)
-        self.assertEqual(engine._usage_sized(under, engine._current_dict(under))["request"], 925)
+        snapshot = engine.TuningSnapshot(
+            {"over": over}, engine.ClusterSnapshot(baseline_nodes=2, node_average=4,
+                                                   node_count=4, node_alloc_m=1930,
+                                                   cluster_cpu_p95_m=1000,
+                                                   system_reserved_m=800))
+        current = engine._current_dict(over)
+        # 측정 부하(10 rps) 기준: 요청당 CPU 100ms x 10rps = 1000m / 4파드 = 250m
+        self.assertAlmostEqual(over.cpu_seconds_per_request, .1, places=3)
+        self.assertEqual(engine._usage_sized(snapshot, over, current)["request"], 250)
+        # 목표 부하를 절반으로 두면 request도 절반이 된다.
+        snapshot.load_scale = .5
+        self.assertEqual(engine._usage_sized(snapshot, over, current)["request"], 125)
+        # 목표 rps를 직접 지정하면 측정 부하와 무관하게 그 값으로 사이징한다.
+        # 20 rps면 필요 CPU 2000m / 4파드 = 500m = 현재값이므로 변경 제안이 없다.
+        snapshot.load_scale = 1.0
+        snapshot.target_rps = {"over": 20.0}
+        self.assertIsNone(engine._usage_sized(snapshot, over, current))
+        snapshot.target_rps = {"over": 40.0}
+        self.assertEqual(engine._usage_sized(snapshot, over, current)["request"], 1000)
 
     def test_cost_lock_is_detected_in_one_measurement(self):
         """수요가 이미 노드를 채우면 시험 없이 즉시 알린다."""
@@ -258,8 +272,10 @@ class SharedEngineTests(unittest.TestCase):
         snapshot.cost_first = False
         for candidate in engine.plan(snapshot)["candidates"]:
             self.assertGreaterEqual(candidate["predicted_nodes"], 6)
-        # 과소예약(750m에 파드당 992m 사용)은 나눗셈으로 바로 교정값이 나온다: 7000m ÷ 8파드.
-        self.assertEqual(engine._usage_sized(stress, engine._current_dict(stress))["request"], 875)
+        # 과소예약 교정값도 목표 부하 기준으로 계산된다(요청당 CPU x 목표 rps ÷ 파드수).
+        sized = engine._usage_sized(snapshot, stress, engine._current_dict(stress))
+        self.assertEqual(sized["request"], engine.ceil_to(
+            snapshot.app_required_cpu_m("stress") / stress.pods_p90))
 
     def test_measured_rejection_blocks_repeating_the_same_node_count(self):
         measured = tuple([.45] * 400)

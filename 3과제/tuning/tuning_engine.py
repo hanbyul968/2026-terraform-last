@@ -141,6 +141,26 @@ class AppSnapshot:
             return 1.0
         return float(clamp(cpu_seconds / mean_latency, 0.0, 1.0))
 
+    @property
+    def measured_rps(self):
+        if not self.window_seconds or not self.samples:
+            return 0.0
+        return self.samples / self.window_seconds
+
+    def required_cpu_m(self, target_rps=None):
+        """부하량에 정규화된 필요 CPU(밀리코어).
+
+        측정 당시 부하가 얼마였는지에 좌우되지 않게, 부하와 무관한 값인
+        '요청당 CPU 시간'에 목표 초당 요청수를 곱해 구한다.
+            필요 CPU = 요청당 CPU 시간 x 목표 rps
+        목표 rps를 주지 않으면 측정 당시 rps를 쓴다(그때는 측정값과 동일해진다).
+        """
+        cpu_seconds = self.cpu_seconds_per_request
+        if cpu_seconds is None:
+            return int(self.total_cpu_p95 or self.total_cpu_p90 or 0)
+        rps = target_rps if target_rps else self.measured_rps
+        return int(round(cpu_seconds * max(rps, 0.0) * 1000))
+
     def performance_at(self, slowdown: float):
         """CPU 공급이 slowdown배 부족할 때의 성능%/가용성% 추정.
 
@@ -206,6 +226,26 @@ class TuningSnapshot:
     cost_first: bool = True
     avail_floor: float = COST_FIRST_AVAIL_FLOOR
     perf_floor: float = COST_FIRST_PERF_FLOOR
+    # 측정 당시 부하가 채점 부하와 같다고 가정하지 않는다. 1.0이면 측정 부하 기준,
+    # 0.5면 그 절반 부하를 목표로 사이징한다. 앱별 목표 rps를 직접 줄 수도 있다.
+    load_scale: float = 1.0
+    target_rps: Dict[str, float] = field(default_factory=dict)
+
+    def app_target_rps(self, name):
+        app = self.apps[name]
+        if name in self.target_rps:
+            return float(self.target_rps[name])
+        return app.measured_rps * max(self.load_scale, 0.0)
+
+    def app_required_cpu_m(self, name):
+        return self.apps[name].required_cpu_m(self.app_target_rps(name))
+
+    def required_cluster_cpu_m(self):
+        """목표 부하에서 필요한 앱 CPU 합계. 측정 부하가 아니라 목표 부하 기준이다."""
+        total = sum(self.app_required_cpu_m(name) for name in self.apps)
+        if total > 0:
+            return total
+        return self.cluster.cluster_cpu_p95_m
 
     @property
     def max_slowdown(self):
@@ -642,7 +682,7 @@ def _predicted_score(snapshot: TuningSnapshot, nodes: int, node_average=None):
     다시 계산한다. 비용은 실측처럼 평균 노드(소수)로 채점한다.
     """
     supply = nodes * snapshot.cluster.node_alloc_m
-    demand = snapshot.cluster.cluster_cpu_p95_m
+    demand = snapshot.required_cluster_cpu_m()
     slowdown = demand / supply if supply and demand else 1.0
     perfs, avails = {}, {}
     for name, app in snapshot.apps.items():
@@ -666,10 +706,10 @@ def deterministic_reservation(snapshot: TuningSnapshot):
     """
     alloc = snapshot.cluster.node_alloc_m
     usable = snapshot.cluster.usable_cpu_per_node_m
-    # 수요는 '동시' 클러스터 CPU p95를 쓴다. 앱별 p95 합은 피크 시점이 달라 과대추정된다.
-    demand = snapshot.cluster.cluster_cpu_p95_m or sum(
-        int(app.total_cpu_p95 or 0) for app in snapshot.apps.values())
-    shares_total = sum(int(app.total_cpu_p95 or 0) for app in snapshot.apps.values())
+    # 수요는 목표 부하에서의 필요 CPU다. 측정 당시 부하에 좌우되지 않는다.
+    demand = snapshot.required_cluster_cpu_m()
+    shares = {name: max(snapshot.app_required_cpu_m(name), 0) for name in snapshot.apps}
+    shares_total = sum(shares.values())
     if alloc <= 0 or demand <= 0 or shares_total <= 0:
         return None
     nodes_min = max(1, int(math.ceil(demand / usable)))
@@ -680,7 +720,7 @@ def deterministic_reservation(snapshot: TuningSnapshot):
             continue
         current = _current_dict(app)
         pods = max(1, int(app.pods_p90 or app.replicas or current["min"]))
-        share = int(app.total_cpu_p95 or 0) / shares_total
+        share = shares.get(name, 0) / shares_total
         request = max(REQUEST_MIN_M, ceil_to(budget * share / pods))
         if app.cpu_limit_m:
             request = min(request, app.cpu_limit_m)
@@ -693,19 +733,19 @@ def deterministic_reservation(snapshot: TuningSnapshot):
     return {"nodes": nodes_min, "demand_m": demand, "budget_m": budget, "knobs": knobs}
 
 
-def _usage_sized(app: AppSnapshot, current: dict):
-    """실측 사용량에서 request를 한 번에 역산한다.
+def _usage_sized(snapshot, app: AppSnapshot, current: dict):
+    """목표 부하에서의 필요 CPU로 request를 한 번에 역산한다.
 
-    `request = 동시 총 CPU p95 ÷ 파드수`. 즉 500m 예약에 250m만 쓰면 250m로 내리고,
-    750m 예약에 1800m을 쓰면 올린다. 탐색이 아니라 나눗셈이므로 한 회차 측정으로 끝난다.
-    파드수는 실측 p90을 쓰고, 동일 시각 합계(total_cpu_p95)를 쓰기 때문에 파드별 피크가
-    겹치지 않는 과대추정을 피한다.
-    HPA target은 실측으로 검증된 절대 발동점(request × target)을 최대한 보존한다.
+    `request = (요청당 CPU x 목표 rps) / 파드수`.
+    측정 당시 부하가 아니라 **목표 부하** 기준이므로, 부하를 세게 넣고 측정했다고 해서
+    request가 과대하게 나오지 않는다. 목표 부하는 `load_scale` 또는 `target_rps`로 준다.
+    HPA target은 실측으로 검증된 절대 발동점(request x target)을 최대한 보존한다.
     """
     pods = int(app.pods_p90 or app.replicas or current["min"] or 1)
-    if not app.total_cpu_p95 or pods <= 0:
+    required = snapshot.app_required_cpu_m(app.name)
+    if not required or pods <= 0:
         return None
-    sized = max(REQUEST_MIN_M, ceil_to(app.total_cpu_p95 / pods))
+    sized = max(REQUEST_MIN_M, ceil_to(required / pods))
     sized = max(sized, ceil_to(int(app.per_pod_p90 or 0) * REQUEST_USAGE_FLOOR_RATIO))
     if app.cpu_limit_m:
         sized = min(sized, app.cpu_limit_m)
@@ -726,7 +766,7 @@ def _safe_node_floor(snapshot: TuningSnapshot, current_nodes: int):
     동시에 **하한을 채우려고 request를 올리지는 않는다.** 이미 현재 예약이 그보다 낮으면
     현재 노드 수를 그대로 하한으로 쓴다.
     """
-    demand = snapshot.cluster.cluster_cpu_p95_m
+    demand = snapshot.required_cluster_cpu_m()
     alloc = snapshot.cluster.node_alloc_m
     if demand <= 0 or alloc <= 0:
         return 1
@@ -758,7 +798,8 @@ def _optimal_request_target(snapshot: TuningSnapshot, app: AppSnapshot, current:
     # 실측 사용량 기준 하한: 파드당 실사용(동시 총 CPU p95 / 파드수)의 절반.
     # 이게 없으면 "1800m 쓰는 파드에 request 50m" 같은 비현실적인 값이 나온다.
     pods = max(1, int(app.pods_p90 or app.replicas or current["min"]))
-    usage_per_pod = max(int(app.total_cpu_p95 or 0) / pods, int(app.per_pod_p90 or 0))
+    required = snapshot.app_required_cpu_m(app.name)
+    usage_per_pod = required / pods if required else int(app.per_pod_p90 or 0)
     lower = max(REQUEST_MIN_M, ceil_to(usage_per_pod * REQUEST_USAGE_FLOOR_RATIO))
     # 한 회차에 절반 이하로 급락시키지 않는다. 더 내려야 하면 실측 후 다음 회차가 이어서 내린다.
     lower = max(lower, ceil_to(current["request"] * .5))
@@ -917,7 +958,7 @@ def generate_candidates(snapshot: TuningSnapshot, rejected=None, namespace="app"
         node_floor = min_nodes_allowed if snapshot.cost_first else max(
             _safe_node_floor(snapshot, current_nodes), min_nodes_allowed)
         # (1) 실측 사용량에서 바로 역산한 값. 탐색 없이 한 회차로 확정한다.
-        sized = _usage_sized(app, current)
+        sized = _usage_sized(snapshot, app, current)
         if sized:
             lowers = sized["request"] < current["request"]
             gate_risk = (app.availability < snapshot.availability_gate
@@ -1043,6 +1084,11 @@ def plan(snapshot: TuningSnapshot, rejected=None, namespace="app", rejected_node
             "pods_p90": app.pods_p90, "pods_max": app.pods_max,
             "peak_reservation_m": int((app.pods_max or 0) * (app.request_m or 0)),
             "cpu_bound_fraction": round(app.cpu_bound_fraction, 3),
+            "measured_rps": round(app.measured_rps, 2),
+            "cpu_per_request_ms": (round(app.cpu_seconds_per_request * 1000, 1)
+                                   if app.cpu_seconds_per_request is not None else None),
+            "target_rps": round(snapshot.app_target_rps(name), 2),
+            "required_cpu_m": snapshot.app_required_cpu_m(name),
             "total_cpu_p90": app.total_cpu_p90, "bottleneck": classify_bottleneck(app, snapshot.cluster, snapshot.history),
         })
     if cost_locked:

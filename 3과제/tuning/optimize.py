@@ -90,7 +90,11 @@ def main():
     parser.add_argument("--avail-floor", type=float, default=None,
                         help="비용 우선 모드에서 지킬 최소 가용성%% (기본 92)")
     parser.add_argument("--perf-floor", type=float, default=None,
-                        help="비용 우선 모드에서 지킬 최소 성능%% (기본 35)")
+                        help="비용 우선 모드에서 지킬 최소 성능%% (기본 80)")
+    parser.add_argument("--load-scale", type=float, default=1.0,
+                        help="목표 부하 배수. 1.0=측정 부하 기준, 0.5=측정 부하의 절반 기준 사이징")
+    parser.add_argument("--target-rps", default="",
+                        help="앱별 목표 초당 요청수: user=100,stress=10 (측정 부하와 무관하게 고정)")
     parser.add_argument("--rejected", default="")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
@@ -105,6 +109,9 @@ def main():
         snapshot.avail_floor = args.avail_floor
     if args.perf_floor is not None:
         snapshot.perf_floor = args.perf_floor
+    snapshot.load_scale = max(args.load_scale, 0.0)
+    snapshot.target_rps = {kv.split("=")[0]: float(kv.split("=")[1])
+                           for kv in args.target_rps.split(",") if "=" in kv}
     rejected, rejected_nodes = _rejected_keys(args.rejected)
     data = engine.plan(snapshot, rejected, args.ns, rejected_nodes)
     best = data.get("best")

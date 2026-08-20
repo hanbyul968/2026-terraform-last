@@ -14,6 +14,8 @@ param(
   [ValidateSet('cost','balanced')][string]$Objective = 'cost',
   [double]$AvailFloor = 90,
   [double]$PerfFloor = 80,
+  [double]$LoadScale = 1,
+  [string]$TargetRps = '',
   [switch]$Apply,
   [string]$Url = ''
 )
@@ -38,7 +40,9 @@ function Get-Score { param([string]$OutDir)
 }
 function Get-NextStep { param([string]$OutDir,[string]$RejFile)
   $a=@((Join-Path $Here 'optimize.py'),$OutDir,'--slos',$SLOS,'--ns',$NS,'--avail-gate',"$AVAIL_GATE",
-       '--objective',$Objective,'--avail-floor',"$AvailFloor",'--perf-floor',"$PerfFloor",'--json')
+       '--objective',$Objective,'--avail-floor',"$AvailFloor",'--perf-floor',"$PerfFloor",
+       '--load-scale',"$LoadScale",'--json')
+  if($TargetRps){$a+=@('--target-rps',$TargetRps)}
   if($RejFile){$a+=@('--rejected',$RejFile)}
   $raw=Invoke-Py $a; return ($raw | Select-Object -Last 1 | ConvertFrom-Json)
 }

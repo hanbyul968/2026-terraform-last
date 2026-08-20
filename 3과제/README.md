@@ -18,13 +18,13 @@
 | ~0:20 | 받은 **바이너리 교체** → apply | [terraform/README "3. 바이너리 교체"](terraform/README.md#3-바이너리-교체) |
 | ~0:25 | 스펙 바뀌었으면 대응 | 아래 [스펙 바뀌면](#스펙-바뀌면) |
 | ~0:35 | **응답규약 검증 → 엔드포인트 제출** | `cd tuning ; .\verify.ps1` |
-| ~0:40 | **baseline 측정** (~2분) | `.\loadtest.ps1 -Duration 90s -Label t1` |
-| ~0:42~0:57 | **HPA 자동 최적화 (15분 예산)** → 우승값 `k8s_apps.tf` 반영 → apply | `.\optimize.ps1 -Apply` |
+| ~0:40 | **baseline 측정** (~3분) | `.\loadtest.ps1 -Duration 120s -Label t1` |
+| ~0:43~0:58 | **HPA 자동 최적화 (18분 예산, 워밍업+120s 측정)** → 우승값 `k8s_apps.tf` 반영 → apply | `.\optimize.ps1 -Apply` |
 | 1:00~ | 트래픽 시작. **모니터링 + WAF 추가 차단** | `cd tools ; .\dashboard.ps1` |
 | 종료 | 부하 중지 / (연습계정) destroy | `terraform destroy -auto-approve` |
 
-> ⏱ **트래픽 전 1시간 = `terraform apply`(~30분) + 튜닝(~20분).** 튜닝은 90초 측정 + 15분 예산의
-> `optimize.ps1`로 끝낸다. 180초 반복 측정 루프는 시간이 안 맞아 쓰지 않는다.
+> ⏱ **트래픽 전 1시간 = `terraform apply`(~30분) + 튜닝(~20분).** 튜닝은 워밍업 후 120초 측정 + 18분
+> 예산의 `optimize.ps1`로 끝낸다. 측정이 너무 짧으면 콜드스타트가 섞여 user perf 가 실제(80%+)보다 낮게 찍힌다.
 
 **0:00 환경이 처음이면** 먼저 아래 [처음 세팅](#처음-세팅-새-pc--새-계정)을 1회 끝내고 배포로 온다.
 
@@ -53,16 +53,16 @@ FAIL이면 원인별 처방이 같이 나온다. **여기서 실패하면 다른
 ## 트래픽 전 — 측정하고 값을 확정한다
 
 ```powershell
-.\loadtest.ps1 -Duration 90s -Label t1      # 측정 + 채점 환산 + 앱별 권장값 자동 출력 (~2분)
+.\loadtest.ps1 -Duration 120s -Label t1     # 측정 + 채점 환산 + 앱별 권장값 자동 출력 (~3분)
 ```
 
 리포트의 **채점 환산**(가용성/성능/비용)에서 어디서 점수가 새는지 바로 보인다. 고치는 방법 두 가지:
 
 - **자동 탐색(권장)**: `.\optimize.ps1 -Apply` — 공식 총점을 목적함수로 HPA를 measure→score→patch→
-  remeasure 루프로 최적화한다. **기본 15분 예산**으로 스스로 멈추고, 끝나면 우승값을 출력하니
+  remeasure 루프로 최적화한다. **기본 18분 예산**(워밍업 후 120초 측정)으로 스스로 멈추고, 끝나면 우승값을 출력하니
   `k8s_apps.tf`에 박고 apply로 영구화한다.
 - **수동 1-step**: 출력된 `advise.py` 권장값을 `k8s_apps.tf`의 해당 앱 `requests.cpu` /
-  HPA `average_utilization`·`min_replicas`에 반영 → `terraform apply` → 새 Label로 90초 재측정.
+  HPA `average_utilization`·`min_replicas`에 반영 → `terraform apply` → 새 Label로 120초 재측정.
 
 자세한 사용법·주의는 [tuning/README](tuning/README.md).
 

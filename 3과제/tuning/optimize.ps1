@@ -19,13 +19,14 @@
 
   사용법:
     .\optimize.ps1                     # DRY-RUN: 1회 측정 후 '다음 한 수'만 출력(클러스터 불변)
-    .\optimize.ps1 -Apply              # 닫힌 루프(기본 15분 예산 안에서 자동 탐색)
-    .\optimize.ps1 -Apply -BudgetMinutes 12 -Duration 60s
+    .\optimize.ps1 -Apply              # 닫힌 루프(기본 18분 예산 안에서 자동 탐색, 워밍업 후 120s 측정)
+    .\optimize.ps1 -Apply -Duration 180s -BudgetMinutes 18   # 측정 창을 더 길게
 #>
 [CmdletBinding()]
 param(
-  [int]$BudgetMinutes = 15,         # 벽시계 총예산. 이걸 넘으면 새 회차를 시작하지 않는다.
-  [string]$Duration = '60s',        # 회차당 부하 길이(짧게). 성능/가용성 신호엔 충분하다.
+  [int]$BudgetMinutes = 18,         # 벽시계 총예산(20분 안에 끝내되 여유 2분). 넘으면 새 회차 안 염.
+  [string]$Duration = '120s',       # 회차당 부하 길이. 콜드스타트를 희석하려 넉넉히(2분).
+  [int]$WarmupSeconds = 60,         # 시작 시 1회 워밍업(측정 제외): DB 커넥션/CloudFront/파드 예열.
   [int]$Iterations = 6,             # 예산이 남아도 이 횟수까지만(안전 상한).
   [int]$SettleSeconds = 25,         # 스케일아웃(성능/게이트) 후 안정 대기.
   [int]$CostSettleSeconds = 105,    # 비용 회수(스케일인/노드 드레인) 후 대기 ~ consolidateAfter.
@@ -94,6 +95,16 @@ if (-not $Apply) { Write-Host 'DRY-RUN: 1회 측정 후 다음 한 수만 제안
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 $rejFile = Join-Path $env:TEMP 'optimize-rejected.json'
 '[]' | Set-Content -Path $rejFile -Encoding ascii
+
+# --- 워밍업(측정 제외): 콜드스타트(DB 커넥션·CloudFront 캐시·파드 스케일업)를 걷어낸다.
+# 짧은 첫 측정은 콜드스타트가 창을 지배해 user perf 가 실제(80%+)보다 훨씬 낮게 찍힌다.
+# 예열 후 정상상태에서 측정해야 튜닝 판단이 맞다. (DRY-RUN 은 빠른 미리보기라 건너뜀)
+if ($Apply -and $WarmupSeconds -gt 0) {
+  Write-Host ("워밍업 {0}s (측정 안 함, 콜드스타트 제거)..." -f $WarmupSeconds) -ForegroundColor DarkGray
+  $warm = @{ Duration = ("{0}s" -f $WarmupSeconds); Label = 'opt-warm' }
+  if ($Url) { $warm['Url'] = $Url }
+  & $loadtest @warm | Out-Null
+}
 
 # --- 베이스라인 측정 ---
 & $loadtest @ltArgs | Out-Null

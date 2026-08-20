@@ -363,11 +363,11 @@ CPU averageUtilization
   단 파드당 request가 올라가 CPU 예약이 늘 수 있어, 비용 우선 모드에서는 공식 점수가 떨어지면
   제안하지 않는다. 메모리가 병목이거나 `-Objective balanced`일 때 채택 후보로 올라온다.
 - **유휴 노드는 baseline 노드그룹(고정 2대)을 넘으면 안 된다.** 노드 수는 총 예약 합이 아니라
-  **파드가 노드에 실제로 담기는지(bin-packing)**로 정해진다. 예: 노드 앱 여유 1480m에
-  `user 775m + stress 750m = 1525m`은 한 노드에 못 앉아, min replica만으로도 노드가 4대 뜬다
-  (대회날 부하가 없어도 상주 → 비용 ratio 상승). 엔진은 min replica 파드를 실제로 담아 유휴 노드를
-  계산하고, baseline를 넘기는 조합은 후보에서 제외한다. request는 다른 앱 파드와 한 노드에 공존
-  가능한 크기로 정해야 한다.
+  **AZ별 bin-packing**으로 정해진다. topology spread(zone maxSkew=1)가 앱 파드를 AZ에 흩으므로,
+  AZ 노드 1대에 앉는 `Σ 앱 request`가 노드 가용 CPU(≈1480m)를 넘으면 그 AZ에 노드가 하나 더 뜬다.
+  예: `user 600 + stress 750 + product 250 = 1600 > 1480` → AZ당 2노드 → 유휴 4노드가 대회날 부하
+  없이도 상주(Karpenter 회수 불가). `idle-fit` 후보가 이를 감지해 min replica 파드가 baseline 노드에
+  담기도록 request를 실사용 하한까지 비례 축소한다(부하 전 1회). baseline를 넘기는 다른 후보는 제외한다.
 - **부하 중 라이브 루프는 HPA(target/min/max)만 만진다(기본값).** request 변경은 rollout을
   일으켜 적용·롤백에 각각 몇 분이 걸리고, rollout 자체가 가용성을 깎는다. 그래서 루프는 즉시
   적용/롤백되는 HPA 후보만 시험한다(회차당 settle 25초, rollout 없음). request 사이징은 **부하 전

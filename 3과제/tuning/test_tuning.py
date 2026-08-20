@@ -95,7 +95,7 @@ class SharedEngineTests(unittest.TestCase):
         self.assertTrue(any(c.disruptive for c in full))
 
     def test_bin_packing_idle_nodes_and_baseline_guard(self):
-        """총 예약 합이 아니라 실제 스케줄링으로 유휴 노드를 센다(user 775m 사고 재현)."""
+        """유휴 노드는 총 예약이 아니라 AZ별 bin-packing으로 정해진다(Karpenter 잔존 재현)."""
         self.assertEqual(engine.bin_pack_nodes([775, 775, 750, 750, 50, 50], 1480), 4)
         self.assertEqual(engine.bin_pack_nodes([600, 600, 750, 750, 50, 50], 1480), 2)
 
@@ -107,21 +107,24 @@ class SharedEngineTests(unittest.TestCase):
                 pods_p90=mn, pods_max=mn, per_pod_p90=int(req * .5), per_pod_p95=int(req * .6),
                 total_cpu_p90=req * mn, total_cpu_p95=req * mn, cpu_samples=60,
                 latencies=tuple([.3] * 200))
-        cluster = dict(baseline_nodes=2, node_average=2, node_count=2, node_alloc_m=1930,
-                       node_mem_alloc_mi=3292, cluster_cpu_p95_m=1700, system_reserved_m=900,
-                       baseline_node_count=2)
+        cl = dict(node_alloc_m=1930, node_mem_alloc_mi=3292, cluster_cpu_p95_m=1700,
+                  system_reserved_m=900, baseline_node_count=2, zone_count=2, node_average=3)
+        # AZ당 user+stress+product = 600+750+250 = 1600 > 1480 -> AZ당 2노드 -> 유휴 4노드
+        stuck = engine.TuningSnapshot(
+            {"user": app("user", 600, 2), "stress": app("stress", 750, 2),
+             "product": app("product", 250, 2)}, engine.ClusterSnapshot(**cl))
+        self.assertGreater(stuck.idle_nodes(), 2)
+        # 600+600+250 = 1450 <= 1480 -> 유휴 2노드
         fit = engine.TuningSnapshot(
-            {"user": app("user", 600, 2), "product": app("product", 50, 2),
-             "stress": app("stress", 750, 2)}, engine.ClusterSnapshot(**cluster))
+            {"user": app("user", 600, 2), "stress": app("stress", 600, 2),
+             "product": app("product", 250, 2)}, engine.ClusterSnapshot(**cl))
         self.assertEqual(fit.idle_nodes(), 2)
-        # user 775m는 stress 750m과 한 노드에 못 앉아 유휴 4노드를 만든다.
-        raised = fit.idle_nodes({"user": {"request": 775, "target": 90, "min": 2, "max": 9}})
-        self.assertEqual(raised, 4)
-        # 그런 조합은 후보에서 걸러진다.
-        c = engine._make_candidate(fit, fit.apps["user"], "request-optimal",
-                                   {"request": 775, "target": 90, "min": 2, "max": 9,
-                                    "replicas": 2}, "", 0.0, "app")
-        self.assertIsNone(c)
+        # idle-fit이 유휴 초과 상태를 baseline로 되돌리는 request 축소 묶음을 낸다.
+        recovered = engine._idle_fit(stuck)
+        self.assertIsNotNone(recovered)
+        self.assertLessEqual(stuck.idle_nodes(recovered), 2)
+        for name, v in recovered.items():
+            self.assertLessEqual(v["request"], engine._current_dict(stuck.apps[name])["request"])
 
     def test_one_failing_app_does_not_block_other_apps(self):
         """한 앱이 기준 미달이어도 다른 앱 후보가 나와야 한다(회차 독식 방지)."""

@@ -234,6 +234,8 @@ class ClusterSnapshot:
     node_types: Tuple[str, ...] = ()
     # 관리형 노드그룹 고정 대수(node_desired_size). 이 수를 넘으면 Karpenter 노드가 상주한다.
     baseline_node_count: int = 2
+    # AZ 수. topology spread가 파드를 AZ에 흩어 노드 패킹이 AZ별로 일어난다.
+    zone_count: int = 2
 
     @property
     def daemonset_per_node_m(self):
@@ -284,16 +286,22 @@ class TuningSnapshot:
         대회날 '아무것도 안 하는데' 뜨는 노드가 이 값이다. 파드당 request가 커서 baseline
         노드(관리형 NG)에 min replica들이 안 들어가면, Karpenter 노드가 상주해 회수되지 않는다.
         총 예약 합으로는 안 보이고 개별 파드가 노드에 담기는지를 봐야 한다.
+
+        topology spread(zone maxSkew=1)가 있으면 각 앱 파드가 AZ에 고르게 흩어지므로,
+        노드 패킹도 AZ별로 따로 일어난다. 그래서 AZ 수로 나눠 zone별로 bin-packing한 뒤 합친다.
         """
         plan_map = plan_map or {}
         cap = self.cluster.usable_cpu_per_node_m
-        pods = []
+        zones = max(1, self.cluster.zone_count)
+        zone_pods = [[] for _ in range(zones)]
         for name, app in self.apps.items():
             change = plan_map.get(name)
             req = int(change["request"]) if change else int(app.request_m or REQUEST_MIN_M)
             mn = int((change or {}).get("min", app.min_replicas or 1))
-            pods += [req] * max(1, mn)
-        return bin_pack_nodes(pods, cap)
+            # min replica를 AZ에 라운드로빈으로 배분(zone spread maxSkew=1 근사)
+            for i in range(max(1, mn)):
+                zone_pods[i % zones].append(req)
+        return sum(bin_pack_nodes(pods, cap) for pods in zone_pods)
 
     def required_cluster_cpu_m(self):
         """목표 부하에서 필요한 앱 CPU 합계. 측정 부하가 아니라 목표 부하 기준이다."""
@@ -402,8 +410,12 @@ def live_state(namespace="app"):
                     current["target"] = resource.get("target", {}).get("averageUtilization")
         alloc, types, mem_alloc = [], [], []
         baseline_ng = 0
+        zones = set()
         for item in nodes.get("items", []):
             labels = item.get("metadata", {}).get("labels", {}) or {}
+            zone = labels.get("topology.kubernetes.io/zone")
+            if zone:
+                zones.add(zone)
             allocatable = item.get("status", {}).get("allocatable", {}) or {}
             value = cpu_m(allocatable.get("cpu"))
             if value:
@@ -419,6 +431,7 @@ def live_state(namespace="app"):
                                "node_mem_alloc_mi": min(mem_alloc) if mem_alloc else 0,
                                "node_count": len(nodes.get("items", [])),
                                "baseline_node_count": baseline_ng or 2,
+                               "zone_count": len(zones) or 2,
                                "node_types": sorted(types),
                                "system_reserved_m": _system_reserved_m(namespace)}
     except Exception:
@@ -584,6 +597,7 @@ def _cluster_csv(outdir, windows, baseline_nodes, live):
         node_types=tuple(cluster.get("node_types") or ()),
         system_reserved_m=int(cluster.get("system_reserved_m") or 0),
         baseline_node_count=int(cluster.get("baseline_node_count") or 2),
+        zone_count=int(cluster.get("zone_count") or 2),
     )
 
 
@@ -839,6 +853,56 @@ def _usage_sized(snapshot, app: AppSnapshot, current: dict):
     return proposed
 
 
+def _idle_fit(snapshot: TuningSnapshot):
+    """유휴 노드가 baseline를 넘으면, min replica 파드가 baseline 노드에 담기도록 request를 줄인다.
+
+    AZ topology spread 때문에 각 AZ 노드 1대에는 앱마다 파드 1개가 앉는다. 그래서 그 노드에
+    'Σ 앱 request'가 노드 가용 CPU를 넘으면 Karpenter 노드가 상주해 회수되지 않는다.
+    노드 가용 CPU 안에 들어가도록 request를 실사용 하한까지 비례 축소한 묶음을 만든다.
+    """
+    baseline = snapshot.cluster.baseline_node_count
+    if snapshot.idle_nodes() <= baseline:
+        return None
+    zones = max(1, snapshot.cluster.zone_count)
+    per_zone_nodes = max(1, baseline // zones)  # AZ당 baseline 노드 수(보통 1)
+    budget = snapshot.cluster.usable_cpu_per_node_m * per_zone_nodes
+    knobs, floors = {}, {}
+    total = 0
+    for name, app in snapshot.apps.items():
+        if not app.measured:
+            return None
+        cur = _current_dict(app)
+        knobs[name] = cur
+        # 각 앱의 request 하한 = 파드당 실사용(목표 부하 필요 CPU / 파드수)의 절반
+        pods = max(1, int(app.pods_p90 or app.replicas or cur["min"]))
+        need = snapshot.app_required_cpu_m(name) / pods if snapshot.app_required_cpu_m(name) else app.per_pod_p90
+        floors[name] = max(REQUEST_MIN_M, ceil_to((need or REQUEST_MIN_M) * REQUEST_USAGE_FLOOR_RATIO))
+        total += cur["request"]
+    if total <= budget:
+        return None
+    # request 합을 budget 안으로: 하한 위 여유분을 비례 축소.
+    floor_sum = sum(floors.values())
+    if floor_sum > budget:
+        return None  # 하한만으로도 안 들어가면 request로는 못 푼다(노드 타입 문제)
+    slack = total - floor_sum
+    room = budget - floor_sum
+    scale = room / slack if slack > 0 else 0.0
+    proposed = {}
+    for name, cur in knobs.items():
+        extra = cur["request"] - floors[name]
+        req = floors[name] + int(extra * scale)
+        req = max(floors[name], (req // REQUEST_UNIT_M) * REQUEST_UNIT_M)
+        if req >= cur["request"]:
+            continue
+        p = dict(cur)
+        p["request"] = req
+        # 절대 발동점 보존: target 재계산
+        if app_trigger := cur["request"] * cur["target"] / 100.0:
+            p["target"] = int(clamp(round(app_trigger * 100.0 / req), TARGET_MIN, TARGET_MAX))
+        proposed[name] = p
+    return proposed or None
+
+
 def _consolidated(snapshot, app: AppSnapshot, current: dict):
     """작은 파드 다수 → 제대로 사이징된 파드 소수.
 
@@ -1004,7 +1068,7 @@ def _make_candidate(snapshot, app, kind, proposed, reason, priority, namespace="
     idle_before = snapshot.idle_nodes()
     idle_after = snapshot.idle_nodes(knobs)
     baseline_ng = snapshot.cluster.baseline_node_count
-    if idle_after > max(baseline_ng, idle_before) and not exempt:
+    if idle_after > max(baseline_ng, idle_before) and not exempt and kind != "idle-fit":
         return None
     delta = predicted_score.total - result.total
     if kind in ("gate-recovery", "performance-band"):
@@ -1042,6 +1106,22 @@ def generate_candidates(snapshot: TuningSnapshot, rejected=None, namespace="app"
     # 실측으로 거절된 노드 수는 다시 시도하지 않는다(같은 회차 안에서 학습).
     min_nodes_allowed = (max(rejected_nodes) + 1) if rejected_nodes else 1
     candidates = []
+    # 유휴 노드가 baseline를 넘으면(=대회날 부하 없이도 Karpenter 노드 상주) request를 줄여
+    # min replica 파드가 baseline 노드에 담기게 하는 묶음을 최우선으로 낸다.
+    idle_now = snapshot.idle_nodes()
+    fit = _idle_fit(snapshot)
+    if fit:
+        lead = max(fit, key=lambda n: snapshot.apps[n].request_m or 0)
+        idle_after = snapshot.idle_nodes(fit)
+        detail = ", ".join(f"{n} {_current_dict(snapshot.apps[n])['request']}→{v['request']}m"
+                           for n, v in sorted(fit.items()))
+        c = _make_candidate(
+            snapshot, snapshot.apps[lead], "idle-fit", fit[lead],
+            f"유휴 노드 {idle_now}→{idle_after}대(baseline {snapshot.cluster.baseline_node_count}): "
+            f"AZ당 노드 1대에 앱 min 파드가 담기도록 request 축소 — {detail}",
+            2.0, namespace, knobs=fit)
+        if c and c.key() not in rejected:
+            candidates.append(c)
     # 게이트 미달은 '그 앱'의 문제다. 예전에는 한 앱이 미달이면 전체 후보 생성을 막아
     # 3회차가 그 앱에서 다 소모됐다. 이제 앱별로만 판단한다.
     for app in snapshot.apps.values():
@@ -1158,8 +1238,9 @@ def generate_candidates(snapshot: TuningSnapshot, rejected=None, namespace="app"
                                     0.0, namespace)
                 if c and c.key() not in rejected and c.predicted_nodes <= math.ceil(snapshot.cluster.node_average):
                     candidates.append(c)
-    kind_rank = {"gate-recovery": 5, "bundle": 5, "usage-sized": 4, "pod-consolidate": 4,
-                 "performance-band": 3, "request-optimal": 2, "pod-cap": 2, "cost-reclaim": 1}
+    kind_rank = {"gate-recovery": 5, "bundle": 5, "idle-fit": 5, "usage-sized": 4,
+                 "pod-consolidate": 4, "performance-band": 3, "request-optimal": 2,
+                 "pod-cap": 2, "cost-reclaim": 1}
     # (A) 모든 앱 변경을 한 회차에 묶는다. 회차당 4~5분이라 앱별로 나누면 예산이 한 앱에서 끝난다.
     per_app_best = {}
     for c in candidates:

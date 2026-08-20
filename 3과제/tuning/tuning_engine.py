@@ -22,6 +22,9 @@ REQUEST_MIN_M = 50
 TARGET_MIN = 25
 TARGET_MAX = 90
 NODE_CPU_HARD_PCT = 90
+# 선형 지연 모델(지연 ∝ CPU 공급 부족 배수)은 관측 범위를 크게 벗어나면 신뢰할 수 없다.
+# 한 회차에서 허용하는 외삽 한도. 더 내려가려면 그 값을 실측한 뒤 다음 회차가 이어서 판단한다.
+MAX_EXTRAPOLATED_SLOWDOWN = 1.5
 
 
 def clamp(value, low, high):
@@ -101,6 +104,48 @@ class AppSnapshot:
     rds_cpu_pct: Optional[float] = None
     rds_latency_ms: Optional[float] = None
     proxy_borrow_ms: Optional[float] = None
+    latencies: Tuple[float, ...] = ()
+    window_seconds: float = 0.0
+
+    @property
+    def cpu_seconds_per_request(self):
+        """요청 1건이 실제로 쓴 CPU 시간(초). 측정값만 사용한다."""
+        if not self.window_seconds or not self.samples or not self.total_cpu_p90:
+            return None
+        rps = self.samples / self.window_seconds
+        if rps <= 0:
+            return None
+        return (self.total_cpu_p90 / 1000.0) / rps
+
+    @property
+    def cpu_bound_fraction(self):
+        """지연 중 CPU 처리 비중(0~1). 나머지는 DB/네트워크 대기로 본다.
+
+        대회날 앱이 바뀌어도 이 값을 매 측정에서 다시 구하므로, CPU 바운드 앱은 노드 감소에
+        민감하게, DB 대기형/고정 지연형 앱은 둔감하게 평가된다. 측정이 부족하면 1.0(보수적)로
+        둬서 노드를 과감하게 줄이지 않는다.
+        """
+        cpu_seconds = self.cpu_seconds_per_request
+        if cpu_seconds is None or not self.latencies:
+            return 1.0
+        mean_latency = sum(self.latencies) / len(self.latencies)
+        if mean_latency <= 0:
+            return 1.0
+        return float(clamp(cpu_seconds / mean_latency, 0.0, 1.0))
+
+    def performance_at(self, slowdown: float):
+        """CPU 공급이 slowdown배 부족할 때의 성능%/가용성% 추정.
+
+        지연 = CPU 처리분 + 대기분으로 보고 CPU 처리분만 공급 부족 배수로 늘린다.
+        비중은 실측(요청당 CPU 시간 / 평균 지연)에서 구한다.
+        """
+        if not self.latencies:
+            return self.performance, self.availability
+        factor = 1.0 + (max(1.0, float(slowdown)) - 1.0) * self.cpu_bound_fraction
+        total = len(self.latencies)
+        perf = 100.0 * sum(1 for x in self.latencies if x * factor <= self.slo_seconds) / total
+        avail = 100.0 * sum(1 for x in self.latencies if x * factor <= 5.0) / total
+        return perf, avail
 
     @property
     def measured(self):
@@ -164,6 +209,8 @@ class Candidate:
     observed_cpu_floor: int
     trigger_before: float
     trigger_after: float
+    cpu_supply_ratio: float
+    risk: str
     disruptive: bool
     settle_seconds: int
     confidence: str
@@ -221,10 +268,33 @@ def live_state(namespace="app"):
                 "node.kubernetes.io/instance-type", "?"))
         state["__cluster__"] = {"node_alloc_m": min(alloc) if alloc else 0,
                                 "node_count": len(nodes.get("items", [])),
-                                "node_types": sorted(types)}
+                                "node_types": sorted(types),
+                                "system_reserved_m": _system_reserved_m(namespace)}
     except Exception:
         return {}
     return state
+
+
+def _system_reserved_m(namespace="app"):
+    """앱 네임스페이스 밖 Pod의 CPU request 합계 (DaemonSet/컨트롤러 등).
+
+    Karpenter는 실사용이 아니라 request로 노드를 만든다. 이 값을 빼먹으면 노드 예측이
+    시스템 Pod만큼 낮게 나온다.
+    """
+    try:
+        pods = json.loads(run(["kubectl", "get", "pods", "-A", "-o", "json"]) or "{}")
+    except Exception:
+        return 0
+    total = 0
+    for item in pods.get("items", []):
+        meta = item.get("metadata", {})
+        if meta.get("namespace") == namespace:
+            continue
+        if (item.get("status", {}) or {}).get("phase") not in ("Running", "Pending"):
+            continue
+        for container in item.get("spec", {}).get("containers", []) or []:
+            total += cpu_m(((container.get("resources", {}) or {}).get("requests", {}) or {}).get("cpu")) or 0
+    return total
 
 
 def discover_apps(outdir, slos):
@@ -276,11 +346,14 @@ def _response_measurement(path, slo):
     steady = rows[len(rows) // 2:]
     rate = lambda part: 100.0 * sum(1 for row in part if row["status-code"].startswith("2")
                                     and float(row["response-time"]) <= slo) / len(part) if part else 0.0
+    ok2 = [float(row["response-time"]) for row in rows if row["status-code"].startswith("2")]
+    step = max(1, len(ok2) // 3000)
     return {
         "samples": len(rows), "availability": 100.0 * len(good2) / len(rows),
         "performance": 100.0 * len(performant) / len(rows),
         "p95_latency": nearest_rank(latencies, .95),
         "early_performance": rate(early), "steady_performance": rate(steady),
+        "latencies": tuple(ok2[::step]),
     }
 
 
@@ -357,6 +430,7 @@ def _cluster_csv(outdir, windows, baseline_nodes, live):
         node_alloc_m=int(cluster.get("node_alloc_m") or 0),
         node_cpu_p95=int(nearest_rank(node_cpu, .95) or 0),
         node_types=tuple(cluster.get("node_types") or ()),
+        system_reserved_m=int(cluster.get("system_reserved_m") or 0),
     )
 
 
@@ -372,6 +446,7 @@ def snapshot_from_outdir(outdir, slos, namespace="app", baseline_nodes=2.0, live
     for name in names:
         measurement = _response_measurement(os.path.join(outdir, name + ".csv"), slos[name])
         current = live.get(name, {})
+        window = windows.get(name)
         app = AppSnapshot(
             name=name, slo_seconds=float(slos[name]),
             deployment_name=current.get("deployment_name") or name,
@@ -380,13 +455,15 @@ def snapshot_from_outdir(outdir, slos, namespace="app", baseline_nodes=2.0, live
             cpu_limit_m=current.get("limit"), min_replicas=current.get("min"),
             max_replicas=current.get("max"), target=current.get("target"),
             replicas=current.get("replicas"), desired=current.get("desired"),
+            window_seconds=float(max(1, window[1] - window[0])) if window else 0.0,
             **measurement, **cpu.get(name, {}),
         )
         apps[name] = app
     return TuningSnapshot(apps, cluster, availability_gate)
 
 
-def snapshot_from_dashboard(data, baseline_nodes=2.0, cpu_history=None, availability_gate=99.0):
+def snapshot_from_dashboard(data, baseline_nodes=2.0, cpu_history=None, availability_gate=99.0,
+                            window_seconds=0.0, system_reserved_m=0):
     cpu_history = cpu_history or {}
     hpamap = {row.get("name"): row for row in data.get("hpa", [])}
     pods = data.get("pods", [])
@@ -414,6 +491,7 @@ def snapshot_from_dashboard(data, baseline_nodes=2.0, cpu_history=None, availabi
             total_cpu_p90=int(nearest_rank(observed, .90) * app_pods if observed else 0),
             total_cpu_p95=int(nearest_rank(observed, .95) * app_pods if observed else 0),
             pods_p50=app_pods, pods_p90=app_pods, pods_max=app_pods,
+            window_seconds=float(window_seconds or 0.0),
         )
     allocs = [int(n.get("cpu_alloc") or 0) for n in nodes if int(n.get("cpu_alloc") or 0) > 0]
     node_cpu = [pct(n.get("cpu_pct")) for n in nodes]
@@ -424,6 +502,7 @@ def snapshot_from_dashboard(data, baseline_nodes=2.0, cpu_history=None, availabi
         node_count=len(nodes), node_alloc_m=min(allocs) if allocs else 0,
         node_cpu_p95=int(nearest_rank(node_cpu, .95) or 0), cluster_cpu_p95_m=total_current,
         node_types=tuple(sorted(str(n.get("type") or "?") for n in nodes)),
+        system_reserved_m=int(system_reserved_m or 0),
     )
     return TuningSnapshot(apps, cluster, availability_gate)
 
@@ -480,6 +559,67 @@ def _predicted_replicas(app, proposed):
     return max(proposed["min"], min(proposed["max"], int(app.replicas or proposed["min"])))
 
 
+def _predicted_score(snapshot: TuningSnapshot, nodes: int):
+    """노드 수가 nodes일 때의 공식 점수 추정.
+
+    CPU 공급이 실측 수요보다 적으면 그 배수만큼 지연이 늘어난다고 보고 앱별 성능/가용성을
+    다시 계산한다. 예측이 낙관적으로 나오지 않게 하는 것이 목적이며, 최종 판단은 실측이다.
+    """
+    supply = nodes * snapshot.cluster.node_alloc_m
+    demand = snapshot.cluster.cluster_cpu_p95_m
+    slowdown = demand / supply if supply and demand else 1.0
+    perfs, avails = {}, {}
+    for name, app in snapshot.apps.items():
+        perf, avail = app.performance_at(slowdown)
+        perfs[name], avails[name] = perf, avail
+    return (rubric.score(perfs, avails, float(nodes), snapshot.cluster.baseline_nodes,
+                         snapshot.availability_gate),
+            round(max(slowdown, 0.0), 3))
+
+
+def _optimal_request_target(snapshot: TuningSnapshot, app: AppSnapshot, current: dict):
+    """실측값으로 공식 점수가 최대인 request/target 조합을 탐색한다.
+
+    핵심 모델(실측 근거):
+      - request는 Pod 속도 상한이 아니다. stress는 CPU 바운드이고 limit이 따로 있으므로
+        request를 내려도 Pod 자체가 느려지지 않는다.
+      - 노드 수는 Karpenter가 보는 request 예약량으로 결정된다.
+        nodes = ceil((시스템 예약 + 앱별 request x 파드수) / 노드 allocatable)
+      - 노드가 줄면 CPU 공급이 줄어 지연이 늘고 성능/가용성 점수가 떨어진다.
+        그 저하를 실측 응답시간 분포로 계산해 비용 이득과 함께 공식 점수로 비교한다.
+      - 예측이 안전 게이트(가용성 99%, 성능 30%)를 깨는 조합은 후보에서 제외한다.
+    """
+    if app.cpu_samples < 5 or snapshot.cluster.node_alloc_m <= 0:
+        return None
+    protected_replicas = max(
+        _predicted_replicas(app, current),
+        min(current["max"], int(app.pods_p90 or app.replicas or current["min"])),
+    )
+    upper = int(app.cpu_limit_m or max(current["request"], app.per_pod_p95 or 0) * 2) or current["request"]
+    upper = min(8000, max(REQUEST_MIN_M, upper))
+    options = []
+    for request_m in range(REQUEST_MIN_M, upper + 1, REQUEST_UNIT_M):
+        for target in range(TARGET_MIN, TARGET_MAX + 1):
+            proposed = dict(current)
+            proposed.update({"request": request_m, "target": target})
+            replicas = _predicted_replicas(app, proposed)
+            if replicas < protected_replicas:
+                continue
+            proposed["estimated_replicas"] = replicas
+            nodes = _estimated_nodes(snapshot, app.name, proposed)
+            predicted, slowdown = _predicted_score(snapshot, nodes)
+            if slowdown > MAX_EXTRAPOLATED_SLOWDOWN:
+                continue
+            if not (predicted.perf_gate_pass and predicted.avail_gate_pass):
+                continue
+            rank = (predicted.total, -nodes, -request_m, -abs(target - current["target"]))
+            options.append((rank, proposed, nodes, predicted.total, slowdown,
+                            protected_replicas))
+    if not options:
+        return None
+    return max(options, key=lambda row: row[0])
+
+
 def _commands(namespace, app: AppSnapshot, current, proposed):
     deployment = app.deployment_name or app.name
     hpa = app.hpa_name or app.name
@@ -509,18 +649,23 @@ def _make_candidate(snapshot, app, kind, proposed, reason, priority, namespace="
     proposed["estimated_replicas"] = _predicted_replicas(app, proposed)
     predicted_nodes = _estimated_nodes(snapshot, app.name, proposed)
     cpu_floor = snapshot.cluster.physical_cpu_floor
-    if predicted_nodes < cpu_floor:
-        return None
     result = snapshot.score()
-    predicted_score = rubric.score(
-        {name: value.performance for name, value in snapshot.apps.items()},
-        {name: value.availability for name, value in snapshot.apps.items()},
-        float(predicted_nodes), snapshot.cluster.baseline_nodes, snapshot.availability_gate)
+    predicted_score, slowdown = _predicted_score(snapshot, predicted_nodes)
+    supply_ratio = slowdown
+    risk = "cpu-oversubscribed" if supply_ratio > 1.0 else ""
+    if supply_ratio > MAX_EXTRAPOLATED_SLOWDOWN:
+        return None
     delta = predicted_score.total - result.total
     if kind in ("gate-recovery", "performance-band"):
         delta = max(delta, priority)
     apply, rollback = _commands(namespace, app, current, proposed)
     disruptive = proposed["request"] != current["request"]
+    if kind == "cost-reclaim" or (kind == "request-optimal" and proposed["request"] < current["request"]):
+        settle_seconds = 105
+    elif disruptive:
+        settle_seconds = 60
+    else:
+        settle_seconds = 25
     return Candidate(
         app=app.name, deployment_name=app.deployment_name or app.name,
         hpa_name=app.hpa_name or app.name, kind=kind, current=current, proposed=proposed, reason=reason,
@@ -529,7 +674,8 @@ def _make_candidate(snapshot, app, kind, proposed, reason, priority, namespace="
         predicted_nodes=predicted_nodes, observed_cpu_floor=cpu_floor,
         trigger_before=round(app.trigger_m, 2),
         trigger_after=round(proposed["request"] * proposed["target"] / 100.0, 2),
-        disruptive=disruptive, settle_seconds=60 if disruptive else (105 if kind == "cost-reclaim" else 25),
+        cpu_supply_ratio=supply_ratio, risk=risk,
+        disruptive=disruptive, settle_seconds=settle_seconds,
         confidence="high" if app.samples >= 100 and app.cpu_samples >= 10 else "low",
         apply_commands=apply, rollback_commands=rollback,
     )
@@ -568,20 +714,26 @@ def generate_candidates(snapshot: TuningSnapshot, rejected=None, namespace="app"
                                 f"공식 {nxt:g}% 밴드까지 {gap:.2f}%p; HPA를 일찍 확장", .5, namespace)
             if c and c.key() not in rejected:
                 candidates.append(c)
-        # request packing: 충분한 CPU 표본이 있을 때만, 기존 절대 trigger 보존.
-        if app.cpu_samples >= 10 and current["request"] > REQUEST_MIN_M and current["target"] < TARGET_MAX:
-            new_target = min(TARGET_MAX, max(current["target"] + 15, 75))
-            new_request = max(REQUEST_MIN_M, ceil_to(app.trigger_m * 100.0 / new_target))
-            if app.cpu_limit_m:
-                new_request = min(new_request, app.cpu_limit_m)
-            if new_request <= current["request"] - REQUEST_UNIT_M:
-                proposed = dict(current)
-                proposed.update({"request": new_request,
-                                 "target": int(clamp(round(app.trigger_m * 100.0 / new_request), TARGET_MIN, TARGET_MAX))})
-                c = _make_candidate(snapshot, app, "request-packing", proposed,
-                                    f"request 예약을 줄이고 절대 HPA trigger {app.trigger_m:.0f}m 보존",
-                                    0.0, namespace)
-                if c and c.key() not in rejected and c.predicted_nodes < math.ceil(snapshot.cluster.node_average):
+        # request/target 최적화: 실측 CPU와 replica를 보존하면서 물리 CPU 하한 이상인
+        # 모든 25m request × 1% target 조합을 탐색하고 공식 점수가 최대인 값을 선택한다.
+        optimal = _optimal_request_target(snapshot, app, current)
+        if optimal:
+            _, proposed, searched_nodes, searched_total, slowdown, protected_replicas = optimal
+            changed = proposed["request"] != current["request"] or proposed["target"] != current["target"]
+            current_probe = dict(current)
+            current_probe["estimated_replicas"] = _predicted_replicas(app, current_probe)
+            current_nodes = _estimated_nodes(snapshot, app.name, current_probe)
+            if changed and searched_nodes <= current_nodes:
+                warning = (f", CPU 공급 {slowdown:.2f}배 부족 예상(지연 증가 반영됨)"
+                           if slowdown > 1.0 else "")
+                reason = (f"실측 최적값: request {current['request']}→{proposed['request']}m, "
+                          f"target {current['target']}→{proposed['target']}%, "
+                          f"replica {protected_replicas}개 유지, "
+                          f"예약 기준 노드 {current_nodes}→{searched_nodes}대, "
+                          f"공식 예상 {searched_total:.1f}/36{warning}")
+                c = _make_candidate(snapshot, app, "request-optimal", proposed,
+                                    reason, 0.0, namespace)
+                if c and c.key() not in rejected:
                     candidates.append(c)
         if snapshot.cluster.node_average / snapshot.cluster.baseline_nodes > 1.0 \
                 and bottleneck not in ("db-rds", "non-scalable") and current["target"] < TARGET_MAX:
@@ -595,8 +747,9 @@ def generate_candidates(snapshot: TuningSnapshot, rejected=None, namespace="app"
                                     0.0, namespace)
                 if c and c.key() not in rejected and c.predicted_nodes <= math.ceil(snapshot.cluster.node_average):
                     candidates.append(c)
-    kind_rank = {"gate-recovery": 4, "performance-band": 3, "request-packing": 2, "cost-reclaim": 1}
-    candidates.sort(key=lambda c: (c.predicted_delta, kind_rank.get(c.kind, 0),
+    kind_rank = {"gate-recovery": 4, "performance-band": 3, "request-optimal": 2, "cost-reclaim": 1}
+    candidates.sort(key=lambda c: (c.predicted_delta, -max(c.cpu_supply_ratio, 1.0),
+                                   kind_rank.get(c.kind, 0),
                                    -int(c.disruptive), -c.predicted_nodes), reverse=True)
     return candidates
 
@@ -622,6 +775,6 @@ def plan(snapshot: TuningSnapshot, rejected=None, namespace="app"):
         "reason": "개선 후보 없음 — 현재 측정에서 안전하게 공식 점수를 올릴 수 없음" if not candidates else "",
         "score": score.to_dict(), "apps": apps,
         "cluster": asdict(snapshot.cluster),
-        "candidates": [c.to_dict() for c in candidates[:3]],
+        "candidates": [c.to_dict() for c in candidates[:5]],
         "best": candidates[0].to_dict() if candidates else None,
     }

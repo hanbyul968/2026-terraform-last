@@ -31,7 +31,7 @@
 | `autotune.ps1` | 완료된 부하 결과로 requests.cpu + HPA min/max/target 권장값만 계산(자동 변경 없음) |
 | `optimize.ps1` | **18분 트랜잭션 runner** — warmup/baseline/최대 3후보 실측, 채택 또는 정확한 snapshot 롤백 (`-Apply` 없으면 제안만) |
 | `rubric.py` | 공식 rate band·비용 ratio·성능 게이트의 단일 구현 |
-| `tuning_engine.py` | 라이브 snapshot, 병목 분류, request/HPA 결합, CPU 물리 하한, 후보·명령 생성 |
+| `tuning_engine.py` | 라이브 snapshot, 병목 분류, request/HPA 결합, 예약 기준 노드·CPU 경합 예측, 후보·명령 생성 |
 | `optimize.py` | 공통 엔진 후보를 PowerShell runner에 JSON으로 전달하는 adapter |
 | `score.py` | `rubric.py` 기반 hey CSV 호환 CLI (`report`/`score`) |
 | `advise.py` | 공통 엔진의 read-only 설명 adapter — 공식 점수, 병목, 적용/롤백 명령 출력 |
@@ -206,7 +206,7 @@ cd ..\tools
 Dashboard는 Deployment/HPA와 `app` label에서 앱을 발견한다. SLO는 기본 `config.ps1` 값 외에
 Deployment `*/slo-ms` annotation, 컨테이너 `SLO_MS`, `APP_SLOS_MS`, `--slos-ms`로 덮어쓸 수 있다.
 로그 지표도 공식식과 동일하게 availability=`2xx && ≤5s / 전체`, performance=`2xx && ≤SLO / 전체`다.
-**계산** 탭은 공식 점수·게이트·CPU 노드 하한·후보를, **튜닝적용** 탭은 각 후보의 라이브 적용과
+**계산** 탭은 공식 점수·게이트·실측 CPU 수요·예약 기준 노드·후보를, **튜닝적용** 탭은 각 후보의 라이브 적용과
 정확한 rollback 명령을 보여준다. 대시보드는 자동 적용하지 않는다.
 
 ---
@@ -220,19 +220,22 @@ Deployment/HPA 설정을 읽어서 앱별 `requests.cpu`, `min`, `max`, `target%
 핵심 공식:
 
 ```text
-현재 파드당 목표 CPU = requests.cpu × target / 100
-필요 replica ≈ ceil(활성창 총 CPU p90 / 권장 파드당 목표 CPU)
+파드당 HPA 발동점 = requests.cpu × target / 100
+예상 replica      = clamp(ceil(활성창 총 CPU p90 / 발동점), min, max)
+예상 노드         = ceil((시스템 예약 + 앱별 request × 예상 replica) / 노드 allocatable)
+CPU 비중          = (총 CPU p90 ÷ 초당 요청수) ÷ 평균 지연
+예상 지연         = 실측 지연 × (1 + (CPU 공급부족배수 − 1) × CPU 비중)
 ```
 
-request는 CPU 제한이 아니라 예약량이므로 성능이 낮다는 이유만으로 올리지 않는다. 활성 부하창에서
-노드 CPU가 90% 이상이고 파드 CPU p90이 현재 request보다 10% 이상 높을 때만, 한 회차 최대 25%씩
-올린다. request가 바뀌면 기존 HPA 민감도를 유지하도록 target을 역산한 뒤, 30% 성능 게이트 또는
-가용성 미달일 때만 파드당 목표 CPU를 5~10% 추가로 낮춘다.
+request는 CPU 제한이 아니라 **예약량**이다. 그래서 request를 올려도 파드가 빨라지지 않고, 대신
+노드 예약이 늘어 비용만 오른다. 반대로 내리면 노드가 줄어 CPU 공급이 줄고 지연이 늘 수 있다.
+엔진은 그 두 방향을 위 식으로 같은 공식 점수에 넣어 비교하며, 성능이 낮다는 이유만으로 request를
+올리지 않는다. CPU 비중이 낮은 앱(DB 대기형·캐시 히트형)은 노드가 줄어도 지연이 거의 안 늘기
+때문에 더 과감히 내릴 수 있다고 판단한다.
 
-**양방향(비용 회수).** 노드가 기준을 초과하고(ratio>1) 성능이 최상위 밴드(≥90%)로 안전하며 파드가
-request 대비 저활용(<60%)이면 target을 한 스텝(+10%p, 상한 85) 올려 파드/노드를 줄이도록 권고한다.
-기존에는 성능 보호로 target을 내리기만 해 노드가 남아돌아도 비용을 못 줄였다. 단, "어디까지 올릴 수
-있나"의 정밀 탐색은 단일 회차 측정만으로는 알 수 없으므로 `optimize.ps1`(닫힌 루프)이 담당한다.
+**양방향.** 비용 여유가 있으면 target을 올려 파드·노드를 줄이고, 게이트가 위험하면 target을 내려
+빨리 확장한다. "어디까지 갈 수 있나"는 한 회차 측정으로 확정할 수 없으므로 `optimize.ps1`이
+120초 실측으로 채택·롤백을 결정한다.
 
 `podcpu.csv`와 `nodecpu.csv`는 반드시 `loadwindows.csv`의 start/end 안에 있는 표본만 사용한다.
 이 필터가 UTC+9가 중복 적용된 표본과 부하 종료 후 유휴 표본을 제거한다. 백분위는 표본 수가 적어도
@@ -274,7 +277,7 @@ CPU averageUtilization
 ```
 
 이 스크립트는 legacy 붙여넣기 형식과의 호환을 위해 남아 있는 read-only 계산기다. 자동 변경은 하지
-않으며, 공식 점수 기준 후보·CPU 물리 하한·정확한 롤백은 `advise.py` 또는 `optimize.ps1`을 사용한다.
+않으며, 공식 점수 기준 후보·예약 기준 노드 예측·정확한 롤백은 `advise.py` 또는 `optimize.ps1`을 사용한다.
 출력을 적용하려면 Dashboard **튜닝적용** 탭에서 앱별 명령을 검토하고 라이브에 적용한다.
 
 계산 원칙:
@@ -282,11 +285,11 @@ CPU averageUtilization
 1. `loadwindows.csv`의 실제 활성 부하창에 해당하는 `podcpu.csv`/`nodecpu.csv` 표본만 사용한다.
    UTC+9 오염 표본과 부하 종료 후 유휴 표본은 버린다.
 2. HPA의 실질 기준은 `requests.cpu × target%`인 파드당 목표 CPU다.
-3. 노드 CPU가 90% 이상이고 파드 CPU p90이 request를 10% 이상 넘을 때만 request를 올린다.
-   한 회차 조정폭은 최대 25%다.
-4. request가 바뀌면 기존 HPA 민감도를 보존하도록 target을 역산한다. 성능 30% 게이트나
-   가용성이 미달일 때만 파드당 목표 CPU를 추가로 5~10% 낮춘다.
-5. 활성창 총 CPU p90을 권장 파드당 목표 CPU로 나눠 필요 replica를 계산한다. 라이브 `minReplicas`를
+3. request는 예약량이라 파드 속도를 바꾸지 않는다. 노드 수는 예약량으로 정해지므로
+   request는 비용에 직결된다. 성능이 낮다는 이유만으로 올리지 않는다.
+4. request/target을 바꾸면 발동점(`request × target`)이 바뀌어 예상 replica가 달라진다.
+   실측 p90 파드 수보다 적어지는 조합은 쓰지 않는다.
+5. 활성창 총 CPU p90을 발동점으로 나눠 필요 replica를 계산한다. 라이브 `minReplicas`를
    임의로 2로 강제하지 않으며, startup/가용성 위험과 현재 min/max를 보존해 후보를 만든다.
 6. 세 앱 중 하나라도 성능 30% 미만이면 비용 12점이 전부 0이므로 30% 게이트 복구가 우선이다.
 
@@ -302,10 +305,22 @@ CPU averageUtilization
 닫힌 루프로 푼다.
 
 - 목적함수 = `rubric.py`의 **공식 가용성+성능+비용 소계(36점)**. 근사식이 아니다.
-- 후보 = 게이트 복구 → 다음 성능 band → request packing → 비용 회수. 앱 이름·SLO·트래픽·노드
+- 후보 = 게이트 복구 → 다음 성능 band → **실측 request/target 최적값** → 비용 회수. 앱 이름·SLO·트래픽·노드
   allocatable CPU를 snapshot마다 다시 읽고, 최대 3개만 실측한다.
-- request와 HPA target은 `request × target / 100` 절대 trigger로 결합한다. request packing은 25m
-  단위로 내리되 trigger를 보존하고, 예측 노드 수가 실측 cluster CPU 물리 하한보다 작으면 폐기한다.
+- request와 HPA target은 실측으로 함께 계산한다. **request는 Pod 속도 상한이 아니다**(stress는
+  CPU 바운드이고 limit이 따로 있다). 노드 수는 Karpenter가 보는 **예약량**으로 정해진다:
+  `nodes = ceil((시스템 예약 + 앱별 request × 파드수) / 노드 allocatable)`.
+- 노드가 줄면 CPU 공급이 줄어 지연이 늘고 성능/가용성 점수가 떨어진다. 이 저하를 **실측 응답시간
+  분포를 공급 부족 배수만큼 늘려** 다시 채점해 비용 이득과 비교한다. 즉 비용만 보고 request를 깎지
+  않고, 노드를 채우려고 request를 부풀리지도 않는다.
+- **앱이 바뀌어도 가정하지 않는다.** 지연 중 CPU 처리 비중을
+  `요청당 CPU 시간(총 CPU p90 ÷ 초당 요청수) ÷ 평균 지연`으로 매 측정에서 다시 구한다.
+  CPU 바운드 앱은 노드 감소에 민감하게, DB 대기형·고정 지연형 앱은 둔감하게 평가된다.
+  실측값 예(2026-08-20): `stress 0.65`, `user 0.13`, `product 0.02`.
+  CPU 표본이 없으면(metrics-server 미설치 등) 보수적으로 1.0으로 보고 request 탐색을 건너뛴다.
+- 선형 지연 모델을 신뢰할 수 있는 범위는 제한적이므로 한 회차 외삽은 공급 부족 1.5배까지만
+  허용한다. 더 내려가야 하면 그 값을 120초 실측한 뒤 다음 회차가 이어서 판단한다.
+- 예측이 가용성 99% 또는 성능 30% 게이트를 깨는 조합은 후보에서 제외한다. 최종 채택은 항상 실측이다.
 - Pod startup/rollout, Karpenter drain settle, HPA max, node CPU, DB/RDS·비확장성 병목을 분류해 후보와
   대기시간을 고른다. `availability ≥99%` 또는 모든 앱 `performance ≥30%`가 깨지면 절대 채택하지 않는다.
 - 적용은 라이브 HPA patch + 필요할 때 Deployment request 변경이다. 총점이 오르면 채택하고, 아니면

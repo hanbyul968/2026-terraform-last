@@ -81,7 +81,7 @@ pkill -f dashboard.py ; pkill cloudflared          # 정리 (Ctrl+C 후에도 �
 | 탭 | 내용 |
 |---|---|
 | 개요 | allow/block 합계, 2xx·4xx·5xx, Pod ready/총, 노드 수, 앱별 요약 카드, 진단 |
-| user / product / stress | SLO 충족률·성공률·p50/p95/p99, 2xx/4xx/5xx, 경로별·에러경로, 최근 요청(2xx/4xx/5xx 분리) |
+| 앱별 탭 (라이브 Deployment/HPA에서 자동 발견) | 성능%(2xx & ≤SLO ÷ 전체)·가용성%(2xx & ≤5s ÷ 전체)·p50/p95/p99, 2xx/4xx/5xx, 경로별·에러경로, 최근 요청(2xx/4xx/5xx 분리) |
 | Pod | Pod 별 상태/재시작/CPU·MEM/노드/오류사유(CrashLoop·OOM 등) |
 | 노드 | 노드 수·타입(karpenter/base)·Ready·CPU/MEM, HPA 현황 |
 | WAF | 차단(403) 룰/IP/URI/메서드 + 최근 차단 (allow 와 분리) |
@@ -97,20 +97,25 @@ request 를 올려도 파드가 빨라지지 않는다. 올리면 오히려 이�
 - 노드당 파드 수가 줄어 **노드가 늘고 비용이 오른다**
 - HPA 사용률 = 실사용 ÷ request 가 작아져 **스케일업이 늦어진다** (성능이 더 나빠질 수 있다)
 
-그래서 "느리다 → request 올려" 는 틀린 처방이다. 이 탭은 **실사용(top) · 노드 CPU · HPA 상한**을
-보고 원인을 먼저 가른다. 권장 request 는 항상 **실사용 피크 × 1.3** 이다(임의 배수 아님).
+그래서 "느리다 → request 올려" 는 틀린 처방이다. 계산 탭은 `tuning/tuning_engine.py`(CLI와 동일한
+공통 엔진)의 실측 계산을 그대로 보여준다.
+
+```text
+예상 노드 = ceil((시스템 예약 + 앱별 request × 예상 replica) / 노드 allocatable)
+CPU 비중  = (총 CPU p90 ÷ 초당 요청수) ÷ 평균 지연        ← 앱마다 매번 측정
+예상 지연 = 실측 지연 × (1 + (CPU 공급부족배수 − 1) × CPU 비중)
+```
 
 | 상황 | 판정 | request |
 |---|---|---|
-| 느린데 실사용이 request 의 절반 미만 + 노드 CPU 낮음 | CPU 병목 아님 | **올리지 않음.** DB·캐시·커넥션풀을 본다 |
-| 느리고 노드 CPU ≥ 80% | 노드 CPU 포화 | 올림 (노드당 파드↓·cpu.shares↑) |
-| 느리고 파드가 max_replicas 에 붙음 | 파드 상한 도달 | 유지, `max_replicas` 올림 |
-| 느리고 HPA 현재 사용률 < 목표 | 스케일 지연 | 유지, `util` 낮추고 `min` 올림 |
-| 느리고 실사용이 request 에 근접 | 파드 CPU 포화 | 실사용 피크×1.3 으로 맞춤 |
-| 성능·가용성 통과 + request ≫ 실사용 | 과투자 | 내림 (비용↓) |
-| 가용성 < 99% | 파드 부족/롤아웃 | **유지.** `min`·`max` 조정 |
+| 가용성 < 99% 또는 성능 < 30% | 안전 게이트 위반 | **유지.** `target`↓·`min`/`max` 조정 우선 |
+| 파드가 `max_replicas` 에 붙음 | 파드 상한 도달 | 유지, `max_replicas` 올림 |
+| 실사용이 request 의 절반 미만 + 노드 CPU 낮음 | CPU 병목 아님 | 올리지 않음. DB·캐시·커넥션풀을 본다 |
+| 성능·가용성 통과 + 예약량이 실수요보다 큼 | 과투자 | 내림 (노드↓ = 비용↓) |
+| 내렸을 때 CPU 공급부족이 1.5배를 넘음 | 외삽 불가 구간 | 그만큼은 제안하지 않음. 한 단계씩 실측 |
 
-앱 목록·SLO·파드는 전부 라이브에서 읽으므로 **대회날 앱이 바뀌어도(이름·개수·SLO 변경) 그대로 쓴다.**
+예측은 항상 120초 실측으로 확정한다. 앱 목록·SLO·Deployment/HPA 이름·CPU 비중을 매 측정에서 다시
+읽으므로 **대회날 앱이 바뀌어도(이름·개수·SLO·워크로드 성격 변경) 그대로 쓴다.**
 
 ⚠ 부하 도는 중에 `requests` 를 바꾸면 **롤아웃이 발생해 504** 가 난다. 측정 중에는 HPA 만 만진다.
 
@@ -120,6 +125,8 @@ request 를 올려도 파드가 빨라지지 않는다. 올리면 오히려 이�
 
 ```
 --namespace app                 대상 네임스페이스 (기본 app)
+--slos-ms user=200,stress=1000  앱별 성능 SLO(ms). 미지정 시 Deployment의 `*/slo-ms` annotation →
+                                컨테이너 `SLO_MS` env → `APP_SLOS_MS` env → 기본 200ms 순으로 결정
 --since 15m                     조회 기간 (5m/15m/30m/1h) — monitor.py 만
 --once / --watch <초>           터미널 1회 / 주기 갱신 — monitor.py 만
 --port 8080                     웹서버 포트

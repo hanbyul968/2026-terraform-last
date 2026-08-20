@@ -84,7 +84,7 @@ py -3 dashboard.py --namespace app --slos-ms checkout=200,search=500,worker=1000
 ```
 Deployment/HPA 이름과 `app` label은 라이브에서 발견한다. SLO는 Deployment의 `*/slo-ms` annotation,
 컨테이너 `SLO_MS`, `APP_SLOS_MS` 환경변수, `--slos-ms` 순으로 반영할 수 있다. **계산** 탭에서 공식
-36점 소계·CPU 물리 하한·후보를 확인하고, **튜닝적용** 탭의 적용/정확한 롤백 명령을 사용한다.
+36점 소계·실측 CPU 수요·예약 기준 노드 예측·후보를 확인하고, **튜닝적용** 탭의 적용/정확한 롤백 명령을 사용한다.
 CloudShell이면 `python3 monitor.py --watch 10` 또는 `bash tunnel.sh`.
 
 **새 공격 차단**

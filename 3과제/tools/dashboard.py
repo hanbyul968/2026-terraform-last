@@ -22,6 +22,20 @@ import tuning_engine
 
 app = Flask(__name__)
 _TUNE_CPU_HISTORY = defaultdict(lambda: deque(maxlen=600))
+# 시스템(DaemonSet 등) CPU 예약은 자주 바뀌지 않으므로 폴링마다 kubectl을 부르지 않는다.
+_SYSTEM_RESERVED = {"value": 0, "at": 0.0}
+
+
+def _system_reserved_cached(ttl=120.0):
+    import time as _time
+    now = _time.time()
+    if now - _SYSTEM_RESERVED["at"] > ttl:
+        try:
+            _SYSTEM_RESERVED["value"] = tuning_engine._system_reserved_m(monitor.CFG["ns"])
+        except Exception:
+            pass
+        _SYSTEM_RESERVED["at"] = now
+    return _SYSTEM_RESERVED["value"]
 
 PAGE = r"""<!doctype html><html lang="ko"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>3과제 모니터링</title>
@@ -225,13 +239,13 @@ function vEnginePlan(t){
  var head='<div class="grid g4" style="margin-bottom:15px">'
   +'<div class=card><div class=lbl>공식 소계</div><div class="kpi sm">'+(s.total==null?'-':s.total+'/36')+'</div></div>'
   +'<div class=card><div class=lbl>비용 ratio / 점수</div><div class="kpi sm">'+(s.cost_ratio==null?'-':(+s.cost_ratio).toFixed(2))+'</div><div class=mut>'+(s.cost_points==null?'-':s.cost_points+'/12')+'</div></div>'
-  +'<div class=card><div class=lbl>실CPU 노드 하한</div><div class="kpi sm">'+(cl.cluster_cpu_p95_m&&cl.node_alloc_m?Math.ceil(cl.cluster_cpu_p95_m/cl.node_alloc_m):'-')+'</div><div class=mut>p95 '+(cl.cluster_cpu_p95_m||0)+'m / '+(cl.node_alloc_m||0)+'m</div></div>'
+  +'<div class=card><div class=lbl>실측 CPU 수요 / 노드공급</div><div class="kpi sm">'+(cl.cluster_cpu_p95_m||0)+'m</div><div class=mut>노드 allocatable '+(cl.node_alloc_m||0)+'m · 시스템 예약 '+(cl.system_reserved_m||0)+'m</div></div>'
   +'<div class=card><div class=lbl>안전 게이트</div><div class="kpi sm '+(s.avail_gate_pass&&s.perf_gate_pass?'gd':'bd')+'">'+(s.avail_gate_pass&&s.perf_gate_pass?'PASS':'FAIL')+'</div><div class=mut>avail≥99 · perf≥30</div></div></div>';
  var rows=(t.apps||[]).map(function(a){return '<div class=row><span><b>'+esc(a.app)+'</b> <span class=mut>'+esc(a.bottleneck)+'</span></span><span>perf '+a.performance.toFixed(1)+'% · avail '+a.availability.toFixed(1)+'% · request '+a.request+'m · target '+a.target+'% · trigger '+a.trigger+'m · CPU p90 '+a.cpu_p90+'m</span></div>'}).join('');
  var cs=(t.candidates||[]).map(function(c,i){var p=c.proposed,x=c.current;return '<div class=card><div class=lbl>#'+(i+1)+' '+esc(c.kind)+' · '+esc(c.app)+' <span class="'+(c.disruptive?'wn':'gd')+'">'+(c.disruptive?'rollout':'HPA-only')+'</span></div>'
   +'<div class=row><span>현재 → 후보</span><span>request '+x.request+'→<b>'+p.request+'m</b> · target '+x.target+'→<b>'+p.target+'%</b> · min '+x.min+'→'+p.min+' · max '+x.max+'→'+p.max+'</span></div>'
   +'<div class=row><span>HPA trigger</span><span>'+c.trigger_before+'m → <b>'+c.trigger_after+'m</b></span></div>'
-  +'<div class=row><span>노드 안전성</span><span>예상 '+c.predicted_nodes+'대 · 실CPU 하한 '+c.observed_cpu_floor+'대 · confidence '+esc(c.confidence)+'</span></div>'
+  +'<div class=row><span>예약 기준 노드 · CPU 경합</span><span>예상 '+c.predicted_nodes+'대 · 공급부족 '+(c.cpu_supply_ratio||0).toFixed(2)+'배'+(c.risk?' <span class=wn>'+esc(c.risk)+'</span>':'')+' · confidence '+esc(c.confidence)+'</span></div>'
   +'<div class=mut style="font-size:12px;margin-top:7px">근거: '+esc(c.reason)+'</div>'
   +tuneCmdBlock('라이브 적용',c.apply_commands)+tuneCmdBlock('정확한 롤백',c.rollback_commands)+'</div>'}).join('');
  if(!cs)cs='<div class="tip good"><h3>안전하게 공식 점수를 올릴 후보 없음</h3><div class=why>'+esc(t.reason||'현재값 유지')+'</div></div>';
@@ -664,7 +678,7 @@ def index():
     return Response(PAGE, mimetype="text/html")
 
 
-def _add_tuning_plan(data):
+def _add_tuning_plan(data, since="15m"):
     """대시보드 폴링값을 공통 엔진 snapshot으로 바꿔 공식 점수/후보를 붙인다."""
     data["namespace"] = monitor.CFG["ns"]
     for pod in data.get("pods", []):
@@ -675,6 +689,8 @@ def _add_tuning_plan(data):
             data, baseline_nodes=float(os.environ.get("TUNE_BASELINE_NODES", "2")),
             cpu_history={name: list(values) for name, values in _TUNE_CPU_HISTORY.items()},
             availability_gate=99.0,
+            window_seconds=float(monitor._mins(since)) * 60.0,
+            system_reserved_m=(0 if DEMO else _system_reserved_cached()),
         )
         data["tuning"] = tuning_engine.plan(snapshot, namespace=monitor.CFG["ns"])
     except Exception as exc:
@@ -688,7 +704,7 @@ def api_data():
     if DEMO:
         return jsonify(_add_tuning_plan(demo_data()))
     since = request.args.get("since", "15m")
-    return jsonify(_add_tuning_plan(monitor.build_data(since, monitor._mins(since))))
+    return jsonify(_add_tuning_plan(monitor.build_data(since, monitor._mins(since)), since))
 
 
 def _tf_endpoint():

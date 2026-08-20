@@ -51,7 +51,7 @@ class SharedEngineTests(unittest.TestCase):
             name=name, slo_seconds=.2, samples=1000, availability=100,
             performance=99, request_m=750, target=55, min_replicas=2,
             max_replicas=8, replicas=6, per_pod_p50=400, per_pod_p90=700,
-            per_pod_p95=900, total_cpu_p90=1800, total_cpu_p95=2200,
+            per_pod_p95=900, total_cpu_p90=2400, total_cpu_p95=2700,
             pods_p50=5, pods_p90=6, pods_max=6, cpu_samples=120,
         )
         values.update(kw)
@@ -65,17 +65,27 @@ class SharedEngineTests(unittest.TestCase):
         app = app or self.app()
         return engine.TuningSnapshot({app.name: app}, engine.ClusterSnapshot(**values))
 
-    def test_request_packing_preserves_absolute_trigger(self):
-        candidates = engine.generate_candidates(self.snapshot())
-        packing = next(c for c in candidates if c.kind == "request-packing")
-        self.assertLess(packing.proposed["request"], 750)
-        self.assertLessEqual(abs(packing.trigger_before - packing.trigger_after), 12.5)
-        self.assertGreaterEqual(packing.predicted_nodes, packing.observed_cpu_floor)
+    def latencies(self, count=600, low=.10, high=2.80):
+        step = (high - low) / (count - 1)
+        return tuple(round(low + step * i, 4) for i in range(count))
 
-    def test_capacity_floor_blocks_unsafe_packing(self):
-        snapshot = self.snapshot(cluster_cpu_p95_m=7900, node_alloc_m=2000)
-        candidates = engine.generate_candidates(snapshot)
-        self.assertFalse(any(c.kind == "request-packing" for c in candidates))
+    def test_request_optimum_lowers_reservation_and_never_inflates(self):
+        app = self.app(latencies=self.latencies(low=.02, high=.30))
+        candidates = engine.generate_candidates(self.snapshot(app))
+        optimal = next(c for c in candidates if c.kind == "request-optimal")
+        self.assertLess(optimal.proposed["request"], 750)
+        self.assertGreaterEqual(optimal.proposed["estimated_replicas"], 6)
+        self.assertLess(optimal.predicted_nodes, 4)
+        for candidate in candidates:
+            self.assertLessEqual(candidate.proposed["request"], 750)
+            self.assertLessEqual(candidate.cpu_supply_ratio, engine.MAX_EXTRAPOLATED_SLOWDOWN)
+
+    def test_untrusted_extrapolation_is_not_proposed(self):
+        app = self.app(latencies=self.latencies(low=.02, high=.30))
+        snapshot = self.snapshot(app, cluster_cpu_p95_m=7900, node_alloc_m=2000)
+        for candidate in engine.generate_candidates(snapshot):
+            self.assertLessEqual(candidate.cpu_supply_ratio, engine.MAX_EXTRAPOLATED_SLOWDOWN)
+            self.assertGreaterEqual(candidate.predicted_nodes, 3)
 
     def test_gate_recovery_is_first_and_does_not_raise_request(self):
         app = self.app(performance=29, availability=100, request_m=300,
@@ -86,6 +96,71 @@ class SharedEngineTests(unittest.TestCase):
         self.assertLess(candidate.proposed["target"], 70)
         self.assertGreater(candidate.proposed["max"], 8)
 
+    def test_cpu_bound_fraction_is_measured_not_assumed(self):
+        """앱이 바뀌어도 CPU 민감도를 매 측정에서 다시 구한다."""
+        latencies = tuple(round(.30 + .60 * i / 99, 4) for i in range(100))
+        # CPU 바운드: 요청당 CPU 0.54s / 평균 지연 0.60s
+        cpu_bound = self.app(name="burn", slo_seconds=1.0, samples=100,
+                             window_seconds=100.0, total_cpu_p90=540, latencies=latencies)
+        self.assertAlmostEqual(cpu_bound.cpu_bound_fraction, .9, places=2)
+        # DB 대기형: 요청당 CPU 0.06s / 평균 지연 0.60s
+        db_bound = self.app(name="lookup", slo_seconds=1.0, samples=100,
+                            window_seconds=100.0, total_cpu_p90=60, latencies=latencies)
+        self.assertAlmostEqual(db_bound.cpu_bound_fraction, .1, places=2)
+        # 같은 CPU 공급 부족(2배)에서 CPU 바운드 앱만 성능이 크게 깎인다.
+        self.assertLess(cpu_bound.performance_at(2.0)[0], db_bound.performance_at(2.0)[0] - 20)
+        self.assertEqual(db_bound.performance_at(1.0), cpu_bound.performance_at(1.0))
+        # 측정이 없으면 보수적으로 CPU 바운드로 간주한다.
+        self.assertEqual(self.app(window_seconds=0.0).cpu_bound_fraction, 1.0)
+
+    def test_latest_stress_measurement_lowers_request_to_300m(self):
+        """2026-08-20 17:56 실측 재현.
+
+        stress는 CPU 바운드(요청당 약 0.4 CPU-s, limit 2 CPU)이므로 request를 내려도
+        Pod가 느려지지 않는다. 노드는 예약량으로 정해지므로 750m 예약은 과투자다.
+        """
+        # 실측 히스토그램(0.1s 버킷, 2288개 2xx)을 그대로 재구성한다.
+        buckets = [(.15, 73), (.25, 243), (.35, 391), (.45, 385), (.55, 271),
+                   (.65, 257), (.75, 186), (.85, 137), (.95, 95), (1.05, 61),
+                   (1.15, 34), (1.25, 28)]
+        measured = []
+        for value, count in buckets:
+            measured.extend([value] * count)
+        measured.extend(round(1.35 + i * .01, 3) for i in range(127))
+        measured = tuple(measured)
+        stress = self.app(
+            name="stress", slo_seconds=1.0, performance=90.026, availability=99.652,
+            request_m=750, cpu_limit_m=2000, target=55, min_replicas=2,
+            max_replicas=8, replicas=2, per_pod_p90=992, per_pod_p95=1003,
+            total_cpu_p90=6940, total_cpu_p95=7000, pods_p90=8, pods_max=8,
+            cpu_samples=61, latencies=measured, samples=2296, window_seconds=120.0,
+        )
+        user = self.app(
+            name="user", performance=77.941, request_m=100, target=33,
+            min_replicas=2, max_replicas=25, replicas=2, total_cpu_p90=3863,
+            pods_p90=25, pods_max=25, latencies=tuple(round(.02 + .3 * i / 299, 4) for i in range(300)),
+        )
+        product = self.app(
+            name="product", performance=99.454, request_m=50, target=60,
+            min_replicas=2, max_replicas=20, replicas=2, total_cpu_p90=72,
+            pods_p90=2, pods_max=2, latencies=tuple([.01] * 100),
+        )
+        snapshot = engine.TuningSnapshot(
+            {"product": product, "stress": stress, "user": user},
+            engine.ClusterSnapshot(baseline_nodes=2, node_average=7.222,
+                                   node_count=8, node_alloc_m=1930,
+                                   cluster_cpu_p95_m=10695, system_reserved_m=900),
+        )
+        optimal = next(c for c in engine.generate_candidates(snapshot)
+                       if c.kind == "request-optimal" and c.app == "stress")
+        self.assertEqual(optimal.proposed["request"], 300)
+        self.assertEqual(optimal.proposed["target"], 55)
+        self.assertEqual(optimal.proposed["estimated_replicas"], 8)
+        self.assertEqual(optimal.predicted_nodes, 4)
+        self.assertLessEqual(optimal.cpu_supply_ratio, engine.MAX_EXTRAPOLATED_SLOWDOWN)
+        self.assertGreater(optimal.predicted_delta, 0)
+        self.assertEqual(optimal.settle_seconds, 105)
+
     def test_dynamic_app_names_and_no_hardcoded_min(self):
         app = self.app(name="checkout-v2", min_replicas=4, max_replicas=9,
                        replicas=4, pods_max=4)
@@ -95,11 +170,12 @@ class SharedEngineTests(unittest.TestCase):
             self.assertEqual(candidate["proposed"]["min"], 4)
 
     def test_commands_include_exact_rollback(self):
-        packing = next(c for c in engine.generate_candidates(self.snapshot())
-                       if c.kind == "request-packing")
-        self.assertTrue(any("requests=cpu=750m" in command for command in packing.rollback_commands))
-        self.assertTrue(any("patch hpa worker" in command for command in packing.rollback_commands))
-        self.assertTrue(packing.disruptive)
+        app = self.app(latencies=self.latencies(low=.02, high=.30))
+        optimal = next(c for c in engine.generate_candidates(self.snapshot(app))
+                       if c.kind == "request-optimal")
+        self.assertTrue(any("requests=cpu=750m" in command for command in optimal.rollback_commands))
+        self.assertTrue(any("patch hpa worker" in command for command in optimal.rollback_commands))
+        self.assertTrue(optimal.disruptive)
 
     def test_dashboard_adapter_uses_arbitrary_apps(self):
         data = {
@@ -117,10 +193,11 @@ class SharedEngineTests(unittest.TestCase):
 
     def test_commands_use_exact_live_resource_names(self):
         app = self.app(name="checkout", deployment_name="checkout-api",
-                       hpa_name="checkout-scaler")
-        packing = next(c for c in engine.generate_candidates(self.snapshot(app))
-                       if c.kind == "request-packing")
-        all_commands = packing.apply_commands + packing.rollback_commands
+                       hpa_name="checkout-scaler",
+                       latencies=self.latencies(low=.02, high=.30))
+        optimal = next(c for c in engine.generate_candidates(self.snapshot(app))
+                       if c.kind == "request-optimal")
+        all_commands = optimal.apply_commands + optimal.rollback_commands
         self.assertTrue(any("patch hpa checkout-scaler" in command for command in all_commands))
         self.assertTrue(any("deploy/checkout-api" in command for command in all_commands))
 

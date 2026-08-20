@@ -74,8 +74,17 @@ function Write-Rejected { param($Rows,[string]$Path)
 function Save-Snapshot { param([string]$From,[string]$To)
   # 거절된 회차의 측정으로 다음 후보를 계획하면 엉뚱한 값이 나온다(실측 사고).
   # 채택된 상태의 결과만 따로 보관해 계획 입력으로 쓴다.
-  if(Test-Path $To){ Remove-Item -Recurse -Force $To }
-  Copy-Item -Recurse -Force $From $To
+  # loadtest가 nodecpu.csv 등을 백그라운드로 아직 쓰고 있을 수 있어, 잠긴 파일은
+  # 재시도하고 그래도 안 되면 건너뛴다(계획에 필요한 앱 csv는 이미 닫혀 있다).
+  if(-not (Test-Path $To)){ New-Item -ItemType Directory -Path $To | Out-Null }
+  $log = robocopy $From $To /E /R:3 /W:1 /NFL /NDL /NJH /NJS /NP 2>&1
+  if($LASTEXITCODE -ge 8){
+    # robocopy 실패 시 파일 단위로 최대한 복사(잠긴 것만 스킵)
+    Get-ChildItem $From -File | ForEach-Object {
+      try { Copy-Item $_.FullName (Join-Path $To $_.Name) -Force -ErrorAction Stop } catch {}
+    }
+  }
+  $global:LASTEXITCODE = 0
 }
 
 if(-not $Url){$Url=$ENDPOINT}

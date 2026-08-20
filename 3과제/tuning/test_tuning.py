@@ -468,6 +468,7 @@ class PowerShellRunnerContractTests(unittest.TestCase):
         self.assertIn("Save-Snapshot $out $bestOut", self.script)
         self.assertIn("$step=Get-NextStep $bestOut $rejFile", self.script)
         self.assertIn("nodes=[int]$candidate.predicted_nodes", self.script)
+        self.assertIn("robocopy", self.script)  # 잠긴 CSV에 견디는 복사
         self.assertNotIn("CPU하한", self.script)
 
     def test_does_not_spend_every_trial_on_one_app(self):

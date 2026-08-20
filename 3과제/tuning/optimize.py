@@ -95,6 +95,8 @@ def main():
                         help="목표 부하 배수. 1.0=측정 부하 기준, 0.5=측정 부하의 절반 기준 사이징")
     parser.add_argument("--target-rps", default="",
                         help="앱별 목표 초당 요청수: user=100,stress=10 (측정 부하와 무관하게 고정)")
+    parser.add_argument("--hpa-only", action="store_true",
+                        help="request 변경(rollout) 후보 제외. 부하 중 라이브 루프의 기본값")
     parser.add_argument("--rejected", default="")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
@@ -113,7 +115,7 @@ def main():
     snapshot.target_rps = {kv.split("=")[0]: float(kv.split("=")[1])
                            for kv in args.target_rps.split(",") if "=" in kv}
     rejected, rejected_nodes = _rejected_keys(args.rejected)
-    data = engine.plan(snapshot, rejected, args.ns, rejected_nodes)
+    data = engine.plan(snapshot, rejected, args.ns, rejected_nodes, args.hpa_only)
     best = data.get("best")
     knobs = {row["app"]: {"request": row["request"], "target": row["target"],
                            "min": row["min"], "max": row["max"],

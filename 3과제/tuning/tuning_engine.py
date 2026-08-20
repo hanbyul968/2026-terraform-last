@@ -1037,7 +1037,7 @@ def _make_candidate(snapshot, app, kind, proposed, reason, priority, namespace="
 
 
 def generate_candidates(snapshot: TuningSnapshot, rejected=None, namespace="app",
-                        rejected_nodes=None):
+                        rejected_nodes=None, hpa_only=False):
     rejected = set(rejected or ())
     # 실측으로 거절된 노드 수는 다시 시도하지 않는다(같은 회차 안에서 학습).
     min_nodes_allowed = (max(rejected_nodes) + 1) if rejected_nodes else 1
@@ -1182,6 +1182,17 @@ def generate_candidates(snapshot: TuningSnapshot, rejected=None, namespace="app"
             f"앱 {len(merged)}개 동시 적용(회차 절약): {detail}", 0.0, namespace, knobs=merged)
         if bundle and bundle.key() not in rejected:
             candidates.insert(0, bundle)
+    if hpa_only:
+        # 부하 중에는 request를 바꾸지 않는다. request 변경은 rollout을 일으켜(적용+롤백 각각)
+        # 회차 시간을 몇 분씩 잡아먹고, rollout 자체가 가용성을 깎는다. HPA(target/min/max)만
+        # 만지는 후보는 즉시 적용/롤백된다. request 사이징은 부하 전 1회로 끝낸다.
+        kept = []
+        for c in candidates:
+            if any(v["request"] != _current_dict(snapshot.apps[n])["request"]
+                   for n, v in c.knobs.items()):
+                continue
+            kept.append(c)
+        candidates = kept
     candidates.sort(key=lambda c: (c.predicted_delta, -max(c.cpu_supply_ratio, 1.0),
                                    kind_rank.get(c.kind, 0),
                                    -int(c.disruptive), -c.predicted_nodes), reverse=True)
@@ -1197,9 +1208,10 @@ def generate_candidates(snapshot: TuningSnapshot, rejected=None, namespace="app"
     return ordered + spare
 
 
-def plan(snapshot: TuningSnapshot, rejected=None, namespace="app", rejected_nodes=None):
+def plan(snapshot: TuningSnapshot, rejected=None, namespace="app", rejected_nodes=None,
+         hpa_only=False):
     score = snapshot.score()
-    candidates = generate_candidates(snapshot, rejected, namespace, rejected_nodes)
+    candidates = generate_candidates(snapshot, rejected, namespace, rejected_nodes, hpa_only)
     fit = deterministic_reservation(snapshot)
     cost_locked = ""
     if fit:

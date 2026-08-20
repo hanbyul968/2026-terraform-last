@@ -16,6 +16,9 @@ param(
   [double]$PerfFloor = 80,
   [double]$LoadScale = 1,
   [string]$TargetRps = '',
+  # 부하 중 라이브 루프는 기본적으로 HPA(target/min/max)만 만진다. request 변경은 rollout을
+  # 일으켜 회차 시간을 잡아먹고 가용성을 깎으므로, 켜려면 -AllowRequestChange 를 명시한다.
+  [switch]$AllowRequestChange,
   [switch]$Apply,
   [string]$Url = ''
 )
@@ -42,6 +45,7 @@ function Get-NextStep { param([string]$OutDir,[string]$RejFile)
   $a=@((Join-Path $Here 'optimize.py'),$OutDir,'--slos',$SLOS,'--ns',$NS,'--avail-gate',"$AVAIL_GATE",
        '--objective',$Objective,'--avail-floor',"$AvailFloor",'--perf-floor',"$PerfFloor",
        '--load-scale',"$LoadScale",'--json')
+  if(-not $AllowRequestChange){$a+=@('--hpa-only')}
   if($TargetRps){$a+=@('--target-rps',$TargetRps)}
   if($RejFile){$a+=@('--rejected',$RejFile)}
   $raw=Invoke-Py $a; return ($raw | Select-Object -Last 1 | ConvertFrom-Json)
@@ -61,7 +65,10 @@ function Set-Tuning { param([string]$App,$Knob)
   $wanted=[int]$Knob.request; $live=Get-LiveRequest $deployment
   if($wanted -gt 0 -and $wanted -ne $live){
     & kubectl -n $NS set resources "deploy/$deployment" "--requests=cpu=$($wanted)m" | Out-Null
-    & kubectl -n $NS rollout status "deploy/$deployment" --timeout=120s | Out-Null
+    # rollout이 120s 안에 안 끝나도(파드 Pending/노드 증설 대기) 전체 실행을 죽이지 않는다.
+    # $ErrorActionPreference='Stop'라 kubectl 실패가 예외가 되므로 여기서만 잡는다.
+    try { & kubectl -n $NS rollout status "deploy/$deployment" --timeout=150s 2>&1 | Out-Null }
+    catch { Write-Warning "rollout 대기 초과: $deployment (계속 진행)" }
   }
 }
 function Set-TuningSet { param($Knobs)

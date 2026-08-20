@@ -69,6 +69,31 @@ class SharedEngineTests(unittest.TestCase):
         step = (high - low) / (count - 1)
         return tuple(round(low + step * i, 4) for i in range(count))
 
+    def test_hpa_only_mode_excludes_request_changes(self):
+        """부하 중 루프는 rollout을 일으키는 request 변경 후보를 내지 않는다."""
+        def app(name, perf, avail, req, tgt, pods, cpu, mx):
+            return engine.AppSnapshot(
+                name=name, slo_seconds=1.0, samples=2000, window_seconds=120.0,
+                availability=avail, performance=perf, request_m=req, memory_request_mi=128,
+                cpu_limit_m=2000, target=tgt, min_replicas=2, max_replicas=mx, replicas=pods,
+                pods_p90=pods, pods_max=pods, per_pod_p90=int(cpu / pods), per_pod_p95=int(cpu / pods),
+                total_cpu_p90=cpu, total_cpu_p95=cpu, cpu_samples=60, latencies=tuple([.3] * 300))
+        snapshot = engine.TuningSnapshot(
+            {"stress": app("stress", 24, 63, 750, 40, 8, 7000, 10),
+             "user": app("user", 82, 99.9, 600, 90, 6, 3000, 9),
+             "product": app("product", 99.5, 100, 250, 70, 4, 700, 8)},
+            engine.ClusterSnapshot(baseline_nodes=2, node_average=6, node_count=6,
+                                   node_alloc_m=1930, node_mem_alloc_mi=3292,
+                                   cluster_cpu_p95_m=9700, system_reserved_m=1200,
+                                   baseline_node_count=2))
+        for c in engine.generate_candidates(snapshot, hpa_only=True):
+            for name, v in c.knobs.items():
+                self.assertEqual(v["request"], engine._current_dict(snapshot.apps[name])["request"])
+            self.assertFalse(c.disruptive)
+        # 전체 모드에서는 request 변경 후보도 나온다(부하 전 사이징용).
+        full = engine.generate_candidates(snapshot, hpa_only=False)
+        self.assertTrue(any(c.disruptive for c in full))
+
     def test_bin_packing_idle_nodes_and_baseline_guard(self):
         """총 예약 합이 아니라 실제 스케줄링으로 유휴 노드를 센다(user 775m 사고 재현)."""
         self.assertEqual(engine.bin_pack_nodes([775, 775, 750, 750, 50, 50], 1480), 4)
@@ -470,6 +495,11 @@ class PowerShellRunnerContractTests(unittest.TestCase):
         self.assertIn("nodes=[int]$candidate.predicted_nodes", self.script)
         self.assertIn("robocopy", self.script)  # 잠긴 CSV에 견디는 복사
         self.assertNotIn("CPU하한", self.script)
+
+    def test_live_loop_is_hpa_only_and_rollout_is_non_fatal(self):
+        self.assertIn("[switch]$AllowRequestChange", self.script)
+        self.assertIn("if(-not $AllowRequestChange){$a+=@('--hpa-only')}", self.script)
+        self.assertIn("catch { Write-Warning \"rollout 대기 초과", self.script)
 
     def test_does_not_spend_every_trial_on_one_app(self):
         self.assertIn("$triedApps=New-Object 'System.Collections.Generic.HashSet[string]'",

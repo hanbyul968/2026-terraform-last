@@ -942,7 +942,15 @@ def _make_candidate(snapshot, app, kind, proposed, reason, priority, namespace="
     risk = "cpu-oversubscribed" if supply_ratio > 1.0 else ""
     if kind != "usage-sized" and supply_ratio > snapshot.max_slowdown:
         return None
-    if not snapshot.acceptable(predicted_score) and kind not in ("gate-recovery", "usage-sized"):
+    exempt = kind in ("gate-recovery", "usage-sized")
+    if kind == "bundle":
+        # 기준 미달 앱이 섞인 묶음은 한 회차로 못 끌어올리므로 예측만으로 버리지 않는다.
+        exempt = any(
+            snapshot.apps[name].performance < snapshot.perf_floor
+            or snapshot.apps[name].availability < (snapshot.avail_floor if snapshot.cost_first
+                                                   else snapshot.availability_gate)
+            for name in knobs)
+    if not snapshot.acceptable(predicted_score) and not exempt:
         return None
     delta = predicted_score.total - result.total
     if kind in ("gate-recovery", "performance-band"):
@@ -980,11 +988,8 @@ def generate_candidates(snapshot: TuningSnapshot, rejected=None, namespace="app"
     # 실측으로 거절된 노드 수는 다시 시도하지 않는다(같은 회차 안에서 학습).
     min_nodes_allowed = (max(rejected_nodes) + 1) if rejected_nodes else 1
     candidates = []
-    any_gate_failure = any(
-        app.performance < snapshot.perf_floor
-        or app.availability < (snapshot.avail_floor if snapshot.cost_first
-                               else snapshot.availability_gate)
-        for app in snapshot.apps.values())
+    # 게이트 미달은 '그 앱'의 문제다. 예전에는 한 앱이 미달이면 전체 후보 생성을 막아
+    # 3회차가 그 앱에서 다 소모됐다. 이제 앱별로만 판단한다.
     for app in snapshot.apps.values():
         if not app.measured:
             continue
@@ -1003,8 +1008,6 @@ def generate_candidates(snapshot: TuningSnapshot, rejected=None, namespace="app"
                                 6.0, namespace)
             if c and c.key() not in rejected:
                 candidates.append(c)
-            continue
-        if any_gate_failure:
             continue
         nxt, gap = rubric.next_band(app.performance)
         if 0 < gap <= 3.0 and current["target"] > TARGET_MIN:

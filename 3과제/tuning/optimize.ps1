@@ -92,6 +92,7 @@ $sw=[Diagnostics.Stopwatch]::StartNew();$deadline=[TimeSpan]::FromMinutes($Budge
 $candidateLimit=[Math]::Min([Math]::Max($Iterations,0),3)
 $rejFile=Join-Path $env:TEMP 'optimize-rejected.json';'[]'|Set-Content $rejFile -Encoding ascii
 $rejected=@();$pending=$null;$bestKnobs=$null
+$triedApps=New-Object 'System.Collections.Generic.HashSet[string]'
 Write-Host '=== 공식 채점기준 라이브 튜닝 ===' -ForegroundColor Cyan
 Write-Host ("예산 {0}분 / warmup {1}s / 측정 {2} / 후보 최대 {3}개 / 목표 {4} (가용성>={5}% 성능>={6}%)" -f $BudgetMinutes,$WarmupSeconds,$Duration,$candidateLimit,$Objective,$AvailFloor,$PerfFloor)
 
@@ -114,7 +115,25 @@ try {
   for($i=1;$i -le $candidateLimit;$i++){
     $step=Get-NextStep $bestOut $rejFile
     if($step.done){Write-Host "수렴: $($step.reason)" -ForegroundColor Green;break}
-    $candidate=$step.candidate;$settle=[int]$candidate.settle_seconds
+    $candidate=$step.candidate
+    $knobSet=if($step.knob_set){$step.knob_set}else{$null}
+    # 한 앱이 남은 회차를 다 먹지 않게, 이미 시도한 앱만 담긴 후보는 대안이 있으면 건너뛴다.
+    function Test-Untried { param($Ks,$App)
+      $names=if($Ks){@($Ks.PSObject.Properties.Name)}else{@($App)}
+      foreach($n in $names){ if(-not $triedApps.Contains($n)){ return $true } }
+      return $false
+    }
+    if(-not (Test-Untried $knobSet $step.app)){
+      foreach($alt in @($step.candidates)){
+        $altKs=$alt.knobs
+        if(Test-Untried $altKs $alt.app){
+          Write-Host ("이미 시도한 앱 대신 다른 앱 후보로 전환: {0} -> {1}" -f $step.app,$alt.app) -ForegroundColor DarkGray
+          $candidate=$alt; $knobSet=$altKs; $step.app=$alt.app; $step.kind=$alt.kind; $step.knob=$alt.proposed
+          break
+        }
+      }
+    }
+    $settle=[int]$candidate.settle_seconds
     if($step.kind -eq 'cost-reclaim'){$settle=[Math]::Max($settle,$CostSettleSeconds)}elseif(-not $candidate.disruptive){$settle=[Math]::Max($settle,$SettleSeconds)}
     $durationSec=ConvertTo-DurationSeconds $Duration
     # request rollback은 rollout + 재settle 까지 필요하므로 넉넉히 예약한다.
@@ -123,6 +142,7 @@ try {
     $app=$step.app;$pending=$app
     $knobSet=if($step.knob_set){$step.knob_set}else{$null}
     $touched=if($knobSet){@($knobSet.PSObject.Properties.Name)}else{@($app)}
+    foreach($n in $touched){ [void]$triedApps.Add($n) }
     Write-Host ("--- {0}/{1} [{2}] {3}: request {4}->{5}m target {6}->{7}% 예약노드 {8}대 CPU공급부족 {9}배" -f $i,$candidateLimit,$step.kind,($touched -join '+'),$candidate.current.request,$candidate.proposed.request,$candidate.current.target,$candidate.proposed.target,$candidate.predicted_nodes,$candidate.cpu_supply_ratio)
     if($knobSet){Set-TuningSet $knobSet}else{Set-Tuning $app $step.knob}
     Start-Sleep -Seconds $settle

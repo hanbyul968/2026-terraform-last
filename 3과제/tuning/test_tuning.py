@@ -69,6 +69,30 @@ class SharedEngineTests(unittest.TestCase):
         step = (high - low) / (count - 1)
         return tuple(round(low + step * i, 4) for i in range(count))
 
+    def test_one_failing_app_does_not_block_other_apps(self):
+        """한 앱이 기준 미달이어도 다른 앱 후보가 나와야 한다(회차 독식 방지)."""
+        def app(name, perf, avail, req, tgt, pods, cpu, mx):
+            return engine.AppSnapshot(
+                name=name, slo_seconds=1.0, samples=2000, window_seconds=120.0,
+                availability=avail, performance=perf, request_m=req, memory_request_mi=128,
+                cpu_limit_m=2000, target=tgt, min_replicas=2, max_replicas=mx,
+                replicas=pods, pods_p90=pods, pods_max=pods, cpu_samples=60,
+                per_pod_p90=int(cpu / pods), per_pod_p95=int(cpu / pods),
+                total_cpu_p90=cpu, total_cpu_p95=cpu, latencies=tuple([.30] * 300))
+        snapshot = engine.TuningSnapshot(
+            {"stress": app("stress", 24.0, 63.0, 750, 55, 8, 6000, 8),
+             "user": app("user", 82.0, 99.9, 775, 90, 6, 3000, 9),
+             "product": app("product", 99.5, 100.0, 250, 70, 4, 700, 8)},
+            engine.ClusterSnapshot(baseline_nodes=2, node_average=6, node_count=6,
+                                   node_alloc_m=1930, node_mem_alloc_mi=3292,
+                                   cluster_cpu_p95_m=9700, system_reserved_m=1200))
+        result = engine.plan(snapshot)
+        covered = {a for c in result["candidates"][:3] for a in c["knobs"]}
+        self.assertEqual(covered, {"stress", "user", "product"})
+        # 기준 미달 앱이 섞인 묶음도 후보로 남는다(한 회차로 여러 앱 처리).
+        bundle = next(c for c in result["candidates"] if c["kind"] == "bundle")
+        self.assertEqual(set(bundle["knobs"]), {"stress", "user", "product"})
+
     def test_pod_count_and_memory_drive_nodes(self):
         """작은 파드 다수는 CPU 예약뿐 아니라 파드당 메모리 요청으로도 노드를 만든다."""
         app = self.app(name="user", slo_seconds=.2, samples=20000, window_seconds=120.0,
@@ -416,6 +440,13 @@ class PowerShellRunnerContractTests(unittest.TestCase):
         self.assertIn("$step=Get-NextStep $bestOut $rejFile", self.script)
         self.assertIn("nodes=[int]$candidate.predicted_nodes", self.script)
         self.assertNotIn("CPU하한", self.script)
+
+    def test_does_not_spend_every_trial_on_one_app(self):
+        self.assertIn("$triedApps=New-Object 'System.Collections.Generic.HashSet[string]'",
+                      self.script)
+        self.assertIn("function Test-Untried", self.script)
+        self.assertIn("이미 시도한 앱 대신 다른 앱 후보로 전환", self.script)
+        self.assertIn("foreach($n in $touched){ [void]$triedApps.Add($n) }", self.script)
 
     def test_transactional_rollback_and_no_terraform_mutation(self):
         self.assertIn("finally {", self.script)

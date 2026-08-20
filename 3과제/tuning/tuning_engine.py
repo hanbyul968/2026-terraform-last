@@ -64,6 +64,22 @@ def cpu_m(value) -> Optional[int]:
         return None
 
 
+def mem_mi(value) -> int:
+    """메모리 요청을 MiB 정수로. 노드 메모리도 파드 수 상한을 만든다."""
+    if value in (None, "", "-"):
+        return 0
+    text = str(value).strip()
+    try:
+        for suffix, factor in (("Ki", 1 / 1024), ("Mi", 1), ("Gi", 1024), ("Ti", 1024 * 1024),
+                               ("K", 1000 / 1048576), ("M", 1000000 / 1048576),
+                               ("G", 1000000000 / 1048576)):
+            if text.endswith(suffix):
+                return int(float(text[:-len(suffix)]) * factor)
+        return int(float(text) / 1048576)
+    except (TypeError, ValueError):
+        return 0
+
+
 def pct(value) -> Optional[int]:
     if value in (None, "", "-"):
         return None
@@ -94,6 +110,7 @@ class AppSnapshot:
     early_performance: Optional[float] = None
     steady_performance: Optional[float] = None
     request_m: Optional[int] = None
+    memory_request_mi: int = 0
     cpu_limit_m: Optional[int] = None
     min_replicas: Optional[int] = None
     max_replicas: Optional[int] = None
@@ -192,6 +209,7 @@ class ClusterSnapshot:
     node_average: float = 2.0
     node_count: int = 2
     node_alloc_m: int = 0
+    node_mem_alloc_mi: int = 0
     node_cpu_p95: int = 0
     cluster_cpu_p95_m: int = 0
     system_reserved_m: int = 0
@@ -330,6 +348,7 @@ def live_state(namespace="app"):
             current = state.setdefault(name, {})
             current["deployment_name"] = name
             current["request"] = cpu_m((resources.get("requests", {}) or {}).get("cpu"))
+            current["memory"] = mem_mi((resources.get("requests", {}) or {}).get("memory"))
             current["limit"] = cpu_m((resources.get("limits", {}) or {}).get("cpu"))
         for item in hpas.get("items", []):
             spec, status = item.get("spec", {}), item.get("status", {}) or {}
@@ -344,17 +363,22 @@ def live_state(namespace="app"):
                 resource = metric.get("resource", {})
                 if metric.get("type") == "Resource" and resource.get("name") == "cpu":
                     current["target"] = resource.get("target", {}).get("averageUtilization")
-        alloc, types = [], []
+        alloc, types, mem_alloc = [], [], []
         for item in nodes.get("items", []):
-            value = cpu_m((item.get("status", {}).get("allocatable", {}) or {}).get("cpu"))
+            allocatable = item.get("status", {}).get("allocatable", {}) or {}
+            value = cpu_m(allocatable.get("cpu"))
             if value:
                 alloc.append(value)
+            memory = mem_mi(allocatable.get("memory"))
+            if memory:
+                mem_alloc.append(memory)
             types.append((item.get("metadata", {}).get("labels", {}) or {}).get(
                 "node.kubernetes.io/instance-type", "?"))
         state["__cluster__"] = {"node_alloc_m": min(alloc) if alloc else 0,
-                                "node_count": len(nodes.get("items", [])),
-                                "node_types": sorted(types),
-                                "system_reserved_m": _system_reserved_m(namespace)}
+                               "node_mem_alloc_mi": min(mem_alloc) if mem_alloc else 0,
+                               "node_count": len(nodes.get("items", [])),
+                               "node_types": sorted(types),
+                               "system_reserved_m": _system_reserved_m(namespace)}
     except Exception:
         return {}
     return state
@@ -513,6 +537,7 @@ def _cluster_csv(outdir, windows, baseline_nodes, live):
         node_average=sum(nodes) / len(nodes) if nodes else baseline_nodes,
         node_count=max(nodes) if nodes else int(cluster.get("node_count") or baseline_nodes),
         node_alloc_m=int(cluster.get("node_alloc_m") or 0),
+        node_mem_alloc_mi=int(cluster.get("node_mem_alloc_mi") or 0),
         node_cpu_p95=int(nearest_rank(node_cpu, .95) or 0),
         node_types=tuple(cluster.get("node_types") or ()),
         system_reserved_m=int(cluster.get("system_reserved_m") or 0),
@@ -537,6 +562,7 @@ def snapshot_from_outdir(outdir, slos, namespace="app", baseline_nodes=2.0, live
             deployment_name=current.get("deployment_name") or name,
             hpa_name=current.get("hpa_name") or name,
             request_m=current.get("request"),
+            memory_request_mi=int(current.get("memory") or 0),
             cpu_limit_m=current.get("limit"), min_replicas=current.get("min"),
             max_replicas=current.get("max"), target=current.get("target"),
             replicas=current.get("replicas"), desired=current.get("desired"),
@@ -631,17 +657,25 @@ def _reservation_nodes(snapshot: TuningSnapshot, changed, proposed=None):
     if alloc <= 0:
         return snapshot.cluster.node_count or int(math.ceil(snapshot.cluster.node_average))
     total = 0
+    total_mem = 0
     for name, app in snapshot.apps.items():
         change = plan_map.get(name)
         req = int(change["request"]) if change else int(app.request_m or REQUEST_MIN_M)
         observed = int(app.pods_p90 or app.replicas or app.min_replicas or 1)
         if change and change.get("estimated_replicas"):
             # 실측 관측 파드 수보다 적게 잡으면 예약을 과소평가해 노드 하한이 무너진다.
-            pods = max(int(change["estimated_replicas"]), observed)
+            pods = max(int(change["estimated_replicas"]), observed) if not change.get("consolidate") \
+                else int(change["estimated_replicas"])
         else:
             pods = observed
         total += req * pods
-    return max(1, int(math.ceil(total / snapshot.cluster.usable_cpu_per_node_m)))
+        total_mem += int(app.memory_request_mi or 0) * pods
+    cpu_nodes = int(math.ceil(total / snapshot.cluster.usable_cpu_per_node_m))
+    mem_nodes = 0
+    if snapshot.cluster.node_mem_alloc_mi > 0 and total_mem > 0:
+        # 파드당 메모리 요청도 노드 수를 만든다. 파드 수를 줄이면 여기서 이득이 난다.
+        mem_nodes = int(math.ceil(total_mem / snapshot.cluster.node_mem_alloc_mi))
+    return max(1, cpu_nodes, mem_nodes)
 
 
 def _node_calibration(snapshot: TuningSnapshot):
@@ -756,6 +790,36 @@ def _usage_sized(snapshot, app: AppSnapshot, current: dict):
     if app.trigger_m > 0:
         proposed["target"] = int(clamp(round(app.trigger_m * 100.0 / sized), TARGET_MIN, TARGET_MAX))
     return proposed
+
+
+def _consolidated(snapshot, app: AppSnapshot, current: dict):
+    """작은 파드 다수 → 제대로 사이징된 파드 소수.
+
+    HPA 발동점(request × target)이 실사용보다 훨씬 낮으면 HPA는 항상 max에 붙어 탄력성이 없다
+    (실측: user 100m × 25% = 25m 발동점에 32파드). 목표 부하 필요 CPU를 파드당 적정 크기로 나눠
+    파드 수를 정하고, request/target/max를 그 균형점에 맞춘다.
+    파드 수가 줄면 파드당 메모리 요청(예: 128Mi) 합계도 줄어 노드가 함께 줄어든다.
+    """
+    required = snapshot.app_required_cpu_m(app.name)
+    if not required:
+        return None
+    pods_now = int(app.pods_p90 or app.replicas or current["min"] or 1)
+    ceiling = app.cpu_limit_m or int(snapshot.cluster.usable_cpu_per_node_m * .5)
+    per_pod = int(clamp(ceiling, REQUEST_MIN_M, max(REQUEST_MIN_M, snapshot.cluster.usable_cpu_per_node_m)))
+    target_pods = max(int(current["min"]), int(math.ceil(required / max(per_pod, 1))))
+    if target_pods >= pods_now:
+        return None
+    request = max(REQUEST_MIN_M, ceil_to(required / target_pods))
+    if app.cpu_limit_m:
+        request = min(request, app.cpu_limit_m)
+    proposed = dict(current)
+    proposed.update({
+        "request": request,
+        "target": int(clamp(round(required / (target_pods * request) * 100), TARGET_MIN, TARGET_MAX)),
+        "max": max(current["min"], target_pods + max(1, int(math.ceil(target_pods * .5)))),
+        "consolidate": True,
+    })
+    return proposed, pods_now, target_pods, required
 
 
 def _safe_node_floor(snapshot: TuningSnapshot, current_nodes: int):
@@ -976,6 +1040,21 @@ def generate_candidates(snapshot: TuningSnapshot, rejected=None, namespace="app"
                 1.0, namespace)
             if c and c.key() not in rejected:
                 candidates.append(c)
+        # (1b) 파드 수 정리: 작은 파드 다수를 적정 크기 소수로 바꾼다(메모리 예약까지 줄어든다).
+        merged_pods = _consolidated(snapshot, app, current)
+        if merged_pods:
+            proposed, pods_now, target_pods, required = merged_pods
+            mem_saved = int(app.memory_request_mi or 0) * (pods_now - target_pods)
+            c = _make_candidate(
+                snapshot, app, "pod-consolidate", proposed,
+                f"파드 정리: 발동점 {app.trigger_m:.0f}m로 HPA가 항상 max({current['max']})에 붙어 "
+                f"{pods_now}개가 떠 있다. 목표 부하 필요 CPU {required}m을 "
+                f"{target_pods}개 파드로 → request {current['request']}→{proposed['request']}m, "
+                f"target {current['target']}→{proposed['target']}%, max {current['max']}→{proposed['max']}"
+                + (f", 메모리 예약 {mem_saved}Mi 절감" if mem_saved > 0 else ""),
+                0.5, namespace)
+            if c and c.key() not in rejected:
+                candidates.append(c)
         # (2) 파드 수 상한. 노드는 'request x 파드수'로 늘어나므로 max_replicas도 비용 노브다.
         #     실측에서 상한까지 붙었고 성능 밴드에 여유가 있을 때만 제안한다.
         saturated = app.max_replicas and app.pods_max >= app.max_replicas
@@ -1022,12 +1101,13 @@ def generate_candidates(snapshot: TuningSnapshot, rejected=None, namespace="app"
                                     0.0, namespace)
                 if c and c.key() not in rejected and c.predicted_nodes <= math.ceil(snapshot.cluster.node_average):
                     candidates.append(c)
-    kind_rank = {"gate-recovery": 5, "bundle": 5, "usage-sized": 4, "performance-band": 3,
-                 "request-optimal": 2, "pod-cap": 2, "cost-reclaim": 1}
+    kind_rank = {"gate-recovery": 5, "bundle": 5, "usage-sized": 4, "pod-consolidate": 4,
+                 "performance-band": 3, "request-optimal": 2, "pod-cap": 2, "cost-reclaim": 1}
     # (A) 모든 앱 변경을 한 회차에 묶는다. 회차당 4~5분이라 앱별로 나누면 예산이 한 앱에서 끝난다.
     per_app_best = {}
     for c in candidates:
-        if c.kind in ("gate-recovery", "usage-sized", "request-optimal", "performance-band", "pod-cap"):
+        if c.kind in ("gate-recovery", "usage-sized", "pod-consolidate", "request-optimal",
+                      "performance-band", "pod-cap"):
             prev = per_app_best.get(c.app)
             if prev is None or c.predicted_delta > prev.predicted_delta:
                 per_app_best[c.app] = c

@@ -69,6 +69,32 @@ class SharedEngineTests(unittest.TestCase):
         step = (high - low) / (count - 1)
         return tuple(round(low + step * i, 4) for i in range(count))
 
+    def test_pod_count_and_memory_drive_nodes(self):
+        """작은 파드 다수는 CPU 예약뿐 아니라 파드당 메모리 요청으로도 노드를 만든다."""
+        app = self.app(name="user", slo_seconds=.2, samples=20000, window_seconds=120.0,
+                       availability=100, performance=95, request_m=100, memory_request_mi=128,
+                       target=25, min_replicas=2, max_replicas=32, replicas=32,
+                       pods_p90=32, pods_max=32, per_pod_p90=61, per_pod_p95=90,
+                       total_cpu_p90=1950, total_cpu_p95=2000, cpu_samples=60,
+                       latencies=tuple([.05] * 300))
+        snapshot = engine.TuningSnapshot(
+            {"user": app}, engine.ClusterSnapshot(baseline_nodes=2, node_average=6, node_count=6,
+                                                  node_alloc_m=1930, node_mem_alloc_mi=3292,
+                                                  cluster_cpu_p95_m=2000, system_reserved_m=1400))
+        # 32파드 x 128Mi = 4096Mi -> 메모리만으로 2노드가 필요하다(CPU 예약 3200m은 2노드분).
+        self.assertEqual(engine._reservation_nodes(snapshot, "", {}), 2)
+        merged = engine._consolidated(snapshot, app, engine._current_dict(app))
+        self.assertIsNotNone(merged)
+        proposed, pods_now, target_pods, required = merged
+        self.assertEqual(pods_now, 32)
+        self.assertLess(target_pods, 32)
+        self.assertGreater(proposed["request"], 100)
+        self.assertLess(proposed["max"], 32)
+        # 파드가 줄면 메모리 예약도 줄어 노드 압력이 낮아진다.
+        proposed["estimated_replicas"] = engine._predicted_replicas(app, proposed)
+        after_mem = target_pods * app.memory_request_mi
+        self.assertLess(after_mem, 32 * app.memory_request_mi)
+
     def test_request_optimum_lowers_reservation_and_never_inflates(self):
         app = self.app(latencies=self.latencies())
         candidates = engine.generate_candidates(self.snapshot(app))
@@ -77,8 +103,12 @@ class SharedEngineTests(unittest.TestCase):
         self.assertGreaterEqual(optimal.proposed["estimated_replicas"], 6)
         self.assertLess(optimal.predicted_nodes, 4)
         for candidate in candidates:
+            if candidate.kind == "pod-consolidate":
+                # 파드 정리는 파드 수를 줄이면서 파드당 request를 올리는 후보다.
+                self.assertLess(candidate.proposed["max"], 8)
+                continue
             self.assertLessEqual(candidate.proposed["request"], 750)
-            self.assertLessEqual(candidate.cpu_supply_ratio, engine.MAX_EXTRAPOLATED_SLOWDOWN)
+            self.assertLessEqual(candidate.cpu_supply_ratio, engine.COST_FIRST_MAX_SLOWDOWN)
 
     def test_untrusted_extrapolation_is_not_proposed(self):
         app = self.app(latencies=self.latencies())

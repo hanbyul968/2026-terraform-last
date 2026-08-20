@@ -224,11 +224,15 @@ def live_state(namespace):
                     break
         hpas = json.loads(run(["kubectl", "-n", namespace, "get", "hpa", "-o", "json"]) or "{}")
         for item in hpas.get("items", []):
-            name = item["metadata"]["name"]
             spec = item.get("spec", {})
+            # HPA metadata.name이 user-hpa처럼 Deployment와 달라도 실제 대상 앱을 사용한다.
+            name = (spec.get("scaleTargetRef", {}) or {}).get("name") or item["metadata"]["name"]
             current = state.setdefault(name, {})
             current["min"] = spec.get("minReplicas", 1)
             current["max"] = spec.get("maxReplicas")
+            status = item.get("status", {}) or {}
+            current["replicas"] = status.get("currentReplicas")
+            current["desired"] = status.get("desiredReplicas")
             for metric in spec.get("metrics", []):
                 resource = metric.get("resource", {})
                 if metric.get("type") == "Resource" and resource.get("name") == "cpu":
@@ -238,7 +242,7 @@ def live_state(namespace):
     return state
 
 
-def recommendation(measurement, cpu, current, node_cpu):
+def recommendation(measurement, cpu, current, node_cpu, ratio=None):
     """현재 한 회차에서 다음 회차로 이동할 보수적인 1-step 권장값을 계산한다.
 
     request와 target은 독립값이 아니다. request*target%가 HPA의 파드당 목표 CPU다.
@@ -280,6 +284,19 @@ def recommendation(measurement, cpu, current, node_cpu):
     wanted_trigger = old_trigger * factor
     recommended_target = int(round(100.0 * wanted_trigger / recommended_request))
     recommended_target = max(25, min(90, recommended_target))
+
+    # 비용 회수(양방향). 기존 로직은 성능 보호로 target을 '내리기만' 해 노드가 남아돌아도
+    # 비용을 못 줄였다. 노드가 기준 초과(ratio>1)이고 성능이 최상위 밴드(>=90%)로 안전하며
+    # 파드가 request 대비 저활용(<60%)이면, target을 한 스텝(+10%p, 상한 85) 올려 파드/노드를
+    # 줄인다. 단일 회차 권고라 밴드 하락 위험이 가장 낮은 '>=90%' 에서만 시도한다.
+    # 정밀 최적화(어디까지 올릴 수 있나)는 optimize.py 의 닫힌 루프가 재측정으로 찾는다.
+    reclaimed_cost = False
+    if ratio and ratio > 1.0 and perf >= 90 and cpu["per_pod_p90"] < recommended_request * 0.6:
+        bumped = min(85, recommended_target + 10)
+        if bumped > recommended_target:
+            recommended_target = bumped
+            reclaimed_cost = True
+
     actual_trigger = recommended_request * recommended_target / 100.0
     needed = max(2, int(math.ceil(cpu["total_p90"] / max(actual_trigger, 1.0))))
 
@@ -288,7 +305,12 @@ def recommendation(measurement, cpu, current, node_cpu):
     recommended_min = 2
 
     recommended_max = maximum
-    if needed > maximum:
+    observed_peak = int(cpu.get("pods_max") or cpu.get("pods_p90") or 0)
+    hit_max = observed_peak >= maximum
+    # 이론상 needed가 커도 실제 파드가 현재 max에 닿지 않았다면 max가 병목이라는 증거가 없다.
+    # 짧은 스파이크 하나로 13->17처럼 상한을 계속 키우면 2시간 변동 부하에서 비용만 커진다.
+    # 활성 부하창에서 실제로 상한에 도달했고 성능/가용성이 미달일 때만 1-step 증가한다.
+    if needed > maximum and hit_max and (perf < 90 or avail < 99):
         growth_cap = maximum + max(2, int(math.ceil(maximum * 0.25)))
         recommended_max = min(needed, growth_cap)
     # 한 번의 로컬 고성능 결과만으로 max를 줄이지 않는다. 공식 트래픽의 키 분포가
@@ -300,10 +322,16 @@ def recommendation(measurement, cpu, current, node_cpu):
         f"perf {perf:.1f}% -> 다음 공식 구간 {band:g}%까지 {gap:.1f}%p",
         f"활성창 total CPU p90 {cpu['total_p90']}m / 권장 파드당 목표 {actual_trigger:.0f}m = 필요 약 {needed} pods",
     ]
+    if hit_max:
+        reasons.append(f"활성창 파드 최대 {observed_peak}개로 현재 max {maximum} 도달")
+    else:
+        reasons.append(f"활성창 파드 최대 {observed_peak}개 < 현재 max {maximum}; max 병목 증거 없어 유지")
     if recommended_request != request:
         reasons.append(f"노드 CPU {node_cpu}% 포화 + 파드 CPU p90 {cpu['per_pod_p90']}m > request {request}m; request는 1회 최대 25%만 조정")
     else:
         reasons.append("request 변경 조건 없음; 성능만 보고 request를 올리지 않음")
+    if reclaimed_cost:
+        reasons.append(f"비용 회수: ratio {ratio:.2f}>1 & perf {perf:.1f}%>=90 & 파드 저활용 -> target +10%p")
     return {
         "request": recommended_request,
         "target": recommended_target,
@@ -345,12 +373,14 @@ def main():
     node_cpu = load_node_cpu_window(outdir, windows)
     current = live_state(args.ns)
     node_samples = load_nodes(outdir, windows)
+    ratio_now = None
 
     print("\n=== READ-ONLY tuning recommendation ===")
     print("클러스터 변경 없음: kubectl patch/set resources/rollout/terraform apply를 실행하지 않습니다.")
     print(f"결과: {outdir}")
     if node_samples:
         average = sum(node_samples) / len(node_samples)
+        ratio_now = average / BASELINE_NODES if BASELINE_NODES else None
         print(f"노드: min={min(node_samples)} max={max(node_samples)} avg={average:.2f} ratio={average / BASELINE_NODES:.2f}")
     print(f"활성 부하창 노드 CPU 최대: {node_cpu if node_cpu is not None else '미측정'}%")
 
@@ -359,7 +389,7 @@ def main():
         measurement = measurements.get(app)
         usage = cpu.get(app)
         live = current.get(app, {})
-        rec = recommendation(measurement, usage, live, node_cpu)
+        rec = recommendation(measurement, usage, live, node_cpu, ratio_now)
         if measurement:
             print(f"\n[{app}] avail={measurement['availability']:.1f}% perf={measurement['performance']:.1f}% p95={measurement['p95_latency']:.3f}s")
         else:

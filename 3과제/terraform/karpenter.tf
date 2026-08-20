@@ -180,7 +180,7 @@ resource "kubectl_manifest" "karpenter_nodeclass" {
     spec = {
       amiSelectorTerms = [{ alias = "al2023@latest" }]
       instanceProfile  = aws_iam_instance_profile.karpenter_node.name
-      kubelet          = { maxPods = 110 }
+      kubelet          = { maxPods = var.node_max_pods }
       subnetSelectorTerms = [{
         tags = { "karpenter.sh/discovery" = aws_eks_cluster.this.name }
       }]
@@ -231,9 +231,10 @@ resource "kubectl_manifest" "karpenter_nodepool" {
         # 30초 만에 회수하고("Underutilized ... pod-count:2 ... delete"), 곧바로 HPA 가
         # 파드를 늘리면 새 노드 부팅(60~90s) 동안 "Insufficient cpu" 로 스케줄이 막혀
         # 요청이 실패했다(가용성·성능 동시 손실).
-        # 5분으로 늘려 일시적 저부하에 흔들리지 않게 한다. 부하가 진짜 끝나면 그때 회수되므로
-        # 비용 ratio 손실은 노드 몇 분치로 제한된다.
-        consolidateAfter = "5m"
+        # 2분: 5분은 저부하 구간에도 노드를 오래 붙잡아 평균 노드 수(=비용 ratio)를 키웠다
+        # (측정 2.1배, 비용 7/12). 가용성 여유(99.5~100%)가 크므로 회수를 앞당겨 비용을
+        # 회수한다. 30s만큼 공격적이지 않아 재프로비저닝 중 "Insufficient cpu" 위험은 억제.
+        consolidateAfter = "2m"
         # 회수 사유별로 속도를 다르게 둔다.
         #  - Empty: 파드가 아예 없는 노드 → 지워도 중단이 없으므로 한꺼번에 회수(비용↓).
         #  - Underutilized/Drifted: 파드가 올라가 있는 노드 → 한 번에 1대만.
@@ -242,7 +243,9 @@ resource "kubectl_manifest" "karpenter_nodepool" {
         # 한 번에 정리되어 평균 노드 수(비용 ratio)가 줄어든다.
         budgets = [
           { nodes = "100%", reasons = ["Empty"] },
-          { nodes = "1", reasons = ["Underutilized", "Drifted"] },
+          # 1 -> 2: 부하가 빠질 때 파드 실린 노드를 회당 2대까지 회수해 평균 노드 수를 더
+          # 빨리 줄인다(비용). 가용성 여유가 커서 재스케줄 몰림 리스크를 감수할 만하다.
+          { nodes = "2", reasons = ["Underutilized", "Drifted"] },
         ]
       }
     }

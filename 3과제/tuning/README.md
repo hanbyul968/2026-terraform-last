@@ -8,7 +8,7 @@
 | 비정상 요청 처리 (403/404) + 이미지 다운로드 | 4 | **`verify.ps1`** |
 | 가용성 (user/product/stress) | 12 | `loadtest.ps1` |
 | 성능 (user·product ≤0.2s, stress ≤1.0s) | 12 | `loadtest.ps1` |
-| 비용 (노드 수) | 12 | `loadtest.ps1` 의 nodes + `autotune.ps1` |
+| 비용 (노드 수) | 12 | `loadtest.ps1` 의 nodes + `autotune.ps1` / **`optimize.ps1`(닫힌 루프)** |
 
 ---
 
@@ -21,8 +21,10 @@
 | `verify.ps1` | 응답코드 규약 검증 (정상 2xx / 비정상 403 / 미정의 404 / 이미지 200) |
 | `loadtest.ps1` | 채점 방식 부하 측정 → 리포트 + 권장값 (+ `podcpu.csv` 실사용 기록) |
 | `autotune.ps1` | 완료된 부하 결과로 requests.cpu + HPA min/max/target 권장값만 계산(자동 변경 없음) |
-| `score.py` | hey CSV 채점기 (`loadtest`/`autotune` 이 호출) |
-| `advise.py` | 측정 + 실사용 + 라이브 상태 → **원인 구분 후** 앱별 판정 |
+| `optimize.ps1` | **닫힌 루프 최적화** — 측정→채점→HPA 패치→재측정을 반복해 공식 총점이 최대가 되는 HPA 값을 탐색 (`-Apply` 없으면 제안만) |
+| `optimize.py` | optimize.ps1 의 두뇌. `score.py` 총점을 목적함수로 '다음 한 수'를 고름(순수 함수, 단위테스트) |
+| `score.py` | hey CSV 채점기 (`loadtest`/`autotune`/`optimize` 가 호출). `score` 모드는 총점 JSON 출력 |
+| `advise.py` | 측정 + 실사용 + 라이브 상태 → **원인 구분 후** 앱별 판정 (양방향: 비용 여유 시 target ↑ 권고) |
 | `waf_header_stats.py` | WAF 로그 분석 → 아직 안 막힌 비정상 패턴 + tfvars 제안 |
 
 ---
@@ -201,6 +203,11 @@ request는 CPU 제한이 아니라 예약량이므로 성능이 낮다는 이유
 올린다. request가 바뀌면 기존 HPA 민감도를 유지하도록 target을 역산한 뒤, 30% 성능 게이트 또는
 가용성 미달일 때만 파드당 목표 CPU를 5~10% 추가로 낮춘다.
 
+**양방향(비용 회수).** 노드가 기준을 초과하고(ratio>1) 성능이 최상위 밴드(≥90%)로 안전하며 파드가
+request 대비 저활용(<60%)이면 target을 한 스텝(+10%p, 상한 85) 올려 파드/노드를 줄이도록 권고한다.
+기존에는 성능 보호로 target을 내리기만 해 노드가 남아돌아도 비용을 못 줄였다. 단, "어디까지 올릴 수
+있나"의 정밀 탐색은 단일 회차 측정만으로는 알 수 없으므로 `optimize.ps1`(닫힌 루프)이 담당한다.
+
 `podcpu.csv`와 `nodecpu.csv`는 반드시 `loadwindows.csv`의 start/end 안에 있는 표본만 사용한다.
 이 필터가 UTC+9가 중복 적용된 표본과 부하 종료 후 유휴 표본을 제거한다. 백분위는 표본 수가 적어도
 최댓값 보간에 끌려가지 않도록 nearest-rank 방식으로 계산한다.
@@ -257,6 +264,41 @@ CPU averageUtilization
 권장값은 영구 정답이 아니라 **다음 측정 회차용 1-step 값**이다. 한 번 반영한 뒤 반드시
 다른 label로 180초 재측정하고 다시 계산한다. 앱·트래픽·바이너리가 바뀌면 이전 결과를 재사용하지 않는다.
 
+## optimize.ps1 — 닫힌 루프 최적화 (공식 총점 최대화)
+
+`advise.py`/`autotune.ps1`은 한 회차 측정으로 "1-step 권고"만 낸다. 그런데 **최적 HPA target은
+한 번 측정으로는 알 수 없다** — target을 올리면 파드가 줄어 지연이 얼마나 늘지(성능%가 어느 밴드로
+떨어질지)는 그 지점을 실제로 측정해야만 안다. `optimize.ps1`은 이걸 **측정→채점→조정→재측정**의
+닫힌 루프로 푼다.
+
+- 목적함수 = `score.py`의 **공식 채점 총점**(성능+가용성+비용, 36점). 근사식이 아니다.
+- 좌표상승법으로 한 회차에 **한 수**만 둔다: 게이트 위반 복구 > 성능 밴드 경계 넘기기(target↓) >
+  비용 회수(ratio>1 & 성능 여유 → target↑). 개선 후보가 없으면 수렴 선언.
+- HPA만 `kubectl patch`(즉시·되돌림 가능, terraform state 불변)로 바꿔 빠르게 탐색한다.
+  총점이 오르면 채택, 아니면 되돌리고 그 수는 재제안 금지한다. 예측이 틀려도 실측이 교정한다.
+
+```powershell
+# 안전(기본): 1회 측정 후 '다음 한 수'만 제안 — 클러스터 불변
+.\optimize.ps1
+
+# 실제 탐색: HPA를 패치하며 공식 총점이 최대가 되는 값을 찾는다
+.\optimize.ps1 -Apply -Iterations 8 -Duration 90s -FinalDuration 180s
+```
+
+⚠ **탐색 중에는 `terraform apply` 금지** — kubectl 패치가 되돌려진다. 루프가 끝나면 우승 HPA 값을
+Terraform 형식으로 출력하므로, 그 값을 `k8s_apps.tf`에 반영하고 apply해 영구화한 뒤 한 번 더
+`loadtest.ps1`로 확정한다.
+
+⚠ `optimize.ps1`은 **HPA(target/min/max)만** 탐색한다. Karpenter `consolidateAfter`/`budgets`
+같은 노드 회수 노브는 HPA가 아니라 건드리지 않으므로, 비용을 더 줄여야 하면 `karpenter.tf`에서
+따로 조정한다.
+
+두뇌(`optimize.py`)의 결정 로직은 `test_tuning.py`로 단위 검증한다:
+
+```powershell
+py -3 -m unittest test_tuning -v
+```
+
 ## waf_header_stats.py — 안 막힌 비정상 찾기
 
 ```powershell
@@ -278,6 +320,7 @@ WAF 가 ALLOW 한 요청**을 뽑아준다. tfvars 제안까지 출력한다. (C
 | 배포 직후 | `.\verify.ps1` — 응답규약 4점 확보 (여기서 FAIL 이면 다른 것보다 먼저) |
 | 트래픽 전 | `.\loadtest.ps1 -Duration 180s -Label t1` → 채점 환산 + 원인 진단 |
 | 트래픽 전 | `advise.py` 권고를 `k8s_apps.tf` 에 반영 → apply → `-Label t2` 재측정 (2~3회 반복) |
+| 트래픽 전 | (선택) `.\optimize.ps1 -Apply` — 공식 총점을 목적함수로 HPA를 자동 탐색·최적화 후 우승값 반영 |
 | 트래픽 중 | `python waf_header_stats.py ...` → 새 패턴 차단 → `.\verify.ps1` 재확인 |
 | 트래픽 중 | `.\loadtest.ps1 -Label during` 로 추세 확인 (부하가 겹치니 짧게) |
 

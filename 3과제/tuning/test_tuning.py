@@ -14,6 +14,7 @@ def load_module(name):
 
 score = load_module("score")
 advise = load_module("advise")
+optimize = load_module("optimize")
 
 
 class ScoreTests(unittest.TestCase):
@@ -42,7 +43,9 @@ class ScoreTests(unittest.TestCase):
 class RecommendationTests(unittest.TestCase):
     def test_gate_failure_with_saturated_node_changes_request_and_hpa(self):
         measurement = {"performance": 28.0, "availability": 100.0}
-        cpu = {"per_pod_p90": 376, "total_p90": 2170, "pods_p50": 6}
+        # pods_max/pods_p90: 활성 부하창에서 실제로 현재 max(13)에 도달했음을 나타낸다.
+        # recommendation()의 max 증가는 이 hit_max 신호가 있을 때만 발동한다.
+        cpu = {"per_pod_p90": 376, "total_p90": 2170, "pods_p50": 6, "pods_p90": 13, "pods_max": 13}
         current = {"request": 150, "target": 70, "min": 2, "max": 13}
         result = advise.recommendation(measurement, cpu, current, 103)
         self.assertEqual(result["request"], 200)
@@ -66,6 +69,82 @@ class RecommendationTests(unittest.TestCase):
         result = advise.recommendation({"performance": 20, "availability": 90}, None, current, 100)
         self.assertEqual((result["request"], result["target"], result["min"], result["max"]),
                          (300, 70, 2, 6))
+
+    def test_cost_reclaim_raises_target_when_nodes_excess_and_perf_safe(self):
+        # 성능 최상위(99%)·파드 저활용·노드 초과(ratio 1.5) -> target을 올려 비용 회수
+        measurement = {"performance": 99.0, "availability": 100.0}
+        cpu = {"per_pod_p90": 20, "total_p90": 60, "pods_p50": 2, "pods_p90": 2, "pods_max": 2}
+        current = {"request": 70, "target": 30, "min": 2, "max": 20}
+        result = advise.recommendation(measurement, cpu, current, 50, ratio=1.5)
+        self.assertEqual(result["target"], 52)  # 42(성능기준) + 10(비용회수)
+
+    def test_no_cost_reclaim_without_ratio(self):
+        # ratio 미전달(단일 회차 정보 없음)이면 회수하지 않는다 -> 기존 단방향 동작 보존
+        measurement = {"performance": 99.0, "availability": 100.0}
+        cpu = {"per_pod_p90": 20, "total_p90": 60, "pods_p50": 2, "pods_p90": 2, "pods_max": 2}
+        current = {"request": 70, "target": 30, "min": 2, "max": 20}
+        result = advise.recommendation(measurement, cpu, current, 50)
+        self.assertEqual(result["target"], 42)
+
+    def test_no_cost_reclaim_when_ratio_at_or_below_one(self):
+        measurement = {"performance": 99.0, "availability": 100.0}
+        cpu = {"per_pod_p90": 20, "total_p90": 60, "pods_p50": 2, "pods_p90": 2, "pods_max": 2}
+        current = {"request": 70, "target": 30, "min": 2, "max": 20}
+        result = advise.recommendation(measurement, cpu, current, 50, ratio=1.0)
+        self.assertEqual(result["target"], 42)
+
+
+class OptimizerTests(unittest.TestCase):
+    def _summary(self, perfs, avails, ratio):
+        return {"perfs": perfs, "availability": avails, "cost_ratio": ratio, "total": 0.0}
+
+    def test_emergency_takes_priority(self):
+        knobs = {"user": {"target": 60, "min": 2, "max": 6},
+                 "product": {"target": 60, "min": 2, "max": 6}}
+        summary = self._summary({"user": 25.0, "product": 100.0},
+                                {"user": 100.0, "product": 100.0}, 1.5)
+        step = optimize.plan_step(knobs, summary, avail_gate=99.0)
+        self.assertFalse(step["done"])
+        self.assertEqual(step["kind"], "emergency")
+        self.assertEqual(step["app"], "user")
+        self.assertLess(step["knob"]["target"], 60)
+
+    def test_perf_up_near_band_edge(self):
+        knobs = {"user": {"target": 40, "min": 2, "max": 20}}
+        summary = self._summary({"user": 86.0}, {"user": 100.0}, 1.0)  # 87.5까지 1.5%p
+        step = optimize.plan_step(knobs, summary, avail_gate=99.0)
+        self.assertEqual(step["kind"], "perf-up")
+        self.assertEqual(step["knob"]["target"], 30)
+
+    def test_cost_reclaim_when_margin_and_ratio(self):
+        knobs = {"product": {"target": 40, "min": 2, "max": 20}}
+        summary = self._summary({"product": 100.0}, {"product": 100.0}, 1.5)
+        step = optimize.plan_step(knobs, summary, avail_gate=99.0)
+        self.assertEqual(step["kind"], "cost-reclaim")
+        self.assertEqual(step["knob"]["target"], 50)
+
+    def test_perf_up_beats_cost_reclaim(self):
+        # 확실한 성능 경계(+0.5)를 비용 회수보다 먼저 확정한다
+        knobs = {"user": {"target": 40, "min": 2, "max": 20},
+                 "product": {"target": 40, "min": 2, "max": 20}}
+        summary = self._summary({"user": 86.0, "product": 100.0},
+                                {"user": 100.0, "product": 100.0}, 1.5)
+        step = optimize.plan_step(knobs, summary, avail_gate=99.0)
+        self.assertEqual(step["kind"], "perf-up")
+        self.assertEqual(step["app"], "user")
+
+    def test_converged_when_nothing_to_do(self):
+        knobs = {"user": {"target": 60, "min": 2, "max": 6}}
+        summary = self._summary({"user": 100.0}, {"user": 100.0}, 1.0)
+        step = optimize.plan_step(knobs, summary, avail_gate=99.0)
+        self.assertTrue(step["done"])
+
+    def test_rejected_move_is_not_reproposed(self):
+        knobs = {"product": {"target": 40, "min": 2, "max": 20}}
+        summary = self._summary({"product": 100.0}, {"product": 100.0}, 1.5)
+        rejected = [{"app": "product", "kind": "cost-reclaim"}]
+        step = optimize.plan_step(knobs, summary, rejected, avail_gate=99.0)
+        self.assertTrue(step["done"])
 
 
 if __name__ == "__main__":

@@ -140,10 +140,9 @@ resource "kubernetes_deployment" "user" {
             config_map_ref { name = kubernetes_config_map.s3.metadata[0].name }
           }
           resources {
-            # no cpu limit: CFS throttling wrecks tail latency; memory limit only
-            # request 는 노드 예약량이라 실사용보다 크게 잡으면 노드 수가 그대로 늘어난다.
-            # 실측 사용량(부하 중) 기준으로 맞춘 값: user 100~138m / product 53~80m / stress 137~264m
-            requests = { cpu = "150m", memory = "128Mi" }
+            # 38점 재현 프로파일: 낮은 request로 Pod 밀도를 높이고 CPU limit은 두지 않는다.
+            # HPA 발동점은 70m x 33% = 23.1m이며 당일 측정 후 advise.py가 재계산한다.
+            requests = { cpu = "70m", memory = "128Mi" }
             limits   = { memory = "256Mi" }
           }
           readiness_probe {
@@ -192,12 +191,9 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "user" {
     namespace = kubernetes_namespace.app.metadata[0].name
   }
   spec {
-    # PDB(minAvailable=1) 와 짝. replica 가 1 이면 PDB 가 evict 를 전면 차단해
-    # Karpenter 가 그 노드를 영구히 회수하지 못하고(비용↑), 노드가 강제 종료되면
-    # 대체 파드가 뜨는 동안 서비스가 끊긴다. 2 이면 hostname spread 로 두 노드에 나뉘어
-    # 한 노드가 빠져도 무중단이고 consolidation 도 정상 동작한다.
+    # 38점 재현 프로파일. user는 빠른 확장을 위해 2~20 범위를 사용한다.
     min_replicas = 2
-    max_replicas = 6
+    max_replicas = 20
     scale_target_ref {
       api_version = "apps/v1"
       kind        = "Deployment"
@@ -238,7 +234,7 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "user" {
           # 60%: CPU가 더 차야 확장 → 파드/노드 덜 늘어남 (55는 과민했음).
           # 꼬리지연 생기면 그 앱만 낮추기 — advise.py/autotune 이 판정해줌.
           type                = "Utilization"
-          average_utilization = 70
+          average_utilization = 33
         }
       }
     }
@@ -383,11 +379,10 @@ resource "kubernetes_deployment" "product" {
             config_map_ref { name = kubernetes_config_map.s3.metadata[0].name }
           }
           resources {
-            # no cpu limit: CFS throttling wrecks tail latency; memory limit only
-            # request 는 노드 예약량이라 실사용보다 크게 잡으면 노드 수가 그대로 늘어난다.
-            # 실측 사용량(부하 중) 기준으로 맞춘 값: user 100~138m / product 53~80m / stress 137~264m
-            requests = { cpu = "100m", memory = "128Mi" }
-            limits   = { memory = "512Mi" }
+            # 38점 재현 프로파일: CPU limit 없이 70m로 밀도를 높인다.
+            # HPA 발동점은 70m x 29% = 20.3m이며 당일 측정 후 advise.py가 재계산한다.
+            requests = { cpu = "70m", memory = "128Mi" }
+            limits   = { memory = "256Mi" }
           }
           readiness_probe {
             http_get {
@@ -435,12 +430,9 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "product" {
     namespace = kubernetes_namespace.app.metadata[0].name
   }
   spec {
-    # PDB(minAvailable=1) 와 짝. replica 가 1 이면 PDB 가 evict 를 전면 차단해
-    # Karpenter 가 그 노드를 영구히 회수하지 못하고(비용↑), 노드가 강제 종료되면
-    # 대체 파드가 뜨는 동안 서비스가 끊긴다. 2 이면 hostname spread 로 두 노드에 나뉘어
-    # 한 노드가 빠져도 무중단이고 consolidation 도 정상 동작한다.
+    # 38점 재현 프로파일. product는 빠른 확장을 위해 2~20 범위를 사용한다.
     min_replicas = 2
-    max_replicas = 6
+    max_replicas = 20
     scale_target_ref {
       api_version = "apps/v1"
       kind        = "Deployment"
@@ -480,8 +472,11 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "product" {
         target {
           # 60%: CPU가 더 차야 확장 → 파드/노드 덜 늘어남 (55는 과민했음).
           # 꼬리지연 생기면 그 앱만 낮추기 — advise.py/autotune 이 판정해줌.
-          type                = "Utilization"
-          average_utilization = 70
+          type = "Utilization"
+          # product는 CloudFront 캐시로 오리진/DB 부하가 거의 없어(측정 perf 105.3% 만점)
+          # 파드를 적게 띄워도 성능이 안 떨어진다. 29% -> 60%로 올려 replica/노드 수를
+          # 줄여 비용 ratio(측정 2.1배)를 낮춘다. 성능 손실 위험이 가장 낮은 비용 레버다.
+          average_utilization = 60
         }
       }
     }
@@ -613,18 +608,10 @@ resource "kubernetes_deployment" "stress" {
           image_pull_policy = "IfNotPresent"
           port { container_port = var.container_port }
           resources {
-            # robust default — NOT app-tuned. Re-derive per app with
-            # tuning/autotune.sh on competition day (app behavior varies).
-            # request 는 노드 예약량이라 실사용보다 크게 잡으면 노드 수가 그대로 늘어난다.
-            # 실측 사용량(부하 중) 기준으로 맞춘 값: user 100~138m / product 53~80m / stress 137~264m
-            requests = { cpu = "300m", memory = "128Mi" }
-            # cpu limit 을 걸지 않는다. 한때 이웃(user/product) 보호를 위해 1000m 캡을
-            # 씌웠는데 정반대 결과가 나왔다 — stress 는 CPU 를 태우는 앱이라 캡이 걸리면
-            # CFS throttling 으로 꼬리지연이 폭발한다.
-            #   실측(tune-after-opt): cpu limit 1000m 상태에서
-            #     stress perf 77.3% -> 39.8%,  p95 3.976s (SLO 1.0s),  avail 99.1% -> 97.78%
-            # 이웃 보호는 limit 이 아니라 request(=cpu.shares)와 노드 분산으로 한다.
-            limits = { memory = "512Mi" }
+            # 38점 재현 프로파일: stress는 600m를 예약하고 2 CPU로 이웃 앱을 보호한다.
+            # HPA 발동점은 600m x 55% = 330m이며 당일 측정 후 advise.py가 재계산한다.
+            requests = { cpu = "600m", memory = "128Mi" }
+            limits   = { cpu = "2", memory = "512Mi" }
           }
           readiness_probe {
             http_get {
@@ -670,10 +657,10 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "stress" {
     namespace = kubernetes_namespace.app.metadata[0].name
   }
   spec {
-    # PDB(minAvailable=1) 와 짝. replica 가 1 이면 PDB 가 evict 를 전면 차단해
-    # Karpenter 가 그 노드를 영구히 회수하지 못하고(비용↑), 노드가 강제 종료되면
-    # 대체 파드가 뜨는 동안 서비스가 끊긴다. 2 이면 hostname spread 로 두 노드에 나뉘어
-    # 한 노드가 빠져도 무중단이고 consolidation 도 정상 동작한다.
+    # stress cold-start 방지: min 1이면 부하 시작 시 1파드로 출발해 스케일아웃(파드/노드
+    # 부팅 60~90s) 동안 초기 요청이 1s SLO를 넘겨 성능%가 깎였다(측정 stress 79.9%).
+    # min 2로 시작 용량을 확보한다. advise.py도 항상 min 2를 권고(recommended_min=2).
+    # 노드 비용 영향은 user/product 대비 작다(관리형 NG 2노드에 흡수됨).
     min_replicas = 2
     max_replicas = 6
     scale_target_ref {
@@ -716,7 +703,7 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "stress" {
           # 60%: CPU가 더 차야 확장 → 파드/노드 덜 늘어남 (55는 과민했음).
           # 꼬리지연 생기면 그 앱만 낮추기 — advise.py/autotune 이 판정해줌.
           type                = "Utilization"
-          average_utilization = 70
+          average_utilization = 55
         }
       }
     }

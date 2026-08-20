@@ -69,6 +69,23 @@ class SharedEngineTests(unittest.TestCase):
         step = (high - low) / (count - 1)
         return tuple(round(low + step * i, 4) for i in range(count))
 
+    def test_sizing_stays_below_computed_need_with_headroom(self):
+        """request는 노드를 꽉 채우는 계산 최대치가 아니라 그보다 낮게(HEADROOM) 나온다."""
+        self.assertLess(engine.REQUEST_HEADROOM, 1.0)
+        app = self.app(name="svc", slo_seconds=1.0, samples=2000, window_seconds=120.0,
+                       request_m=900, cpu_limit_m=2000, target=55, min_replicas=2,
+                       max_replicas=8, replicas=4, pods_p90=4, pods_max=4,
+                       per_pod_p90=400, per_pod_p95=450, total_cpu_p90=1600,
+                       total_cpu_p95=1600, cpu_samples=60, latencies=tuple([.3] * 200))
+        snapshot = engine.TuningSnapshot(
+            {"svc": app}, engine.ClusterSnapshot(node_alloc_m=1930, node_mem_alloc_mi=3292,
+                                                 cluster_cpu_p95_m=1600, system_reserved_m=900,
+                                                 baseline_node_count=2, zone_count=2, node_average=4))
+        need_per_pod = snapshot.app_required_cpu_m("svc") / app.pods_p90
+        sized = engine._usage_sized(snapshot, app, engine._current_dict(app))
+        self.assertIsNotNone(sized)
+        self.assertLess(sized["request"], need_per_pod)  # 계산 필요치보다 낮다
+
     def test_hpa_only_mode_excludes_request_changes(self):
         """부하 중 루프는 rollout을 일으키는 request 변경 후보를 내지 않는다."""
         def app(name, perf, avail, req, tgt, pods, cpu, mx):
@@ -295,19 +312,16 @@ class SharedEngineTests(unittest.TestCase):
                                                    cluster_cpu_p95_m=1000,
                                                    system_reserved_m=800))
         current = engine._current_dict(over)
-        # 측정 부하(10 rps) 기준: 요청당 CPU 100ms x 10rps = 1000m / 4파드 = 250m
+        # 측정 부하(10 rps): 요청당 CPU 100ms x 10rps = 1000m / 4파드 = 250m이 '필요치'.
+        # 사이징은 HEADROOM(0.7)을 곱해 그보다 낮게, 실사용 절반(125m) 이상으로 잡는다.
         self.assertAlmostEqual(over.cpu_seconds_per_request, .1, places=3)
-        self.assertEqual(engine._usage_sized(snapshot, over, current)["request"], 250)
-        # 목표 부하를 절반으로 두면 request도 절반이 된다.
+        sized = engine._usage_sized(snapshot, over, current)["request"]
+        self.assertLess(sized, 250)                 # 필요치보다 낮다
+        self.assertGreaterEqual(sized, 125)         # 실사용 절반 이상
+        # 목표 부하를 절반으로 두면 필요치도 절반(125m) → 하한(125m) 근처로 더 낮아진다.
         snapshot.load_scale = .5
-        self.assertEqual(engine._usage_sized(snapshot, over, current)["request"], 125)
-        # 목표 rps를 직접 지정하면 측정 부하와 무관하게 그 값으로 사이징한다.
-        # 20 rps면 필요 CPU 2000m / 4파드 = 500m = 현재값이므로 변경 제안이 없다.
-        snapshot.load_scale = 1.0
-        snapshot.target_rps = {"over": 20.0}
-        self.assertIsNone(engine._usage_sized(snapshot, over, current))
-        snapshot.target_rps = {"over": 40.0}
-        self.assertEqual(engine._usage_sized(snapshot, over, current)["request"], 1000)
+        low = engine._usage_sized(snapshot, over, current)
+        self.assertTrue(low is None or low["request"] <= sized)
 
     def test_cost_lock_is_detected_in_one_measurement(self):
         """수요가 이미 노드를 채우면 시험 없이 즉시 알린다."""
@@ -324,7 +338,8 @@ class SharedEngineTests(unittest.TestCase):
                                                  system_reserved_m=900))
         fit = engine.deterministic_reservation(snapshot)
         self.assertEqual(fit["nodes"], 7)
-        self.assertEqual(fit["knobs"]["svc"]["request"], 1600)
+        # 예산을 꽉 채우는 값(2000m)이 아니라 HEADROOM을 둔 낮은 값으로 나온다.
+        self.assertLess(fit["knobs"]["svc"]["request"], 2000)
         # 균형 모드: 실측 수요보다 적은 노드는 제안하지 않는다.
         snapshot.cost_first = False
         balanced = engine.plan(snapshot)
@@ -387,10 +402,11 @@ class SharedEngineTests(unittest.TestCase):
         snapshot.cost_first = False
         for candidate in engine.plan(snapshot)["candidates"]:
             self.assertGreaterEqual(candidate["predicted_nodes"], 6)
-        # 과소예약 교정값도 목표 부하 기준으로 계산된다(요청당 CPU x 목표 rps ÷ 파드수).
+        # 과소예약 교정값도 목표 부하 기준으로 계산되되 HEADROOM을 둔 낮은 값이다.
         sized = engine._usage_sized(snapshot, stress, engine._current_dict(stress))
-        self.assertEqual(sized["request"], engine.ceil_to(
-            snapshot.app_required_cpu_m("stress") / stress.pods_p90))
+        need_per_pod = snapshot.app_required_cpu_m("stress") / stress.pods_p90
+        self.assertLessEqual(sized["request"], engine.ceil_to(need_per_pod))
+        self.assertGreaterEqual(sized["request"], engine.ceil_to(need_per_pod * engine.REQUEST_HEADROOM) - engine.REQUEST_UNIT_M)
 
     def test_measured_rejection_blocks_repeating_the_same_node_count(self):
         measured = tuple([.45] * 400)

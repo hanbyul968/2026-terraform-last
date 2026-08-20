@@ -33,6 +33,10 @@ COST_FIRST_MAX_SLOWDOWN = 3.0
 # request는 실측 사용량과 동떨어질 수 없다. 파드당 실사용의 이 비율 아래로는 내리지 않는다.
 # (실측 1800m 쓰는 파드에 50m을 예약하는 값이 나오던 문제를 막는다.)
 REQUEST_USAGE_FLOOR_RATIO = 0.5
+# 사이징은 '노드를 꽉 채우는 최대 request'가 아니라 그보다 낮게 잡는다. 여유를 둬야 앱/트래픽이
+# 바뀌어도 유휴 파드가 baseline 노드에 넉넉히 들어가고, 부족분은 HPA replica가 채운다.
+# 계산된 필요 request에 이 계수를 곱해 낮춘다(0.7 = 30% 낮게).
+REQUEST_HEADROOM = 0.7
 
 
 def clamp(value, low, high):
@@ -816,7 +820,7 @@ def deterministic_reservation(snapshot: TuningSnapshot):
         current = _current_dict(app)
         pods = max(1, int(app.pods_p90 or app.replicas or current["min"]))
         share = shares.get(name, 0) / shares_total
-        request = max(REQUEST_MIN_M, ceil_to(budget * share / pods))
+        request = max(REQUEST_MIN_M, ceil_to(budget * share / pods * REQUEST_HEADROOM))
         if app.cpu_limit_m:
             request = min(request, app.cpu_limit_m)
         proposed = dict(current)
@@ -840,7 +844,9 @@ def _usage_sized(snapshot, app: AppSnapshot, current: dict):
     required = snapshot.app_required_cpu_m(app.name)
     if not required or pods <= 0:
         return None
-    sized = max(REQUEST_MIN_M, ceil_to(required / pods))
+    # 필요치의 최대가 아니라 여유(HEADROOM)를 둔 낮은 값으로 잡는다. 부족분은 HPA replica가 채운다.
+    sized = max(REQUEST_MIN_M, ceil_to(required / pods * REQUEST_HEADROOM))
+    # 단, 파드당 실사용의 절반보다는 낮추지 않는다(과소예약 방지).
     sized = max(sized, ceil_to(int(app.per_pod_p90 or 0) * REQUEST_USAGE_FLOOR_RATIO))
     if app.cpu_limit_m:
         sized = min(sized, app.cpu_limit_m)

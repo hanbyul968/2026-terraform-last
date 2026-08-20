@@ -113,6 +113,41 @@ class SharedEngineTests(unittest.TestCase):
         # 측정이 없으면 보수적으로 CPU 바운드로 간주한다.
         self.assertEqual(self.app(window_seconds=0.0).cpu_bound_fraction, 1.0)
 
+    def test_usage_sized_request_is_one_division_not_a_search(self):
+        """500m 예약에 250m만 쓰면 250m로, 750m에 1800m 쓰면 올린다."""
+        over = self.app(name="over", slo_seconds=1.0, samples=1000, window_seconds=120.0,
+                        request_m=500, target=50, min_replicas=2, max_replicas=8,
+                        replicas=4, pods_p90=4, pods_max=4, per_pod_p90=250,
+                        per_pod_p95=250, total_cpu_p90=1000, total_cpu_p95=1000,
+                        cpu_samples=60, latencies=tuple([.10] * 200))
+        self.assertEqual(engine._usage_sized(over, engine._current_dict(over))["request"], 250)
+        under = self.app(name="under", request_m=750, target=55, pods_p90=8,
+                         per_pod_p90=1800, per_pod_p95=1956, total_cpu_p90=6600,
+                         total_cpu_p95=7392, cpu_limit_m=2000)
+        self.assertEqual(engine._usage_sized(under, engine._current_dict(under))["request"], 925)
+
+    def test_cost_lock_is_detected_in_one_measurement(self):
+        """수요가 이미 노드를 채우면 시험 없이 즉시 알린다."""
+        app = self.app(name="svc", slo_seconds=1.0, samples=2000, window_seconds=120.0,
+                       request_m=750, cpu_limit_m=2000, target=55, min_replicas=2,
+                       max_replicas=8, replicas=8, pods_p90=8, pods_max=8,
+                       per_pod_p90=1400, per_pod_p95=1450, total_cpu_p90=11000,
+                       total_cpu_p95=11298, cpu_samples=60,
+                       latencies=tuple([.40] * 400))
+        snapshot = engine.TuningSnapshot(
+            {"svc": app}, engine.ClusterSnapshot(baseline_nodes=2, node_average=7,
+                                                 node_count=7, node_alloc_m=1930,
+                                                 cluster_cpu_p95_m=11122,
+                                                 system_reserved_m=900))
+        fit = engine.deterministic_reservation(snapshot)
+        self.assertEqual(fit["nodes"], 7)
+        self.assertEqual(fit["knobs"]["svc"]["request"], 1600)
+        result = engine.plan(snapshot)
+        self.assertTrue(result["cost_locked"])
+        self.assertIn("비용을 더 줄일 수 없다", result["reason"])
+        for candidate in result["candidates"]:
+            self.assertGreaterEqual(candidate["predicted_nodes"], 7)
+
     def test_latest_stress_measurement_lowers_request_within_safe_nodes(self):
         """2026-08-20 17:56 실측 재현.
 
@@ -151,16 +186,13 @@ class SharedEngineTests(unittest.TestCase):
                                    node_count=8, node_alloc_m=1930,
                                    cluster_cpu_p95_m=10695, system_reserved_m=900),
         )
-        optimal = next(c for c in engine.generate_candidates(snapshot)
-                       if c.kind == "request-optimal" and c.app == "stress")
-        self.assertLess(optimal.proposed["request"], 750)
-        self.assertEqual(optimal.proposed["target"], 55)
-        self.assertEqual(optimal.proposed["estimated_replicas"], 8)
-        # 실측 CPU 수요(10695m/1930m = 6대)보다 낮은 노드는 제안하지 않는다.
-        self.assertGreaterEqual(optimal.predicted_nodes, 6)
-        self.assertLessEqual(optimal.cpu_supply_ratio, engine.MAX_EXTRAPOLATED_SLOWDOWN)
-        self.assertGreater(optimal.predicted_delta, 0)
-        self.assertEqual(optimal.settle_seconds, 105)
+        result = engine.plan(snapshot)
+        # 실측 수요(12400m+900m)는 7대분이고 관측 평균은 7.22대이므로 여유가 1대 미만이다.
+        self.assertEqual(result["reservation_fit"]["nodes"], 7)
+        for candidate in result["candidates"]:
+            self.assertGreaterEqual(candidate["predicted_nodes"], 7)
+        # 과소예약(750m에 파드당 992m 사용)은 나눗셈으로 바로 교정값이 나온다: 7000m ÷ 8파드.
+        self.assertEqual(engine._usage_sized(stress, engine._current_dict(stress))["request"], 875)
 
     def test_measured_rejection_blocks_repeating_the_same_node_count(self):
         measured = tuple([.45] * 400)

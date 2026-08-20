@@ -69,6 +69,26 @@ class SharedEngineTests(unittest.TestCase):
         step = (high - low) / (count - 1)
         return tuple(round(low + step * i, 4) for i in range(count))
 
+    def test_severe_performance_shortfall_triggers_aggressive_recovery(self):
+        """user 성능 14.8%처럼 심한 미달이면 target을 크게 낮추고 replica를 늘린다(비용보다 우선)."""
+        u = engine.AppSnapshot(
+            name="user", slo_seconds=.2, samples=32000, window_seconds=120.0,
+            availability=99.8, performance=14.8, request_m=175, memory_request_mi=128,
+            target=90, min_replicas=2, max_replicas=9, replicas=9, pods_p90=9, pods_max=9,
+            per_pod_p90=170, per_pod_p95=400, total_cpu_p90=1530, total_cpu_p95=3600,
+            cpu_samples=60, latencies=tuple([.05] * 44 + [.25] * 256))
+        snapshot = engine.TuningSnapshot(
+            {"user": u}, engine.ClusterSnapshot(node_alloc_m=1930, node_mem_alloc_mi=3292,
+                                                cluster_cpu_p95_m=1530, system_reserved_m=900,
+                                                baseline_node_count=2, zone_count=2, node_average=3))
+        gr = next(c for c in engine.generate_candidates(snapshot) if c.kind == "gate-recovery")
+        self.assertEqual(gr.proposed["target"], engine.TARGET_MIN)   # 심한 미달 -> 최저 target
+        self.assertGreater(gr.proposed["max"], 9)                    # 스케일아웃 여지 확대
+        self.assertGreaterEqual(gr.proposed["min"], 3)               # 초기 파드 증가
+        self.assertFalse(gr.disruptive)                              # HPA-only (부하 중 적용 가능)
+        # gate-recovery가 후보 최상위(비용보다 우선).
+        self.assertEqual(engine.generate_candidates(snapshot)[0].kind, "gate-recovery")
+
     def test_sizing_stays_below_computed_need_with_headroom(self):
         """request는 노드를 꽉 채우는 계산 최대치가 아니라 그보다 낮게(HEADROOM) 나온다."""
         self.assertLess(engine.REQUEST_HEADROOM, 1.0)

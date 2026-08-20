@@ -1135,16 +1135,30 @@ def generate_candidates(snapshot: TuningSnapshot, rejected=None, namespace="app"
             continue
         current = _current_dict(app)
         bottleneck = classify_bottleneck(app, snapshot.cluster, snapshot.history)
-        if app.performance < snapshot.perf_floor or app.availability < (
-                snapshot.avail_floor if snapshot.cost_first else snapshot.availability_gate):
+        avail_floor = snapshot.avail_floor if snapshot.cost_first else snapshot.availability_gate
+        if app.performance < snapshot.perf_floor or app.availability < avail_floor:
             proposed = dict(current)
-            proposed["target"] = max(TARGET_MIN, current["target"] - 15)
-            if bottleneck == "hpa-max":
-                proposed["max"] = current["max"] + max(2, int(math.ceil(current["max"] * .25)))
-            if bottleneck == "cold-start" and current["min"] < current["max"]:
-                proposed["min"] = min(current["max"], current["min"] + 1)
+            # 미달이 심할수록 target을 크게 내려 파드를 일찍/많이 확장한다(경합 완화 = 지연 감소).
+            perf_gap = max(0.0, snapshot.perf_floor - app.performance)
+            avail_gap = max(0.0, avail_floor - app.availability)
+            gap = max(perf_gap, avail_gap)
+            if gap >= 30:      # 14.8% vs 80% 같은 심한 미달
+                proposed["target"] = TARGET_MIN
+            elif gap >= 15:
+                proposed["target"] = max(TARGET_MIN, current["target"] - 30)
+            else:
+                proposed["target"] = max(TARGET_MIN, current["target"] - 15)
+            # 스케일아웃 여지를 넓히고, 초기부터 파드를 늘려 콜드스타트/경합을 줄인다.
+            if app.max_replicas and app.pods_max >= app.max_replicas:
+                proposed["max"] = current["max"] + max(2, int(math.ceil(current["max"] * .5)))
+            if gap >= 15 and current["min"] < proposed.get("max", current["max"]):
+                proposed["min"] = min(proposed.get("max", current["max"]), current["min"] + 1)
             c = _make_candidate(snapshot, app, "gate-recovery", proposed,
-                                f"안전 게이트 복구: perf {app.performance:.1f}%, avail {app.availability:.1f}%",
+                                f"성능/가용성 게이트 복구(우선): perf {app.performance:.1f}%(>= {snapshot.perf_floor:.0f}), "
+                                f"avail {app.availability:.1f}%(>= {avail_floor:.0f}) → "
+                                f"target {current['target']}→{proposed['target']}%"
+                                + (f", max {current['max']}→{proposed['max']}" if proposed.get('max',current['max'])!=current['max'] else "")
+                                + (f", min {current['min']}→{proposed['min']}" if proposed.get('min',current['min'])!=current['min'] else ""),
                                 6.0, namespace)
             if c and c.key() not in rejected:
                 candidates.append(c)

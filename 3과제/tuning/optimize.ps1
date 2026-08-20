@@ -75,7 +75,10 @@ function Set-Hpa { param([string]$App, $Knob)
 }
 
 if (-not $Url) { $Url = $ENDPOINT }
-$urlArg = @(); if ($Url) { $urlArg = @('-Url', $Url) }
+# loadtest.ps1 에 이름으로 넘긴다. 배열 splat(@('-Url',$Url))은 PS가 '-Url'을 위치값으로
+# 처리해 URL이 남는 위치 인수가 되며 "위치 매개 변수를 찾을 수 없습니다" 로 깨진다.
+$ltArgs = @{ Duration = $Duration; Label = 'opt' }
+if ($Url) { $ltArgs['Url'] = $Url }
 $loadtest = Join-Path $Here 'loadtest.ps1'
 
 Write-Host '=== 닫힌 루프 최적화 (목적함수 = score.py 공식 총점) ===' -ForegroundColor Cyan
@@ -87,7 +90,7 @@ $rejFile = Join-Path $env:TEMP 'optimize-rejected.json'
 '[]' | Set-Content -Path $rejFile -Encoding ascii
 
 # --- 베이스라인 측정 ---
-& $loadtest -Duration $Duration -Label 'opt' @urlArg | Out-Null
+& $loadtest @ltArgs | Out-Null
 $bestOut = Join-Path $env:TEMP 'tune-opt'
 $bestScore = Get-Score $bestOut
 $bestKnobs = (Get-NextStep $bestOut $null).knobs
@@ -125,7 +128,7 @@ for ($i = 1; $i -le $Iterations; $i++) {
   Set-Hpa $app $knob
   Start-Sleep -Seconds $settle           # 스케일 반영/노드 드레인 대기(비용 수는 길게)
 
-  & $loadtest -Duration $Duration -Label 'opt' @urlArg | Out-Null
+  & $loadtest @ltArgs | Out-Null
   $score = Get-Score $bestOut
 
   $gateOk = $score.perf_gate_pass -and $score.avail_gate_pass

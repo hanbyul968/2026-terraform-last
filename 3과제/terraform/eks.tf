@@ -139,6 +139,47 @@ resource "aws_iam_role_policy_attachment" "eks_node" {
   policy_arn = each.value
 }
 
+# AL2023 managed nodes use nodeadm. A custom launch template is required to
+# raise kubelet maxPods together with VPC CNI prefix delegation. Applying this
+# to a node group that was created without a launch template can replace the
+# node group, so it must be applied before the official load window.
+resource "aws_launch_template" "eks_node" {
+  name_prefix            = "${local.name}-eks-node-"
+  update_default_version = true
+
+  user_data = base64encode(<<-EOT
+    MIME-Version: 1.0
+    Content-Type: multipart/mixed; boundary="//"
+
+    --//
+    Content-Type: application/node.eks.aws
+
+    ---
+    apiVersion: node.eks.aws/v1alpha1
+    kind: NodeConfig
+    spec:
+      kubelet:
+        config:
+          maxPods: ${var.node_max_pods}
+    --//--
+  EOT
+  )
+
+  block_device_mappings {
+    device_name = "/dev/xvda"
+    ebs {
+      delete_on_termination = true
+      encrypted             = true
+      volume_size           = 30
+      volume_type           = "gp3"
+    }
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
 resource "aws_eks_node_group" "main" {
   cluster_name    = aws_eks_cluster.this.name
   node_group_name = "${local.name}-ng"
@@ -148,7 +189,11 @@ resource "aws_eks_node_group" "main" {
   instance_types = [var.node_instance_type]
   capacity_type  = "ON_DEMAND"
   ami_type       = "AL2023_x86_64_STANDARD"
-  disk_size      = 30
+
+  launch_template {
+    id      = aws_launch_template.eks_node.id
+    version = aws_launch_template.eks_node.latest_version
+  }
 
   scaling_config {
     desired_size = var.node_desired_size

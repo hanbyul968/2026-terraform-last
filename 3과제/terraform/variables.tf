@@ -37,6 +37,20 @@ variable "eks_version" {
   default = "1.35"
 }
 
+# Prefix Delegation 사용 시 t3.medium의 ENI 기반 17 Pod 제한을 해제한다.
+# 이 값은 허용 상한일 뿐 실제 Pod 밀도는 requests.cpu/memory가 결정한다.
+variable "node_max_pods" {
+  type        = number
+  default     = 110
+  description = "Kubelet maxPods for managed and Karpenter nodes when VPC CNI prefix delegation is enabled."
+
+  validation {
+    condition     = var.node_max_pods >= 17 && var.node_max_pods <= 110
+    error_message = "node_max_pods must be between 17 and the EKS recommended ceiling 110."
+  }
+}
+
+
 variable "node_instance_type" {
   type    = string
   default = "t3.medium"

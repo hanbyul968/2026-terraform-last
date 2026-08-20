@@ -11,6 +11,9 @@ param(
   [int]$Iterations = 3,
   [int]$SettleSeconds = 25,
   [int]$CostSettleSeconds = 105,
+  [ValidateSet('cost','balanced')][string]$Objective = 'cost',
+  [double]$AvailFloor = 92,
+  [double]$PerfFloor = 35,
   [switch]$Apply,
   [string]$Url = ''
 )
@@ -34,7 +37,8 @@ function Get-Score { param([string]$OutDir)
   return ($raw | Select-Object -Last 1 | ConvertFrom-Json)
 }
 function Get-NextStep { param([string]$OutDir,[string]$RejFile)
-  $a=@((Join-Path $Here 'optimize.py'),$OutDir,'--slos',$SLOS,'--ns',$NS,'--avail-gate',"$AVAIL_GATE",'--json')
+  $a=@((Join-Path $Here 'optimize.py'),$OutDir,'--slos',$SLOS,'--ns',$NS,'--avail-gate',"$AVAIL_GATE",
+       '--objective',$Objective,'--avail-floor',"$AvailFloor",'--perf-floor',"$PerfFloor",'--json')
   if($RejFile){$a+=@('--rejected',$RejFile)}
   $raw=Invoke-Py $a; return ($raw | Select-Object -Last 1 | ConvertFrom-Json)
 }
@@ -81,7 +85,7 @@ $candidateLimit=[Math]::Min([Math]::Max($Iterations,0),3)
 $rejFile=Join-Path $env:TEMP 'optimize-rejected.json';'[]'|Set-Content $rejFile -Encoding ascii
 $rejected=@();$pending=$null;$bestKnobs=$null
 Write-Host '=== 공식 채점기준 라이브 튜닝 ===' -ForegroundColor Cyan
-Write-Host ("예산 {0}분 / warmup {1}s / 측정 {2} / 후보 최대 {3}개" -f $BudgetMinutes,$WarmupSeconds,$Duration,$candidateLimit)
+Write-Host ("예산 {0}분 / warmup {1}s / 측정 {2} / 후보 최대 {3}개 / 목표 {4} (가용성>={5}% 성능>={6}%)" -f $BudgetMinutes,$WarmupSeconds,$Duration,$candidateLimit,$Objective,$AvailFloor,$PerfFloor)
 
 try {
   if($Apply -and $WarmupSeconds -gt 0){
@@ -114,7 +118,11 @@ try {
     Start-Sleep -Seconds $settle
     & $loadtest @ltArgs | Out-Null
     $score=Get-Score $out
-    $gate=$score.perf_gate_pass -and $score.avail_gate_pass
+    # 공식 채점 기준선: 가용성 90%+면 앱당 만점, 성능 30% 미만이면 비용 12점 전부 0.
+    # 비용 우선 모드는 그 실제 선(기본 92% / 35%)만 지키고 비용을 챙긴다.
+    $availFloor=if($step.avail_floor){[double]$step.avail_floor}else{$AvailFloor}
+    $perfFloor=if($step.perf_floor){[double]$step.perf_floor}else{$PerfFloor}
+    $gate=($score.min_avail -ge $availFloor) -and ($score.min_perf -ge $perfFloor) -and ($score.cost_points -gt 0)
     # 99% availability/30% performance는 점수보다 우선하는 hard gate다.
     # 공식 band 점수가 동률이어도 gate 방향으로 개선되면 채택해 다음 복구 수를 허용한다.
     $availImproved=(-not $bestScore.avail_gate_pass) -and ($score.min_avail -gt $bestScore.min_avail) -and ($score.min_perf -ge $bestScore.min_perf)
@@ -134,8 +142,8 @@ try {
     }
   }
   Write-Host ("`n=== 종료 {0:N1}분 / best {1:N1}/36 ratio={2:N2} ===" -f $sw.Elapsed.TotalMinutes,$bestScore.total,$bestScore.cost_ratio) -ForegroundColor Green
-  if(-not ($bestScore.perf_gate_pass -and $bestScore.avail_gate_pass)){
-    Write-Warning ("안전 게이트 미복구: min availability={0:N1}% / min performance={1:N1}%. 이 상태로 공식 트래픽을 시작하지 마세요." -f $bestScore.min_avail,$bestScore.min_perf)
+  if(($bestScore.min_avail -lt $AvailFloor) -or ($bestScore.min_perf -lt $PerfFloor)){
+    Write-Warning ("안전선 미달: min availability={0:N1}% (>={1}%) / min performance={2:N1}% (>={3}%)" -f $bestScore.min_avail,$AvailFloor,$bestScore.min_perf,$PerfFloor)
   }
   foreach($name in $bestKnobs.PSObject.Properties.Name|Sort-Object){$k=$bestKnobs.$name;Write-Host ('{0}: requests.cpu="{1}m", min_replicas={2}, max_replicas={3}, average_utilization={4}' -f $name,$k.request,$k.min,$k.max,$k.target)}
   Write-Host '현재 값은 라이브 적용 상태입니다. Terraform apply는 튜닝 흐름에 필요하지 않습니다.'

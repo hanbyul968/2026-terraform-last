@@ -25,6 +25,11 @@ NODE_CPU_HARD_PCT = 90
 # 선형 지연 모델(지연 ∝ CPU 공급 부족 배수)은 관측 범위를 크게 벗어나면 신뢰할 수 없다.
 # 한 회차에서 허용하는 외삽 한도. 더 내려가려면 그 값을 실측한 뒤 다음 회차가 이어서 판단한다.
 MAX_EXTRAPOLATED_SLOWDOWN = 1.5
+# 비용 우선 모드 한도. 공식 채점에서 가용성은 90%만 넘으면 앱당 만점이고, 성능은 30% 미만일 때만
+# 비용 12점이 0이 된다. 그래서 비용을 챙길 때 지켜야 할 실제 선은 99%가 아니라 아래 값이다.
+COST_FIRST_AVAIL_FLOOR = 92.0
+COST_FIRST_PERF_FLOOR = 35.0
+COST_FIRST_MAX_SLOWDOWN = 3.0
 
 
 def clamp(value, low, high):
@@ -170,6 +175,19 @@ class ClusterSnapshot:
     node_types: Tuple[str, ...] = ()
 
     @property
+    def daemonset_per_node_m(self):
+        """DaemonSet 등 시스템 예약은 노드마다 붙는다. 총합을 고정값으로 더하면 노드가 늘수록
+        예약이 부풀어 계산이 틀어진다(실측: 6노드에서 총 1500m = 노드당 250m)."""
+        if self.system_reserved_m <= 0 or self.node_count <= 0:
+            return 0
+        return int(self.system_reserved_m / self.node_count)
+
+    @property
+    def usable_cpu_per_node_m(self):
+        """앱 파드가 실제로 쓸 수 있는 노드당 CPU."""
+        return max(1, self.node_alloc_m - self.daemonset_per_node_m)
+
+    @property
     def physical_cpu_floor(self):
         if self.node_alloc_m <= 0 or self.cluster_cpu_p95_m <= 0:
             return 1
@@ -182,6 +200,26 @@ class TuningSnapshot:
     cluster: ClusterSnapshot
     availability_gate: float = rubric.DEFAULT_AVAILABILITY_GATE
     history: List[dict] = field(default_factory=list)
+    cost_first: bool = True
+    avail_floor: float = COST_FIRST_AVAIL_FLOOR
+    perf_floor: float = COST_FIRST_PERF_FLOOR
+
+    @property
+    def max_slowdown(self):
+        return COST_FIRST_MAX_SLOWDOWN if self.cost_first else MAX_EXTRAPOLATED_SLOWDOWN
+
+    def acceptable(self, result):
+        """비용을 챙길 때 실제로 지켜야 하는 선.
+
+        공식 채점: 가용성 >= 90%면 앱당 만점, 성능 < 30%면 비용 12점 전부 0.
+        따라서 비용 우선 모드는 avail_floor(기본 92%)와 perf_floor(기본 35%)만 지키면 된다.
+        균형 모드는 기존처럼 가용성 99%를 유지한다.
+        """
+        if self.cost_first:
+            return (result.min_availability >= self.avail_floor
+                    and result.min_performance >= self.perf_floor
+                    and result.cost_points > 0)
+        return result.perf_gate_pass and result.avail_gate_pass
 
     def score(self):
         return rubric.score(
@@ -542,7 +580,7 @@ def _reservation_nodes(snapshot: TuningSnapshot, changed_app: str, proposed: dic
     alloc = snapshot.cluster.node_alloc_m
     if alloc <= 0:
         return snapshot.cluster.node_count or int(math.ceil(snapshot.cluster.node_average))
-    total = snapshot.cluster.system_reserved_m
+    total = 0
     for name, app in snapshot.apps.items():
         req = proposed["request"] if name == changed_app else int(app.request_m or REQUEST_MIN_M)
         observed = int(app.pods_p90 or app.replicas or app.min_replicas or 1)
@@ -552,7 +590,7 @@ def _reservation_nodes(snapshot: TuningSnapshot, changed_app: str, proposed: dic
         else:
             pods = observed
         total += req * pods
-    return max(1, int(math.ceil(total / alloc)))
+    return max(1, int(math.ceil(total / snapshot.cluster.usable_cpu_per_node_m)))
 
 
 def _node_calibration(snapshot: TuningSnapshot):
@@ -616,18 +654,22 @@ def deterministic_reservation(snapshot: TuningSnapshot):
     필요 노드와 같으면 request로는 비용을 더 줄일 수 없다는 뜻이므로 즉시 수렴을 알린다.
     """
     alloc = snapshot.cluster.node_alloc_m
-    demand = sum(int(app.total_cpu_p95 or 0) for app in snapshot.apps.values())
-    if alloc <= 0 or demand <= 0:
+    usable = snapshot.cluster.usable_cpu_per_node_m
+    # 수요는 '동시' 클러스터 CPU p95를 쓴다. 앱별 p95 합은 피크 시점이 달라 과대추정된다.
+    demand = snapshot.cluster.cluster_cpu_p95_m or sum(
+        int(app.total_cpu_p95 or 0) for app in snapshot.apps.values())
+    shares_total = sum(int(app.total_cpu_p95 or 0) for app in snapshot.apps.values())
+    if alloc <= 0 or demand <= 0 or shares_total <= 0:
         return None
-    nodes_min = max(1, int(math.ceil((snapshot.cluster.system_reserved_m + demand) / alloc)))
-    budget = nodes_min * alloc - snapshot.cluster.system_reserved_m
+    nodes_min = max(1, int(math.ceil(demand / usable)))
+    budget = nodes_min * usable
     knobs = {}
     for name, app in snapshot.apps.items():
         if not app.measured:
             continue
         current = _current_dict(app)
         pods = max(1, int(app.pods_p90 or app.replicas or current["min"]))
-        share = int(app.total_cpu_p95 or 0) / demand
+        share = int(app.total_cpu_p95 or 0) / shares_total
         request = max(REQUEST_MIN_M, ceil_to(budget * share / pods))
         if app.cpu_limit_m:
             request = min(request, app.cpu_limit_m)
@@ -676,7 +718,7 @@ def _safe_node_floor(snapshot: TuningSnapshot, current_nodes: int):
     alloc = snapshot.cluster.node_alloc_m
     if demand <= 0 or alloc <= 0:
         return 1
-    needed = int(math.ceil((demand + snapshot.cluster.system_reserved_m) / alloc))
+    needed = int(math.ceil(demand / snapshot.cluster.usable_cpu_per_node_m))
     return max(1, min(current_nodes, needed))
 
 
@@ -715,9 +757,9 @@ def _optimal_request_target(snapshot: TuningSnapshot, app: AppSnapshot, current:
                 continue
             predicted, slowdown = _predicted_score(
                 snapshot, nodes, _estimated_node_average(snapshot, app.name, proposed))
-            if slowdown > MAX_EXTRAPOLATED_SLOWDOWN:
+            if slowdown > snapshot.max_slowdown:
                 continue
-            if not (predicted.perf_gate_pass and predicted.avail_gate_pass):
+            if not snapshot.acceptable(predicted):
                 continue
             rank = (predicted.total, -nodes, -request_m, -abs(target - current["target"]))
             options.append((rank, proposed, nodes, predicted.total, slowdown,
@@ -761,7 +803,9 @@ def _make_candidate(snapshot, app, kind, proposed, reason, priority, namespace="
         snapshot, predicted_nodes, _estimated_node_average(snapshot, app.name, proposed))
     supply_ratio = slowdown
     risk = "cpu-oversubscribed" if supply_ratio > 1.0 else ""
-    if kind != "usage-sized" and supply_ratio > MAX_EXTRAPOLATED_SLOWDOWN:
+    if kind != "usage-sized" and supply_ratio > snapshot.max_slowdown:
+        return None
+    if not snapshot.acceptable(predicted_score) and kind not in ("gate-recovery", "usage-sized"):
         return None
     delta = predicted_score.total - result.total
     if kind in ("gate-recovery", "performance-band"):
@@ -795,14 +839,18 @@ def generate_candidates(snapshot: TuningSnapshot, rejected=None, namespace="app"
     # 실측으로 거절된 노드 수는 다시 시도하지 않는다(같은 회차 안에서 학습).
     min_nodes_allowed = (max(rejected_nodes) + 1) if rejected_nodes else 1
     candidates = []
-    any_gate_failure = any(app.performance < rubric.COST_PERF_GATE or app.availability < snapshot.availability_gate
-                           for app in snapshot.apps.values())
+    any_gate_failure = any(
+        app.performance < snapshot.perf_floor
+        or app.availability < (snapshot.avail_floor if snapshot.cost_first
+                               else snapshot.availability_gate)
+        for app in snapshot.apps.values())
     for app in snapshot.apps.values():
         if not app.measured:
             continue
         current = _current_dict(app)
         bottleneck = classify_bottleneck(app, snapshot.cluster, snapshot.history)
-        if app.performance < rubric.COST_PERF_GATE or app.availability < snapshot.availability_gate:
+        if app.performance < snapshot.perf_floor or app.availability < (
+                snapshot.avail_floor if snapshot.cost_first else snapshot.availability_gate):
             proposed = dict(current)
             proposed["target"] = max(TARGET_MIN, current["target"] - 15)
             if bottleneck == "hpa-max":
@@ -830,7 +878,8 @@ def generate_candidates(snapshot: TuningSnapshot, rejected=None, namespace="app"
         current_probe = dict(current)
         current_probe["estimated_replicas"] = _predicted_replicas(app, current_probe)
         current_nodes = _estimated_nodes(snapshot, app.name, current_probe)
-        node_floor = max(_safe_node_floor(snapshot, current_nodes), min_nodes_allowed)
+        node_floor = min_nodes_allowed if snapshot.cost_first else max(
+            _safe_node_floor(snapshot, current_nodes), min_nodes_allowed)
         # (1) 실측 사용량에서 바로 역산한 값. 탐색 없이 한 회차로 확정한다.
         sized = _usage_sized(app, current)
         if sized:
@@ -850,6 +899,23 @@ def generate_candidates(snapshot: TuningSnapshot, rejected=None, namespace="app"
                 1.0, namespace)
             if c and c.key() not in rejected:
                 candidates.append(c)
+        # (2) 파드 수 상한. 노드는 'request x 파드수'로 늘어나므로 max_replicas도 비용 노브다.
+        #     실측에서 상한까지 붙었고 성능 밴드에 여유가 있을 때만 제안한다.
+        saturated = app.max_replicas and app.pods_max >= app.max_replicas
+        band_margin = app.performance - rubric.band_floor(app.performance)
+        if saturated and band_margin >= 5.0 and current["max"] > current["min"]:
+            capped = dict(current)
+            capped["max"] = max(current["min"], int(math.floor(current["max"] * .85)))
+            if capped["max"] < current["max"]:
+                c = _make_candidate(
+                    snapshot, app, "pod-cap", capped,
+                    f"파드 상한이 비용을 만든다: 실측 최대 {app.pods_max}개(상한 {current['max']}) x "
+                    f"request {current['request']}m = 예약 {app.pods_max * current['request']}m; "
+                    f"성능 {app.performance:.1f}%는 밴드 하한 위 {band_margin:.1f}%p 여유 → "
+                    f"max {current['max']}→{capped['max']}",
+                    0.0, namespace)
+                if c and c.key() not in rejected:
+                    candidates.append(c)
         optimal = _optimal_request_target(snapshot, app, current, node_floor)
         if optimal and (not sized or sized["request"] != optimal[1]["request"]):
             _, proposed, searched_nodes, searched_total, slowdown, protected_replicas = optimal
@@ -880,7 +946,7 @@ def generate_candidates(snapshot: TuningSnapshot, rejected=None, namespace="app"
                 if c and c.key() not in rejected and c.predicted_nodes <= math.ceil(snapshot.cluster.node_average):
                     candidates.append(c)
     kind_rank = {"gate-recovery": 5, "usage-sized": 4, "performance-band": 3,
-                 "request-optimal": 2, "cost-reclaim": 1}
+                 "request-optimal": 2, "pod-cap": 2, "cost-reclaim": 1}
     candidates.sort(key=lambda c: (c.predicted_delta, -max(c.cpu_supply_ratio, 1.0),
                                    kind_rank.get(c.kind, 0),
                                    -int(c.disruptive), -c.predicted_nodes), reverse=True)
@@ -894,9 +960,10 @@ def plan(snapshot: TuningSnapshot, rejected=None, namespace="app", rejected_node
     cost_locked = ""
     if fit:
         if fit["nodes"] >= snapshot.cluster.node_average:
-            cost_locked = (f"실측 CPU 수요 {fit['demand_m']}m + 시스템 {snapshot.cluster.system_reserved_m}m는 "
-                           f"이미 {fit['nodes']}대(관측 {snapshot.cluster.node_average:.1f}대)를 채운다. "
-                           f"request 조정으로 비용을 더 줄일 수 없다 — 수요를 줄이거나 성능을 내주는 선택만 남는다.")
+            cost_locked = (f"실측 동시 CPU 수요 {fit['demand_m']}m ÷ 노드당 가용 "
+                           f"{snapshot.cluster.usable_cpu_per_node_m}m = {fit['nodes']}대가 필요하고 "
+                           f"관측 평균은 {snapshot.cluster.node_average:.1f}대다. "
+                           f"request/파드수 조정으로 비용을 더 줄일 수 없다 — 수요를 줄이거나 성능을 내주는 선택만 남는다.")
     apps = []
     for name, app in sorted(snapshot.apps.items()):
         apps.append({
@@ -907,6 +974,9 @@ def plan(snapshot: TuningSnapshot, rejected=None, namespace="app", rejected_node
             "request": app.request_m, "target": app.target, "min": app.min_replicas,
             "max": app.max_replicas, "replicas": app.replicas,
             "trigger": round(app.trigger_m, 2), "cpu_p90": app.per_pod_p90,
+            "pods_p90": app.pods_p90, "pods_max": app.pods_max,
+            "peak_reservation_m": int((app.pods_max or 0) * (app.request_m or 0)),
+            "cpu_bound_fraction": round(app.cpu_bound_fraction, 3),
             "total_cpu_p90": app.total_cpu_p90, "bottleneck": classify_bottleneck(app, snapshot.cluster, snapshot.history),
         })
     if cost_locked:

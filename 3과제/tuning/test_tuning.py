@@ -142,11 +142,17 @@ class SharedEngineTests(unittest.TestCase):
         fit = engine.deterministic_reservation(snapshot)
         self.assertEqual(fit["nodes"], 7)
         self.assertEqual(fit["knobs"]["svc"]["request"], 1600)
-        result = engine.plan(snapshot)
-        self.assertTrue(result["cost_locked"])
-        self.assertIn("비용을 더 줄일 수 없다", result["reason"])
-        for candidate in result["candidates"]:
+        # 균형 모드: 실측 수요보다 적은 노드는 제안하지 않는다.
+        snapshot.cost_first = False
+        balanced = engine.plan(snapshot)
+        for candidate in balanced["candidates"]:
             self.assertGreaterEqual(candidate["predicted_nodes"], 7)
+        # 비용 우선 모드: 공식 밴드 기준(가용성 92%, 성능 35%)만 지키고 노드를 더 줄인다.
+        snapshot.cost_first = True
+        cost = engine.plan(snapshot)
+        self.assertTrue(cost["cost_locked"])
+        for candidate in cost["candidates"]:
+            self.assertLessEqual(candidate["cpu_supply_ratio"], engine.COST_FIRST_MAX_SLOWDOWN)
 
     def test_latest_stress_measurement_lowers_request_within_safe_nodes(self):
         """2026-08-20 17:56 실측 재현.
@@ -186,11 +192,15 @@ class SharedEngineTests(unittest.TestCase):
                                    node_count=8, node_alloc_m=1930,
                                    cluster_cpu_p95_m=10695, system_reserved_m=900),
         )
-        result = engine.plan(snapshot)
-        # 실측 수요(12400m+900m)는 7대분이고 관측 평균은 7.22대이므로 여유가 1대 미만이다.
-        self.assertEqual(result["reservation_fit"]["nodes"], 7)
-        for candidate in result["candidates"]:
-            self.assertGreaterEqual(candidate["predicted_nodes"], 7)
+        # 비용 우선(기본): request를 내려 노드를 줄이고, 공식 밴드 기준선만 지킨다.
+        cost = engine.plan(snapshot)
+        cut = next(c for c in cost["candidates"] if c["app"] == "stress")
+        self.assertLess(cut["proposed"]["request"], 750)
+        self.assertGreater(cut["predicted_delta"], 0)
+        # 균형 모드: 실측 수요를 밑도는 노드는 제안하지 않는다.
+        snapshot.cost_first = False
+        for candidate in engine.plan(snapshot)["candidates"]:
+            self.assertGreaterEqual(candidate["predicted_nodes"], 6)
         # 과소예약(750m에 파드당 992m 사용)은 나눗셈으로 바로 교정값이 나온다: 7000m ÷ 8파드.
         self.assertEqual(engine._usage_sized(stress, engine._current_dict(stress))["request"], 875)
 
@@ -286,9 +296,17 @@ class PowerShellRunnerContractTests(unittest.TestCase):
         self.assertIn("$candidateLimit=[Math]::Min([Math]::Max($Iterations,0),3)", self.script)
         self.assertIn("for($i=1;$i -le $candidateLimit;$i++)", self.script)
         self.assertIn("$safetyImproved -or ($gate -and $score.total -gt $bestScore.total)", self.script)
-        self.assertIn("안전 게이트 미복구", self.script)
+        self.assertIn("안전선 미달", self.script)
         self.assertIn("$durationSec=ConvertTo-DurationSeconds $Duration", self.script)
         self.assertIn("$settle*2+$durationSec+150", self.script)
+
+    def test_accepts_on_official_band_floors_not_a_stricter_gate(self):
+        self.assertIn("[ValidateSet('cost','balanced')][string]$Objective = 'cost'", self.script)
+        self.assertIn("[double]$AvailFloor = 92", self.script)
+        self.assertIn("[double]$PerfFloor = 35", self.script)
+        self.assertIn("($score.min_avail -ge $availFloor) -and ($score.min_perf -ge $perfFloor)",
+                      self.script)
+        self.assertNotIn("$score.perf_gate_pass -and $score.avail_gate_pass", self.script)
 
     def test_plans_from_accepted_snapshot_and_settles_after_rollback(self):
         self.assertIn("Save-Snapshot $out $bestOut", self.script)

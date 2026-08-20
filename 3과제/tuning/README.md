@@ -2,7 +2,11 @@
 
 3과제 40점은 **전부 부하 테스트 결과**로 매겨진다. Dashboard 계산/튜닝 탭,
 `advise.py`, `optimize.py`, `score.py`는 모두 **`rubric.py` + `tuning_engine.py` 한 엔진**을 쓴다.
-공식 36점 소계를 그대로 최대화하며, 앱별 `availability ≥99%`와 `performance ≥30%`는 하드 게이트다.
+
+> **기본 목표는 비용 우선(`-Objective cost`)이다.** 공식 채점에서 가용성은 `≥90%`면 앱당 만점이고,
+> 성능은 `<30%`일 때만 비용 12점이 0이 된다. 그래서 지켜야 하는 실제 선은 가용성 99%가 아니라
+> **가용성 ≥92% · 성능 ≥35%**(여유 포함)이며, 그 안에서 노드를 최대한 줄여 비용 점수를 챙긴다.
+> 성능을 최대한 지키려면 `-Objective balanced`(가용성 99% 유지)로 실행한다.
 
 > **Source of truth는 Terraform 파일이 아니라 라이브 Deployment/HPA다.** 튜닝 명령은 현재 라이브
 > request/target/min/max를 읽어 적용하고 같은 snapshot으로 정확히 롤백한다. Terraform drift는 정상이며,

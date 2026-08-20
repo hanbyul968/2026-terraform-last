@@ -84,6 +84,13 @@ def main():
     parser.add_argument("--slos", default="user=0.2,product=0.2,stress=1.0")
     parser.add_argument("--ns", default="app")
     parser.add_argument("--avail-gate", type=float, default=99.0)
+    parser.add_argument("--objective", choices=["cost", "balanced"], default="cost",
+                        help="cost: 공식 밴드 기준(가용성 90%+, 성능 30%+)에서 비용 우선. "
+                             "balanced: 가용성 99% 유지")
+    parser.add_argument("--avail-floor", type=float, default=None,
+                        help="비용 우선 모드에서 지킬 최소 가용성%% (기본 92)")
+    parser.add_argument("--perf-floor", type=float, default=None,
+                        help="비용 우선 모드에서 지킬 최소 성능%% (기본 35)")
     parser.add_argument("--rejected", default="")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
@@ -93,6 +100,11 @@ def main():
     slos = {kv.split("=")[0]: float(kv.split("=")[1]) for kv in args.slos.split(",") if kv}
     snapshot = engine.snapshot_from_outdir(outdir, slos, args.ns, BASELINE_NODES,
                                            availability_gate=args.avail_gate)
+    snapshot.cost_first = args.objective == "cost"
+    if args.avail_floor is not None:
+        snapshot.avail_floor = args.avail_floor
+    if args.perf_floor is not None:
+        snapshot.perf_floor = args.perf_floor
     rejected, rejected_nodes = _rejected_keys(args.rejected)
     data = engine.plan(snapshot, rejected, args.ns, rejected_nodes)
     best = data.get("best")
@@ -114,6 +126,11 @@ def main():
         "candidate": best, "candidates": data["candidates"],
         "current_total": data["score"]["total"],
         "current_cost_ratio": data["score"]["cost_ratio"], "knobs": knobs,
+        "objective": args.objective,
+        "avail_floor": snapshot.avail_floor if snapshot.cost_first else args.avail_gate,
+        "perf_floor": snapshot.perf_floor if snapshot.cost_first else rubric.COST_PERF_GATE,
+        "cost_locked": data.get("cost_locked", ""),
+        "reservation_fit": data.get("reservation_fit"),
     }
     if args.json:
         print(json.dumps(result, ensure_ascii=True, separators=(",", ":")))

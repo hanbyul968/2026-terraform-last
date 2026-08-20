@@ -113,6 +113,9 @@ def main():
     parser = argparse.ArgumentParser(description="loadtest 결과 -> 공식 채점기준 비파괴 튜닝 계획")
     parser.add_argument("target", help="loadtest label 또는 결과 폴더")
     parser.add_argument("--slos", default="user=0.2,product=0.2,stress=1.0")
+    parser.add_argument("--objective", choices=["cost", "balanced"], default="cost")
+    parser.add_argument("--avail-floor", type=float, default=None)
+    parser.add_argument("--perf-floor", type=float, default=None)
     parser.add_argument("--ns", default="app")
     parser.add_argument("--app", default="")
     parser.add_argument("--json", action="store_true")
@@ -122,6 +125,11 @@ def main():
         sys.exit(f"결과 폴더 없음: {outdir}")
     slos = {part.split("=")[0]: float(part.split("=")[1]) for part in args.slos.split(",") if part}
     snapshot = engine.snapshot_from_outdir(outdir, slos, args.ns, BASELINE_NODES)
+    snapshot.cost_first = args.objective == "cost"
+    if args.avail_floor is not None:
+        snapshot.avail_floor = args.avail_floor
+    if args.perf_floor is not None:
+        snapshot.perf_floor = args.perf_floor
     data = engine.plan(snapshot, namespace=args.ns)
     if args.json:
         print(json.dumps(data, ensure_ascii=True, separators=(",", ":")))

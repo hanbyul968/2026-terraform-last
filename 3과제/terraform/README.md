@@ -343,14 +343,17 @@ python waf_header_stats.py --log-group aws-waf-logs-wsi2026 --region us-east-1 -
 
 ## 7. 성능/비용 튜닝
 
+트래픽 전 ~20분 안에 끝낸다 (apply ~30분 + 튜닝 ~20분 = 1시간). 긴(180초) 반복 측정은 쓰지 않는다.
+
 ```powershell
 cd ..\tuning
-.\loadtest.ps1 $EP 180s baseline      # 병목 앱 찾기 (perf% 낮은 앱)
-.\autotune.ps1 $EP -App stress        # 그 앱만 정밀 스윕
+.\loadtest.ps1 -Duration 90s -Label t1     # 병목 앱 찾기 (채점 환산 + perf% 낮은 앱)
+.\optimize.ps1 -Apply                      # 15분 예산 안에서 HPA 자동 최적화(예산 초과 시 자동 중단)
 ```
 
-우승값은 `k8s_apps.tf`의 해당 앱 `requests.cpu` / HPA `average_utilization`·`min_replicas`에 박고
-apply한다 (`kubectl patch`는 재배포 시 사라짐). 상세는 [`../tuning/README.md`](../tuning/README.md).
+`optimize.ps1`이 출력한 우승값을 `k8s_apps.tf`의 해당 앱 `requests.cpu` / HPA
+`average_utilization`·`min_replicas`에 박고 apply한다 (`kubectl patch`는 재배포 시 사라짐).
+상세는 [`../tuning/README.md`](../tuning/README.md).
 
 **avail% < 99면 비용보다 무조건 용량부터.**
 

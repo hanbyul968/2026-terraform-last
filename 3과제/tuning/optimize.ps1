@@ -1,26 +1,34 @@
 ﻿<#
   닫힌 루프 HPA 최적화기 (measure -> score -> 한 수 패치 -> 재측정 -> 유지/되돌림).
 
-  목적함수는 score.py 의 '공식 채점 총점'(성능+가용성+비용, 36점)이다. optimize.py 가
-  다음 한 수를 고르고, 이 스크립트가 실제로 적용/검증한다. 예측이 틀리면 되돌린다.
+  ★ 시간예산이 최우선이다. apply(약 30분) + 튜닝은 트래픽 시작 전 1시간 안에 끝나야 하므로
+    이 스크립트는 -BudgetMinutes(기본 15분)를 넘기지 않고 '벽시계'로 스스로 멈춘다. 남은 예산이
+    한 회차에 못 미치면 더 돌지 않고 그때까지의 최적값을 출력한다. 30분씩 걸리던 요소(180s 최종
+    측정, 8회 고정 반복, 리버트 이중 롤아웃, 긴 sleep)는 전부 제거했다.
 
-  왜 kubectl patch 인가(terraform 이 아니라):
-    탐색은 회차마다 HPA target/min/max 만 바꾸며 빠르게 돌아야 한다. kubectl patch 는
-    즉시 반영·되돌림이 되고 terraform state 를 건드리지 않는다. 최종 우승값은 스크립트가
-    Terraform 형식으로 출력하며, 그 값을 k8s_apps.tf 에 반영하고 apply 하면 영구화된다.
-    ⚠ 탐색 중에는 terraform apply 를 하지 말 것(패치가 되돌려진다).
+  목적함수는 score.py 의 '공식 채점 총점'(성능+가용성+비용, 36점)이다. optimize.py 가 다음 한 수를
+  고르고, 이 스크립트가 실제로 적용/검증한다. 예측이 틀리면 되돌린다.
+
+  왜 kubectl patch 인가(terraform 이 아니라): HPA target/min/max 만 바꾸며 빠르게 돌아야 한다.
+  patch 는 즉시 반영·되돌림이 되고 terraform state 를 건드리지 않는다. 우승값은 끝에 Terraform
+  형식으로 출력하니 k8s_apps.tf 에 박고 apply 해 영구화한다. ⚠ 탐색 중 terraform apply 금지.
+
+  '부하 빠지는 시간' 반영: 비용 회수(target↑)는 파드/노드가 줄어드는 데 Karpenter
+  consolidateAfter(약 2분)만큼 걸리므로, 그 수만 측정 전 대기를 길게 준다(-CostSettleSeconds).
+  스케일아웃(성능/게이트)은 빨라서 짧게 대기한다.
 
   사용법:
-    .\optimize.ps1                         # DRY-RUN: 1회 측정 후 '다음 한 수'만 출력(클러스터 불변)
-    .\optimize.ps1 -Apply                  # 닫힌 루프 실행(HPA를 실제로 패치하며 최적값 탐색)
-    .\optimize.ps1 -Apply -Iterations 10 -Duration 90s -FinalDuration 180s
-    .\optimize.ps1 -Url http://<주소> -Apply
+    .\optimize.ps1                     # DRY-RUN: 1회 측정 후 '다음 한 수'만 출력(클러스터 불변)
+    .\optimize.ps1 -Apply              # 닫힌 루프(기본 15분 예산 안에서 자동 탐색)
+    .\optimize.ps1 -Apply -BudgetMinutes 12 -Duration 60s
 #>
 [CmdletBinding()]
 param(
-  [string]$Duration = '90s',        # 탐색 회차당 부하 길이(짧게 여러 번)
-  [string]$FinalDuration = '180s',  # 마지막 확정 측정 길이(채점과 동일하게 길게)
-  [int]$Iterations = 8,
+  [int]$BudgetMinutes = 15,         # 벽시계 총예산. 이걸 넘으면 새 회차를 시작하지 않는다.
+  [string]$Duration = '60s',        # 회차당 부하 길이(짧게). 성능/가용성 신호엔 충분하다.
+  [int]$Iterations = 6,             # 예산이 남아도 이 횟수까지만(안전 상한).
+  [int]$SettleSeconds = 25,         # 스케일아웃(성능/게이트) 후 안정 대기.
+  [int]$CostSettleSeconds = 105,    # 비용 회수(스케일인/노드 드레인) 후 대기 ~ consolidateAfter.
   [switch]$Apply,                   # 없으면 DRY-RUN(측정+제안만, 클러스터 불변)
   [string]$Url = ''
 )
@@ -40,13 +48,11 @@ function Invoke-Py { param([string[]]$PyArgs)
   & $py[0] @($py[1..($py.Count-1)]) @PyArgs
 }
 
-# score.py score 모드 -> JSON 요약(총점/비용ratio/게이트/앱별 perf,avail)
 function Get-Score { param([string]$OutDir)
   $raw = Invoke-Py @((Join-Path $Here 'score.py'), 'score', $OutDir, $SLOS, "$AVAIL_GATE", "$COST_PENALTY")
   return ($raw | Select-Object -Last 1 | ConvertFrom-Json)
 }
 
-# optimize.py -> 다음 한 수(JSON). rejected 는 재제안 금지 목록.
 function Get-NextStep { param([string]$OutDir, [string]$RejFile)
   $a = @((Join-Path $Here 'optimize.py'), $OutDir, '--slos', $SLOS, '--ns', $NS,
          '--avail-gate', "$AVAIL_GATE", '--json')
@@ -55,7 +61,8 @@ function Get-NextStep { param([string]$OutDir, [string]$RejFile)
   return ($raw | Select-Object -Last 1 | ConvertFrom-Json)
 }
 
-# HPA 한 개를 target/min/max 로 패치하고 롤아웃을 기다린다(JSON Patch).
+# HPA 한 개를 target/min/max 로 패치(JSON Patch). 롤아웃 대기는 짧게(HPA 변경은 템플릿 변경이
+# 아니라 파드 재생성이 없다). 실제 스케일 반영은 호출부에서 settle 로 기다린다.
 function Set-Hpa { param([string]$App, $Knob)
   $patch = @(
     @{ op = 'replace'; path = '/spec/minReplicas'; value = [int]$Knob.min },
@@ -65,30 +72,26 @@ function Set-Hpa { param([string]$App, $Knob)
   $f = Join-Path $env:TEMP "hpa-patch-$App.json"
   ($patch | ConvertTo-Json -Depth 5 -Compress) | Set-Content -Path $f -Encoding ascii
   & kubectl -n $NS patch hpa $App --type=json --patch-file $f | Out-Null
-  # HPA 변경은 즉시 반영되지만, min/max 변화로 파드가 늘/줄면 안정까지 잠깐 기다린다.
-  & kubectl -n $NS rollout status "deploy/$App" --timeout=120s | Out-Null
-  Start-Sleep -Seconds 20
 }
 
 if (-not $Url) { $Url = $ENDPOINT }
 $urlArg = @(); if ($Url) { $urlArg = @('-Url', $Url) }
+$loadtest = Join-Path $Here 'loadtest.ps1'
 
 Write-Host '=== 닫힌 루프 최적화 (목적함수 = score.py 공식 총점) ===' -ForegroundColor Cyan
-if (-not $Apply) {
-  Write-Host 'DRY-RUN: 1회 측정 후 다음 한 수만 제안합니다. 실제 탐색은 -Apply 를 붙이세요.' -ForegroundColor Yellow
-}
+Write-Host ("예산 {0}분 / 회차 {1} / 최대 {2}회 — 예산 초과 시 자동 중단" -f $BudgetMinutes, $Duration, $Iterations) -ForegroundColor Cyan
+if (-not $Apply) { Write-Host 'DRY-RUN: 1회 측정 후 다음 한 수만 제안(-Apply 로 실제 탐색).' -ForegroundColor Yellow }
 
-$loadtest = Join-Path $Here 'loadtest.ps1'
-$rejected = @()
+$sw = [System.Diagnostics.Stopwatch]::StartNew()
 $rejFile = Join-Path $env:TEMP 'optimize-rejected.json'
 '[]' | Set-Content -Path $rejFile -Encoding ascii
 
-# --- 0회차: 베이스라인 측정 ---
+# --- 베이스라인 측정 ---
 & $loadtest -Duration $Duration -Label 'opt' @urlArg | Out-Null
 $bestOut = Join-Path $env:TEMP 'tune-opt'
 $bestScore = Get-Score $bestOut
 $bestKnobs = (Get-NextStep $bestOut $null).knobs
-Write-Host ("[baseline] 총점 {0:N1}/36  비용ratio {1:N2}" -f $bestScore.total, $bestScore.cost_ratio)
+Write-Host ("[baseline] 총점 {0:N1}/36  비용ratio {1:N2}  ({2:N1}분 경과)" -f $bestScore.total, $bestScore.cost_ratio, $sw.Elapsed.TotalMinutes)
 
 if (-not $Apply) {
   $step = Get-NextStep $bestOut $null
@@ -101,20 +104,30 @@ if (-not $Apply) {
   return
 }
 
-# --- 탐색 루프 ---
-$lastMove = $null
+# 회차 소요 추정(분): settle + 부하 + 오버헤드. 남은 예산이 이보다 적으면 새 회차를 안 연다.
+$loadMin = ([regex]::Match($Duration, '^\d+')).Value / 60.0
+$rejected = @()
 for ($i = 1; $i -le $Iterations; $i++) {
   $step = Get-NextStep $bestOut $rejFile
   if ($step.done) { Write-Host "수렴(${i}회차): $($step.reason)" -ForegroundColor Green; break }
 
+  $settle = if ($step.kind -eq 'cost-reclaim') { $CostSettleSeconds } else { $SettleSeconds }
+  $needMin = ($settle / 60.0) + $loadMin + 0.3
+  $remain = $BudgetMinutes - $sw.Elapsed.TotalMinutes
+  if ($remain -lt $needMin) {
+    Write-Host ("예산 종료: 남은 {0:N1}분 < 회차 소요 {1:N1}분 -> 중단" -f $remain, $needMin) -ForegroundColor Yellow
+    break
+  }
+
   $app = $step.app; $knob = $step.knob
-  Write-Host ("--- iter ${i}: [{0}] {1} target->{2}% min->{3} max->{4}" -f $step.kind, $app, $knob.target, $knob.min, $knob.max)
+  Write-Host ("--- iter ${i} ({0:N1}분 경과, 남은 {1:N1}분): [{2}] {3} target->{4}% min->{5} max->{6}" -f `
+    $sw.Elapsed.TotalMinutes, $remain, $step.kind, $app, $knob.target, $knob.min, $knob.max)
   Set-Hpa $app $knob
+  Start-Sleep -Seconds $settle           # 스케일 반영/노드 드레인 대기(비용 수는 길게)
 
   & $loadtest -Duration $Duration -Label 'opt' @urlArg | Out-Null
   $score = Get-Score $bestOut
 
-  # 게이트를 깨는 수는 총점과 무관하게 거절(비용 12점 잠금/가용성 실격 방지).
   $gateOk = $score.perf_gate_pass -and $score.avail_gate_pass
   if ($gateOk -and $score.total -gt $bestScore.total) {
     Write-Host ("  채택: 총점 {0:N1} -> {1:N1}  비용ratio {2:N2}" -f $bestScore.total, $score.total, $score.cost_ratio) -ForegroundColor Green
@@ -122,23 +135,18 @@ for ($i = 1; $i -le $Iterations; $i++) {
     $bestKnobs.$app = $knob
   } else {
     Write-Host ("  거절: 총점 {0:N1} (기준 {1:N1}, gate={2}) -> 되돌림" -f $score.total, $bestScore.total, $gateOk) -ForegroundColor Yellow
-    Set-Hpa $app $bestKnobs.$app                     # 이전 최적으로 복구
-    $rejected += @{ app = $app; kind = $step.kind }  # 같은 수 재제안 금지
-    # PS 5.1 의 ConvertTo-Json 은 단일 원소를 배열로 안 내므로 원소별로 만들어 이어붙인다.
+    Set-Hpa $app $bestKnobs.$app          # HPA 복구(파드 재생성 없음, 롤아웃 대기 불필요)
+    $rejected += @{ app = $app; kind = $step.kind }
     $items = @($rejected | ForEach-Object { $_ | ConvertTo-Json -Compress })
     ('[' + ($items -join ',') + ']') | Set-Content -Path $rejFile -Encoding ascii
   }
 }
 
-# --- 확정 측정(길게) + 최종 값 출력 ---
-Write-Host "`n=== 최종 확정 측정 ($FinalDuration) ===" -ForegroundColor Cyan
-& $loadtest -Duration $FinalDuration -Label 'opt-final' @urlArg | Out-Null
-$final = Get-Score (Join-Path $env:TEMP 'tune-opt-final')
-Write-Host ("최종 총점 {0:N1}/36  비용ratio {1:N2}  (+ 비정상요청 4점은 verify.ps1)" -f $final.total, $final.cost_ratio) -ForegroundColor Green
-
-Write-Host "`n--- k8s_apps.tf 에 반영할 우승 HPA 값 (탐색은 kubectl 패치라 terraform apply 시 사라짐) ---"
+Write-Host ("`n=== 탐색 종료: {0:N1}분 소요, 최종 총점 {1:N1}/36 비용ratio {2:N2} ===" -f `
+  $sw.Elapsed.TotalMinutes, $bestScore.total, $bestScore.cost_ratio) -ForegroundColor Green
+Write-Host '--- k8s_apps.tf 에 반영할 우승 HPA 값 (탐색은 kubectl 패치라 terraform apply 시 사라짐) ---'
 foreach ($app in $bestKnobs.PSObject.Properties.Name | Sort-Object) {
   $k = $bestKnobs.$app
   Write-Host ("{0}: average_utilization={1}, min_replicas={2}, max_replicas={3}" -f $app, $k.target, $k.min, $k.max)
 }
-Write-Host '반영 후: terraform apply 로 영구화하고, 마지막으로 한 번 더 loadtest 로 확인하세요.'
+Write-Host '반영 후 terraform apply 로 영구화. (비정상요청 4점은 verify.ps1 로 별도 확인)'

@@ -3,6 +3,10 @@
 3과제 40점은 **전부 부하 테스트 결과**로 매겨진다. 이 폴더는 채점과 같은 방식으로 미리 재보고,
 어디를 고칠지 정해주는 도구 모음이다. Windows PowerShell 기준.
 
+> ⏱ **시간 예산: 튜닝은 ~20분 안에 끝낸다.** 트래픽은 시작 1시간 뒤 주입되고 `terraform apply`가
+> 약 30분이므로, 남는 튜닝 창은 20분뿐이다. 그래서 측정은 짧게(90초), 자동 최적화(`optimize.ps1`)는
+> **기본 15분 예산**으로 스스로 멈춘다. 30분씩 걸리는 긴 반복 측정은 쓰지 않는다.
+
 | 채점 항목 | 배점 | 확인 도구 |
 |---|---|---|
 | 비정상 요청 처리 (403/404) + 이미지 다운로드 | 4 | **`verify.ps1`** |
@@ -38,9 +42,9 @@ Set-ExecutionPolicy -Scope Process Bypass -Force      # 스크립트가 막히�
 .\setup.ps1 -Cluster wsi2026-cluster -Region ap-northeast-2
 kubectl -n app get pods                               # 클러스터 보이는지
 
-.\verify.ps1                                          # 1) 응답규약 4점 먼저
-.\loadtest.ps1 -Duration 180s -Label baseline          # 2) 가용성/성능/노드 측정
-.\autotune.ps1 -Result baseline                         # 3) request+HPA 권장값만 계산(변경 없음)
+.\verify.ps1                                        # 1) 응답규약 4점 먼저
+.\loadtest.ps1 -Duration 90s -Label baseline        # 2) 가용성/성능/노드 측정 (~1.5분)
+.\optimize.ps1 -Apply                               # 3) 15분 예산 안에서 HPA 자동 최적화
 ```
 
 엔드포인트는 자동으로 `..\terraform` 의 `terraform output -raw endpoint` 에서 읽는다.
@@ -111,7 +115,7 @@ FAIL 이면 스크립트가 원인별 처방을 같이 출력한다. 실패 시 
 ## loadtest.ps1 — 가용성/성능/비용 측정
 
 ```powershell
-.\loadtest.ps1 -Duration 180s -Label baseline
+.\loadtest.ps1 -Duration 90s -Label baseline
 ```
 
 모든 API 를 `hey` 로 **병렬** 부하하고, 5초 간격으로 노드/파드 수와 **파드별 CPU 실사용**을
@@ -218,7 +222,8 @@ py -3 .\advise.py baseline --slos user=0.2,product=0.2,stress=1.0 --ns app --app
 ```
 
 출력은 다음 측정 회차를 위한 1-step 권장값이다. 사용자가 `k8s_apps.tf`에 직접 반영하고 apply한 뒤
-새 label로 180초 재측정한다. 부하 중 request 변경은 롤아웃을 일으키므로 공식 트래픽 전 작업한다.
+새 label로 90초 재측정한다. 여러 앱을 자동으로 반복 조정하려면 `optimize.ps1`(15분 예산)을 쓴다.
+부하 중 request 변경은 롤아웃을 일으키므로 공식 트래픽 전 작업한다.
 
 ---
 
@@ -235,7 +240,7 @@ CPU averageUtilization
 
 ```powershell
 # 먼저 측정
-.\loadtest.ps1 -Duration 180s -Label baseline
+.\loadtest.ps1 -Duration 90s -Label baseline
 
 # 전체 앱 권장값만 출력
 .\autotune.ps1 -Result baseline
@@ -261,8 +266,9 @@ CPU averageUtilization
    `minReplicas`는 항상 2로 고정해 유휴 시 관리형 2노드로 복귀하게 하고, 성능 여유는 target과 max로 확보한다.
 6. 세 앱 중 하나라도 성능 30% 미만이면 비용 12점이 전부 0이므로 30% 게이트 복구가 우선이다.
 
-권장값은 영구 정답이 아니라 **다음 측정 회차용 1-step 값**이다. 한 번 반영한 뒤 반드시
-다른 label로 180초 재측정하고 다시 계산한다. 앱·트래픽·바이너리가 바뀌면 이전 결과를 재사용하지 않는다.
+권장값은 영구 정답이 아니라 **다음 측정 회차용 1-step 값**이다. 반영 후 시간이 남으면 다른 label로
+90초 재측정해 확인한다. 여러 회차 자동 반복이 필요하면 `optimize.ps1`(15분 예산)이 그 역할을 한다.
+앱·트래픽·바이너리가 바뀌면 이전 결과를 재사용하지 않는다.
 
 ## optimize.ps1 — 닫힌 루프 최적화 (공식 총점 최대화)
 
@@ -276,18 +282,22 @@ CPU averageUtilization
   비용 회수(ratio>1 & 성능 여유 → target↑). 개선 후보가 없으면 수렴 선언.
 - HPA만 `kubectl patch`(즉시·되돌림 가능, terraform state 불변)로 바꿔 빠르게 탐색한다.
   총점이 오르면 채택, 아니면 되돌리고 그 수는 재제안 금지한다. 예측이 틀려도 실측이 교정한다.
+- **시간 예산으로 스스로 멈춘다.** 기본 `-BudgetMinutes 15`를 넘으면 새 회차를 열지 않고 그때까지의
+  우승값을 출력한다. 회차 부하는 짧게(`-Duration 60s`), 비용 회수 수는 노드가 빠지는 시간(Karpenter
+  consolidateAfter ≈ 2분)을 기다렸다 측정한다(`-CostSettleSeconds`). 긴 최종 측정(180s)은 없다.
 
 ```powershell
 # 안전(기본): 1회 측정 후 '다음 한 수'만 제안 — 클러스터 불변
 .\optimize.ps1
 
-# 실제 탐색: HPA를 패치하며 공식 총점이 최대가 되는 값을 찾는다
-.\optimize.ps1 -Apply -Iterations 8 -Duration 90s -FinalDuration 180s
+# 실제 탐색: 기본 15분 예산 안에서 HPA를 패치하며 공식 총점을 최대화(예산 초과 시 자동 중단)
+.\optimize.ps1 -Apply
+# 더 짧게: .\optimize.ps1 -Apply -BudgetMinutes 12
 ```
 
 ⚠ **탐색 중에는 `terraform apply` 금지** — kubectl 패치가 되돌려진다. 루프가 끝나면 우승 HPA 값을
-Terraform 형식으로 출력하므로, 그 값을 `k8s_apps.tf`에 반영하고 apply해 영구화한 뒤 한 번 더
-`loadtest.ps1`로 확정한다.
+Terraform 형식으로 출력하므로, 그 값을 `k8s_apps.tf`에 반영하고 apply해 영구화한다(시간이 남으면
+90초 `loadtest.ps1`로 재확인).
 
 ⚠ `optimize.ps1`은 **HPA(target/min/max)만** 탐색한다. Karpenter `consolidateAfter`/`budgets`
 같은 노드 회수 노브는 HPA가 아니라 건드리지 않으므로, 비용을 더 줄여야 하면 `karpenter.tf`에서
@@ -318,11 +328,13 @@ WAF 가 ALLOW 한 요청**을 뽑아준다. tfvars 제안까지 출력한다. (C
 | 시점 | 할 일 |
 |---|---|
 | 배포 직후 | `.\verify.ps1` — 응답규약 4점 확보 (여기서 FAIL 이면 다른 것보다 먼저) |
-| 트래픽 전 | `.\loadtest.ps1 -Duration 180s -Label t1` → 채점 환산 + 원인 진단 |
-| 트래픽 전 | `advise.py` 권고를 `k8s_apps.tf` 에 반영 → apply → `-Label t2` 재측정 (2~3회 반복) |
-| 트래픽 전 | (선택) `.\optimize.ps1 -Apply` — 공식 총점을 목적함수로 HPA를 자동 탐색·최적화 후 우승값 반영 |
+| 트래픽 전(~2분) | `.\loadtest.ps1 -Duration 90s -Label t1` → 채점 환산 + 원인 진단 |
+| 트래픽 전(~15분) | `.\optimize.ps1 -Apply` → 15분 예산 안에서 HPA 자동 최적화 → 우승값을 `k8s_apps.tf`에 반영 후 apply |
 | 트래픽 중 | `python waf_header_stats.py ...` → 새 패턴 차단 → `.\verify.ps1` 재확인 |
-| 트래픽 중 | `.\loadtest.ps1 -Label during` 로 추세 확인 (부하가 겹치니 짧게) |
+| 트래픽 중 | `.\loadtest.ps1 -Label during -Duration 60s` 로 추세 확인 (부하가 겹치니 짧게) |
+
+> ⏱ **트래픽 전 1시간 = `terraform apply`(약 30분) + 튜닝(~20분).** 튜닝은 90초 측정 + 15분 예산의
+> `optimize.ps1`로 끝낸다. 긴(180초) 반복 측정 루프는 시간이 안 맞아 쓰지 않는다.
 
 **원칙**: 성능이 비용의 전제조건이다. 세 앱 중 하나라도 performance 30% 미달이면 **비용 12점이
 통째로 0점**이므로, 비용을 줄이려 성능을 깎는 방향은 30% 선 근처에서 절대 금지다. 가용성은

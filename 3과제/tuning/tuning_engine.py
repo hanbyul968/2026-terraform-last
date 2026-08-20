@@ -25,11 +25,14 @@ NODE_CPU_HARD_PCT = 90
 # 선형 지연 모델(지연 ∝ CPU 공급 부족 배수)은 관측 범위를 크게 벗어나면 신뢰할 수 없다.
 # 한 회차에서 허용하는 외삽 한도. 더 내려가려면 그 값을 실측한 뒤 다음 회차가 이어서 판단한다.
 MAX_EXTRAPOLATED_SLOWDOWN = 1.5
-# 비용 우선 모드 한도. 공식 채점에서 가용성은 90%만 넘으면 앱당 만점이고, 성능은 30% 미만일 때만
-# 비용 12점이 0이 된다. 그래서 비용을 챙길 때 지켜야 할 실제 선은 99%가 아니라 아래 값이다.
-COST_FIRST_AVAIL_FLOOR = 92.0
-COST_FIRST_PERF_FLOOR = 35.0
+# 비용 우선 모드 기준선. 공식 채점에서 가용성은 90%면 앱당 만점이므로 그 경계를 지키고,
+# 성능은 80% 밴드를 유지선으로 둔다(30%까지 내려가면 비용 12점이 0이 되고 성능 점수도 폭락한다).
+COST_FIRST_AVAIL_FLOOR = 90.0
+COST_FIRST_PERF_FLOOR = 80.0
 COST_FIRST_MAX_SLOWDOWN = 3.0
+# request는 실측 사용량과 동떨어질 수 없다. 파드당 실사용의 이 비율 아래로는 내리지 않는다.
+# (실측 1800m 쓰는 파드에 50m을 예약하는 값이 나오던 문제를 막는다.)
+REQUEST_USAGE_FLOOR_RATIO = 0.5
 
 
 def clamp(value, low, high):
@@ -703,6 +706,7 @@ def _usage_sized(app: AppSnapshot, current: dict):
     if not app.total_cpu_p95 or pods <= 0:
         return None
     sized = max(REQUEST_MIN_M, ceil_to(app.total_cpu_p95 / pods))
+    sized = max(sized, ceil_to(int(app.per_pod_p90 or 0) * REQUEST_USAGE_FLOOR_RATIO))
     if app.cpu_limit_m:
         sized = min(sized, app.cpu_limit_m)
     if abs(sized - current["request"]) < REQUEST_UNIT_M:
@@ -751,8 +755,16 @@ def _optimal_request_target(snapshot: TuningSnapshot, app: AppSnapshot, current:
     )
     upper = int(app.cpu_limit_m or max(current["request"], app.per_pod_p95 or 0) * 2) or current["request"]
     upper = min(current["request"], max(REQUEST_MIN_M, min(8000, upper)))
+    # 실측 사용량 기준 하한: 파드당 실사용(동시 총 CPU p95 / 파드수)의 절반.
+    # 이게 없으면 "1800m 쓰는 파드에 request 50m" 같은 비현실적인 값이 나온다.
+    pods = max(1, int(app.pods_p90 or app.replicas or current["min"]))
+    usage_per_pod = max(int(app.total_cpu_p95 or 0) / pods, int(app.per_pod_p90 or 0))
+    lower = max(REQUEST_MIN_M, ceil_to(usage_per_pod * REQUEST_USAGE_FLOOR_RATIO))
+    # 한 회차에 절반 이하로 급락시키지 않는다. 더 내려야 하면 실측 후 다음 회차가 이어서 내린다.
+    lower = max(lower, ceil_to(current["request"] * .5))
+    lower = min(lower, upper)
     options = []
-    for request_m in range(REQUEST_MIN_M, upper + 1, REQUEST_UNIT_M):
+    for request_m in range(lower, upper + 1, REQUEST_UNIT_M):
         for target in range(TARGET_MIN, TARGET_MAX + 1):
             proposed = dict(current)
             proposed.update({"request": request_m, "target": target})

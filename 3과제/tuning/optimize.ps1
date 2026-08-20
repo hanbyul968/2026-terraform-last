@@ -12,8 +12,8 @@ param(
   [int]$SettleSeconds = 25,
   [int]$CostSettleSeconds = 105,
   [ValidateSet('cost','balanced')][string]$Objective = 'cost',
-  [double]$AvailFloor = 92,
-  [double]$PerfFloor = 35,
+  [double]$AvailFloor = 90,
+  [double]$PerfFloor = 80,
   [switch]$Apply,
   [string]$Url = ''
 )

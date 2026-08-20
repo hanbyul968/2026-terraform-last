@@ -1,4 +1,4 @@
-import pathlib
+﻿import pathlib
 import unittest
 import sys
 
@@ -65,12 +65,12 @@ class SharedEngineTests(unittest.TestCase):
         app = app or self.app()
         return engine.TuningSnapshot({app.name: app}, engine.ClusterSnapshot(**values))
 
-    def latencies(self, count=600, low=.10, high=2.80):
+    def latencies(self, count=600, low=.02, high=.10):
         step = (high - low) / (count - 1)
         return tuple(round(low + step * i, 4) for i in range(count))
 
     def test_request_optimum_lowers_reservation_and_never_inflates(self):
-        app = self.app(latencies=self.latencies(low=.02, high=.30))
+        app = self.app(latencies=self.latencies())
         candidates = engine.generate_candidates(self.snapshot(app))
         optimal = next(c for c in candidates if c.kind == "request-optimal")
         self.assertLess(optimal.proposed["request"], 750)
@@ -81,7 +81,7 @@ class SharedEngineTests(unittest.TestCase):
             self.assertLessEqual(candidate.cpu_supply_ratio, engine.MAX_EXTRAPOLATED_SLOWDOWN)
 
     def test_untrusted_extrapolation_is_not_proposed(self):
-        app = self.app(latencies=self.latencies(low=.02, high=.30))
+        app = self.app(latencies=self.latencies())
         snapshot = self.snapshot(app, cluster_cpu_p95_m=7900, node_alloc_m=2000)
         for candidate in engine.generate_candidates(snapshot):
             self.assertLessEqual(candidate.cpu_supply_ratio, engine.MAX_EXTRAPOLATED_SLOWDOWN)
@@ -112,6 +112,34 @@ class SharedEngineTests(unittest.TestCase):
         self.assertEqual(db_bound.performance_at(1.0), cpu_bound.performance_at(1.0))
         # 측정이 없으면 보수적으로 CPU 바운드로 간주한다.
         self.assertEqual(self.app(window_seconds=0.0).cpu_bound_fraction, 1.0)
+
+    def test_request_never_drops_far_below_measured_usage(self):
+        """1800m 쓰는 파드에 50m 같은 값이 나오면 안 된다."""
+        app = self.app(name="burn", slo_seconds=1.0, samples=2000, window_seconds=120.0,
+                       availability=100, performance=95, request_m=750, cpu_limit_m=2000,
+                       target=55, min_replicas=2, max_replicas=8, replicas=8,
+                       pods_p90=8, pods_max=8, per_pod_p90=1800, per_pod_p95=1956,
+                       total_cpu_p90=14000, total_cpu_p95=14400, cpu_samples=60,
+                       latencies=tuple([.30] * 300))
+        snapshot = engine.TuningSnapshot(
+            {"burn": app}, engine.ClusterSnapshot(baseline_nodes=2, node_average=8,
+                                                  node_count=8, node_alloc_m=1930,
+                                                  cluster_cpu_p95_m=13000,
+                                                  system_reserved_m=1600))
+        for candidate in engine.generate_candidates(snapshot):
+            for name, values in candidate.knobs.items():
+                # 파드당 실사용 1800m의 절반(900m) 미만은 제안하지 않는다.
+                self.assertGreaterEqual(values["request"], 900)
+                # 한 회차에 현재값의 절반 아래로 떨어지지 않는다.
+                self.assertGreaterEqual(values["request"], 375)
+
+    def test_cost_first_floors_follow_official_bands(self):
+        self.assertEqual(engine.COST_FIRST_AVAIL_FLOOR, 90.0)
+        self.assertEqual(engine.COST_FIRST_PERF_FLOOR, 80.0)
+        snapshot = self.snapshot(self.app(latencies=self.latencies()))
+        self.assertTrue(snapshot.cost_first)
+        self.assertEqual(snapshot.avail_floor, 90.0)
+        self.assertEqual(snapshot.perf_floor, 80.0)
 
     def test_bundle_applies_all_apps_in_one_trial(self):
         """회차당 4~5분이므로 앱별로 나누면 한 앱이 예산을 다 쓴다. 한 회차에 묶는다."""
@@ -218,11 +246,14 @@ class SharedEngineTests(unittest.TestCase):
                                    node_count=8, node_alloc_m=1930,
                                    cluster_cpu_p95_m=10695, system_reserved_m=900),
         )
-        # 비용 우선(기본): request를 내려 노드를 줄이고, 공식 밴드 기준선만 지킨다.
+        # 성능 유지선 80%: stress는 p90이 이미 SLO(1.0s) 경계라 request를 깎을 여지가 없다.
         cost = engine.plan(snapshot)
-        cut = next(c for c in cost["candidates"] if c["app"] == "stress")
-        self.assertLess(cut["proposed"]["request"], 750)
-        self.assertGreater(cut["predicted_delta"], 0)
+        for candidate in cost["candidates"]:
+            for name, values in candidate["knobs"].items():
+                current = snapshot.apps[name].request_m
+                self.assertGreaterEqual(values["request"], current * .5)
+        self.assertFalse([c for c in cost["candidates"]
+                          if c["app"] == "stress" and c["kind"] == "request-optimal"])
         # 균형 모드: 실측 수요를 밑도는 노드는 제안하지 않는다.
         snapshot.cost_first = False
         for candidate in engine.plan(snapshot)["candidates"]:
@@ -258,7 +289,7 @@ class SharedEngineTests(unittest.TestCase):
             self.assertEqual(candidate["proposed"]["min"], 4)
 
     def test_commands_include_exact_rollback(self):
-        app = self.app(latencies=self.latencies(low=.02, high=.30))
+        app = self.app(latencies=self.latencies())
         optimal = next(c for c in engine.generate_candidates(self.snapshot(app))
                        if c.kind == "request-optimal")
         self.assertTrue(any("requests=cpu=750m" in command for command in optimal.rollback_commands))
@@ -282,7 +313,7 @@ class SharedEngineTests(unittest.TestCase):
     def test_commands_use_exact_live_resource_names(self):
         app = self.app(name="checkout", deployment_name="checkout-api",
                        hpa_name="checkout-scaler",
-                       latencies=self.latencies(low=.02, high=.30))
+                       latencies=self.latencies())
         optimal = next(c for c in engine.generate_candidates(self.snapshot(app))
                        if c.kind == "request-optimal")
         all_commands = optimal.apply_commands + optimal.rollback_commands
@@ -328,8 +359,8 @@ class PowerShellRunnerContractTests(unittest.TestCase):
 
     def test_accepts_on_official_band_floors_not_a_stricter_gate(self):
         self.assertIn("[ValidateSet('cost','balanced')][string]$Objective = 'cost'", self.script)
-        self.assertIn("[double]$AvailFloor = 92", self.script)
-        self.assertIn("[double]$PerfFloor = 35", self.script)
+        self.assertIn("[double]$AvailFloor = 90", self.script)
+        self.assertIn("[double]$PerfFloor = 80", self.script)
         self.assertIn("($score.min_avail -ge $availFloor) -and ($score.min_perf -ge $perfFloor)",
                       self.script)
         self.assertNotIn("$score.perf_gate_pass -and $score.avail_gate_pass", self.script)

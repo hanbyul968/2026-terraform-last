@@ -254,10 +254,14 @@ class Candidate:
     confidence: str
     apply_commands: List[str] = field(default_factory=list)
     rollback_commands: List[str] = field(default_factory=list)
+    knobs: Dict[str, dict] = field(default_factory=dict)
 
     def key(self):
-        p = self.proposed
-        return f"{self.app}|{self.kind}|{p['request']}|{p['target']}|{p['min']}|{p['max']}"
+        parts = []
+        for name in sorted(self.knobs or {self.app: self.proposed}):
+            p = (self.knobs or {self.app: self.proposed})[name]
+            parts.append(f"{name}:{p['request']}:{p['target']}:{p['min']}:{p['max']}")
+        return f"{self.kind}|" + "|".join(parts)
 
     def to_dict(self):
         return asdict(self)
@@ -576,17 +580,21 @@ def _current_dict(app):
             "replicas": int(app.replicas or app.min_replicas or 1)}
 
 
-def _reservation_nodes(snapshot: TuningSnapshot, changed_app: str, proposed: dict):
+def _reservation_nodes(snapshot: TuningSnapshot, changed, proposed=None):
+    """changed: 앱 이름(단일) 또는 {앱: proposed} 딕셔너리."""
+    plan_map = changed if isinstance(changed, dict) else (
+        {changed: proposed} if changed and proposed else {})
     alloc = snapshot.cluster.node_alloc_m
     if alloc <= 0:
         return snapshot.cluster.node_count or int(math.ceil(snapshot.cluster.node_average))
     total = 0
     for name, app in snapshot.apps.items():
-        req = proposed["request"] if name == changed_app else int(app.request_m or REQUEST_MIN_M)
+        change = plan_map.get(name)
+        req = int(change["request"]) if change else int(app.request_m or REQUEST_MIN_M)
         observed = int(app.pods_p90 or app.replicas or app.min_replicas or 1)
-        if name == changed_app and proposed.get("estimated_replicas"):
+        if change and change.get("estimated_replicas"):
             # 실측 관측 파드 수보다 적게 잡으면 예약을 과소평가해 노드 하한이 무너진다.
-            pods = max(int(proposed["estimated_replicas"]), observed)
+            pods = max(int(change["estimated_replicas"]), observed)
         else:
             pods = observed
         total += req * pods
@@ -606,15 +614,15 @@ def _node_calibration(snapshot: TuningSnapshot):
     return max(1.0, snapshot.cluster.node_average / baseline)
 
 
-def _estimated_node_average(snapshot: TuningSnapshot, changed_app: str, proposed: dict):
+def _estimated_node_average(snapshot: TuningSnapshot, changed, proposed=None):
     """비용 채점용 평균 노드 수(소수). 정수로 올리면 현재 상태조차 손해로 계산된다."""
-    raw = _reservation_nodes(snapshot, changed_app, proposed)
+    raw = _reservation_nodes(snapshot, changed, proposed)
     return max(1.0, raw * _node_calibration(snapshot))
 
 
-def _estimated_nodes(snapshot: TuningSnapshot, changed_app: str, proposed: dict):
+def _estimated_nodes(snapshot: TuningSnapshot, changed, proposed=None):
     """용량/하한 판정용 정수 노드 수."""
-    return max(1, int(math.ceil(_estimated_node_average(snapshot, changed_app, proposed))))
+    return max(1, int(math.ceil(_estimated_node_average(snapshot, changed, proposed))))
 
 
 def _predicted_replicas(app, proposed):
@@ -769,38 +777,50 @@ def _optimal_request_target(snapshot: TuningSnapshot, app: AppSnapshot, current:
     return max(options, key=lambda row: row[0])
 
 
-def _commands(namespace, app: AppSnapshot, current, proposed):
-    deployment = app.deployment_name or app.name
-    hpa = app.hpa_name or app.name
-    safe_hpa = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in hpa)
-    def patch(values, suffix):
-        body = {"spec": {"minReplicas": values["min"], "maxReplicas": values["max"],
-                         "metrics": [{"type": "Resource", "resource": {"name": "cpu",
-                         "target": {"type": "Utilization", "averageUtilization": values["target"]}}}]}}
-        text = json.dumps(body, separators=(",", ":"))
-        path = f'$env:TEMP\\hpa-{safe_hpa}-{suffix}.json'
-        return [f"'{text}' | Set-Content -Path \"{path}\" -Encoding ascii",
-                f'kubectl -n {namespace} patch hpa {hpa} --type=merge --patch-file \"{path}\"']
-    apply = patch(proposed, "apply")
-    rollback = []
-    if proposed["request"] != current["request"]:
-        apply += [f"kubectl -n {namespace} set resources deploy/{deployment} --requests=cpu={proposed['request']}m",
-                  f"kubectl -n {namespace} rollout status deploy/{deployment} --timeout=120s"]
-        rollback += [f"kubectl -n {namespace} set resources deploy/{deployment} --requests=cpu={current['request']}m",
-                     f"kubectl -n {namespace} rollout status deploy/{deployment} --timeout=120s"]
-    rollback += patch(current, "rollback")
+def _commands(namespace, snapshot, knobs):
+    """knobs: {앱: proposed}. 여러 앱을 한 회차에 적용할 수 있게 전부 만든다."""
+    apply, rollback = [], []
+    for name in sorted(knobs):
+        app = snapshot.apps[name]
+        proposed = knobs[name]
+        current = _current_dict(app)
+        deployment = app.deployment_name or name
+        hpa = app.hpa_name or name
+        safe_hpa = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in hpa)
+
+        def patch(values, suffix):
+            body = {"spec": {"minReplicas": values["min"], "maxReplicas": values["max"],
+                             "metrics": [{"type": "Resource", "resource": {"name": "cpu",
+                             "target": {"type": "Utilization", "averageUtilization": values["target"]}}}]}}
+            text = json.dumps(body, separators=(",", ":"))
+            path = f'$env:TEMP\\hpa-{safe_hpa}-{suffix}.json'
+            return [f"'{text}' | Set-Content -Path \"{path}\" -Encoding ascii",
+                    f'kubectl -n {namespace} patch hpa {hpa} --type=merge --patch-file \"{path}\"']
+
+        apply += patch(proposed, "apply")
+        if proposed["request"] != current["request"]:
+            apply += [f"kubectl -n {namespace} set resources deploy/{deployment} --requests=cpu={proposed['request']}m",
+                      f"kubectl -n {namespace} rollout status deploy/{deployment} --timeout=120s"]
+            rollback += [f"kubectl -n {namespace} set resources deploy/{deployment} --requests=cpu={current['request']}m",
+                         f"kubectl -n {namespace} rollout status deploy/{deployment} --timeout=120s"]
+        rollback += patch(current, "rollback")
     return apply, rollback
 
 
-def _make_candidate(snapshot, app, kind, proposed, reason, priority, namespace="app"):
-    current = _current_dict(app)
-    proposed = dict(proposed)
-    proposed["estimated_replicas"] = _predicted_replicas(app, proposed)
-    predicted_nodes = _estimated_nodes(snapshot, app.name, proposed)
+def _make_candidate(snapshot, app, kind, proposed, reason, priority, namespace="app",
+                    knobs=None):
+    lead = app.name if hasattr(app, "name") else app
+    knobs = knobs or {lead: dict(proposed)}
+    knobs = {name: dict(values) for name, values in knobs.items()}
+    for name, values in knobs.items():
+        values["estimated_replicas"] = _predicted_replicas(snapshot.apps[name], values)
+    proposed = knobs[lead]
+    current = _current_dict(snapshot.apps[lead])
+    predicted_nodes = _estimated_nodes(snapshot, knobs)
     cpu_floor = snapshot.cluster.physical_cpu_floor
     result = snapshot.score()
     predicted_score, slowdown = _predicted_score(
-        snapshot, predicted_nodes, _estimated_node_average(snapshot, app.name, proposed))
+        snapshot, predicted_nodes, _estimated_node_average(snapshot, knobs))
     supply_ratio = slowdown
     risk = "cpu-oversubscribed" if supply_ratio > 1.0 else ""
     if kind != "usage-sized" and supply_ratio > snapshot.max_slowdown:
@@ -810,26 +830,30 @@ def _make_candidate(snapshot, app, kind, proposed, reason, priority, namespace="
     delta = predicted_score.total - result.total
     if kind in ("gate-recovery", "performance-band"):
         delta = max(delta, priority)
-    apply, rollback = _commands(namespace, app, current, proposed)
-    disruptive = proposed["request"] != current["request"]
-    if kind == "cost-reclaim" or (kind == "request-optimal" and proposed["request"] < current["request"]):
+    apply, rollback = _commands(namespace, snapshot, knobs)
+    disruptive = any(values["request"] != _current_dict(snapshot.apps[name])["request"]
+                     for name, values in knobs.items())
+    if kind == "cost-reclaim" or (kind in ("request-optimal", "bundle")
+                                  and any(values["request"] < _current_dict(snapshot.apps[name])["request"]
+                                          for name, values in knobs.items())):
         settle_seconds = 105
     elif disruptive:
         settle_seconds = 60
     else:
         settle_seconds = 25
     return Candidate(
-        app=app.name, deployment_name=app.deployment_name or app.name,
-        hpa_name=app.hpa_name or app.name, kind=kind, current=current, proposed=proposed, reason=reason,
-        bottleneck=classify_bottleneck(app, snapshot.cluster, snapshot.history),
+        app=lead, deployment_name=snapshot.apps[lead].deployment_name or lead,
+        hpa_name=snapshot.apps[lead].hpa_name or lead, kind=kind, current=current,
+        proposed=proposed, reason=reason,
+        bottleneck=classify_bottleneck(snapshot.apps[lead], snapshot.cluster, snapshot.history),
         predicted_delta=round(delta, 2), predicted_total=round(result.total + delta, 2),
         predicted_nodes=predicted_nodes, observed_cpu_floor=cpu_floor,
-        trigger_before=round(app.trigger_m, 2),
+        trigger_before=round(snapshot.apps[lead].trigger_m, 2),
         trigger_after=round(proposed["request"] * proposed["target"] / 100.0, 2),
         cpu_supply_ratio=supply_ratio, risk=risk,
         disruptive=disruptive, settle_seconds=settle_seconds,
-        confidence="high" if app.samples >= 100 and app.cpu_samples >= 10 else "low",
-        apply_commands=apply, rollback_commands=rollback,
+        confidence="high" if snapshot.apps[lead].samples >= 100 and snapshot.apps[lead].cpu_samples >= 10 else "low",
+        apply_commands=apply, rollback_commands=rollback, knobs=knobs,
     )
 
 
@@ -945,12 +969,42 @@ def generate_candidates(snapshot: TuningSnapshot, rejected=None, namespace="app"
                                     0.0, namespace)
                 if c and c.key() not in rejected and c.predicted_nodes <= math.ceil(snapshot.cluster.node_average):
                     candidates.append(c)
-    kind_rank = {"gate-recovery": 5, "usage-sized": 4, "performance-band": 3,
+    kind_rank = {"gate-recovery": 5, "bundle": 5, "usage-sized": 4, "performance-band": 3,
                  "request-optimal": 2, "pod-cap": 2, "cost-reclaim": 1}
+    # (A) 모든 앱 변경을 한 회차에 묶는다. 회차당 4~5분이라 앱별로 나누면 예산이 한 앱에서 끝난다.
+    per_app_best = {}
+    for c in candidates:
+        if c.kind in ("gate-recovery", "usage-sized", "request-optimal", "performance-band", "pod-cap"):
+            prev = per_app_best.get(c.app)
+            if prev is None or c.predicted_delta > prev.predicted_delta:
+                per_app_best[c.app] = c
+    if len(per_app_best) > 1:
+        merged = {}
+        for c in per_app_best.values():
+            merged.update(c.knobs)
+        lead = max(per_app_best.values(), key=lambda c: c.predicted_delta)
+        detail = ", ".join(
+            f"{name} request {_current_dict(snapshot.apps[name])['request']}→{values['request']}m "
+            f"target {_current_dict(snapshot.apps[name])['target']}→{values['target']}%"
+            for name, values in sorted(merged.items()))
+        bundle = _make_candidate(
+            snapshot, snapshot.apps[lead.app], "bundle", merged[lead.app],
+            f"앱 {len(merged)}개 동시 적용(회차 절약): {detail}", 0.0, namespace, knobs=merged)
+        if bundle and bundle.key() not in rejected:
+            candidates.insert(0, bundle)
     candidates.sort(key=lambda c: (c.predicted_delta, -max(c.cpu_supply_ratio, 1.0),
                                    kind_rank.get(c.kind, 0),
                                    -int(c.disruptive), -c.predicted_nodes), reverse=True)
-    return candidates
+    # (B) 한 앱이 시험 3회를 독식하지 못하게 앱별 1개씩 우선 배치한다.
+    ordered, seen_apps, spare = [], set(), []
+    for c in candidates:
+        target_apps = tuple(sorted(c.knobs))
+        if c.kind == "bundle" or not seen_apps.intersection(target_apps):
+            ordered.append(c)
+            seen_apps.update(target_apps)
+        else:
+            spare.append(c)
+    return ordered + spare
 
 
 def plan(snapshot: TuningSnapshot, rejected=None, namespace="app", rejected_nodes=None):

@@ -124,6 +124,7 @@ def main():
         "predicted_delta": best["predicted_delta"] if best else 0.0,
         "reason": best["reason"] if best else data["reason"],
         "candidate": best, "candidates": data["candidates"],
+        "knob_set": (best or {}).get("knobs") or {},
         "current_total": data["score"]["total"],
         "current_cost_ratio": data["score"]["cost_ratio"], "knobs": knobs,
         "objective": args.objective,

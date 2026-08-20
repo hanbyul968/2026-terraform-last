@@ -60,6 +60,10 @@ function Set-Tuning { param([string]$App,$Knob)
     & kubectl -n $NS rollout status "deploy/$deployment" --timeout=120s | Out-Null
   }
 }
+function Set-TuningSet { param($Knobs)
+  # 후보 하나가 여러 앱을 담을 수 있다(회차 절약). 담긴 앱을 모두 적용한다.
+  foreach($name in $Knobs.PSObject.Properties.Name){ Set-Tuning $name $Knobs.$name }
+}
 function Write-Rejected { param($Rows,[string]$Path)
   $items=@($Rows|ForEach-Object{$_|ConvertTo-Json -Compress}); ('['+($items -join ',')+']')|Set-Content $Path -Encoding ascii
 }
@@ -113,8 +117,10 @@ try {
     $required=[TimeSpan]::FromSeconds($settle*2+$durationSec+150)
     if($sw.Elapsed+$required -ge $deadline){Write-Host '남은 예산이 측정+롤백 시간보다 짧아 종료' -ForegroundColor Yellow;break}
     $app=$step.app;$pending=$app
-    Write-Host ("--- {0}/{1} [{2}] {3}: request {4}->{5}m target {6}->{7}% 예약노드 {8}대 CPU공급부족 {9}배" -f $i,$candidateLimit,$step.kind,$app,$candidate.current.request,$candidate.proposed.request,$candidate.current.target,$candidate.proposed.target,$candidate.predicted_nodes,$candidate.cpu_supply_ratio)
-    Set-Tuning $app $step.knob
+    $knobSet=if($step.knob_set){$step.knob_set}else{$null}
+    $touched=if($knobSet){@($knobSet.PSObject.Properties.Name)}else{@($app)}
+    Write-Host ("--- {0}/{1} [{2}] {3}: request {4}->{5}m target {6}->{7}% 예약노드 {8}대 CPU공급부족 {9}배" -f $i,$candidateLimit,$step.kind,($touched -join '+'),$candidate.current.request,$candidate.proposed.request,$candidate.current.target,$candidate.proposed.target,$candidate.predicted_nodes,$candidate.cpu_supply_ratio)
+    if($knobSet){Set-TuningSet $knobSet}else{Set-Tuning $app $step.knob}
     Start-Sleep -Seconds $settle
     & $loadtest @ltArgs | Out-Null
     $score=Get-Score $out
@@ -130,11 +136,14 @@ try {
     $safetyImproved=$availImproved -or $perfImproved
     if($safetyImproved -or ($gate -and $score.total -gt $bestScore.total)){
       Write-Host ("채택 {0:N1}->{1:N1}, ratio={2:N2}, safetyImproved={3}" -f $bestScore.total,$score.total,$score.cost_ratio,$safetyImproved) -ForegroundColor Green
-      $bestScore=$score;$bestKnobs.$app=$step.knob;$pending=$null
+      $bestScore=$score
+      foreach($name in $touched){ if($knobSet){$bestKnobs.$name=$knobSet.$name}else{$bestKnobs.$name=$step.knob} }
+      $pending=$null
       Save-Snapshot $out $bestOut
     }else{
       Write-Host ("거절 score={0:N1} gate={1}; snapshot 롤백 후 {2}초 안정화" -f $score.total,$gate,$settle) -ForegroundColor Yellow
-      Set-Tuning $app $bestKnobs.$app;$pending=$null
+      foreach($name in $touched){ if($bestKnobs.$name){ Set-Tuning $name $bestKnobs.$name } }
+      $pending=$null
       # 롤백 직후 바로 재측정하면 Karpenter/HPA가 정리되기 전 값이 잡혀 다음 회차가 오염된다.
       Start-Sleep -Seconds $settle
       $rejected+=@{key=$candidate.key;app=$app;kind=$step.kind;nodes=[int]$candidate.predicted_nodes}

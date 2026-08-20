@@ -113,6 +113,32 @@ class SharedEngineTests(unittest.TestCase):
         # 측정이 없으면 보수적으로 CPU 바운드로 간주한다.
         self.assertEqual(self.app(window_seconds=0.0).cpu_bound_fraction, 1.0)
 
+    def test_bundle_applies_all_apps_in_one_trial(self):
+        """회차당 4~5분이므로 앱별로 나누면 한 앱이 예산을 다 쓴다. 한 회차에 묶는다."""
+        def app(name, cpu_total, request_m, pods):
+            return self.app(name=name, slo_seconds=1.0, samples=1000, window_seconds=120.0,
+                            availability=100, performance=95, request_m=request_m,
+                            cpu_limit_m=2000, target=55, min_replicas=2, max_replicas=pods,
+                            replicas=pods, pods_p90=pods, pods_max=pods, cpu_samples=60,
+                            total_cpu_p90=cpu_total, total_cpu_p95=cpu_total,
+                            latencies=tuple([.20] * 200))
+        snapshot = engine.TuningSnapshot(
+            {"a": app("a", 1200, 600, 4), "b": app("b", 900, 500, 4)},
+            engine.ClusterSnapshot(baseline_nodes=2, node_average=5, node_count=5,
+                                   node_alloc_m=1930, cluster_cpu_p95_m=2100,
+                                   system_reserved_m=1000))
+        candidates = engine.generate_candidates(snapshot)
+        bundle = next(c for c in candidates if c.kind == "bundle")
+        self.assertEqual(candidates[0].kind, "bundle")
+        self.assertEqual(set(bundle.knobs), {"a", "b"})
+        # 두 앱의 적용/롤백 명령이 모두 들어 있다.
+        joined = " ".join(bundle.apply_commands + bundle.rollback_commands)
+        self.assertIn("patch hpa a", joined)
+        self.assertIn("patch hpa b", joined)
+        # 한 앱이 상위 후보를 독식하지 않는다.
+        top_apps = [tuple(sorted(c.knobs)) for c in candidates[:3]]
+        self.assertGreater(len({a for group in top_apps for a in group}), 1)
+
     def test_usage_sized_request_is_one_division_not_a_search(self):
         """500m 예약에 250m만 쓰면 250m로, 750m에 1800m 쓰면 올린다."""
         over = self.app(name="over", slo_seconds=1.0, samples=1000, window_seconds=120.0,
@@ -317,7 +343,11 @@ class PowerShellRunnerContractTests(unittest.TestCase):
     def test_transactional_rollback_and_no_terraform_mutation(self):
         self.assertIn("finally {", self.script)
         self.assertIn("Set-Tuning $pending $bestKnobs.$pending", self.script)
-        self.assertIn("Set-Tuning $app $bestKnobs.$app", self.script)
+        self.assertIn("function Set-TuningSet", self.script)
+        self.assertIn("if($knobSet){Set-TuningSet $knobSet}else{Set-Tuning $app $step.knob}",
+                      self.script)
+        self.assertIn("foreach($name in $touched){ if($bestKnobs.$name){ Set-Tuning $name $bestKnobs.$name } }",
+                      self.script)
         self.assertNotIn("& terraform", self.script.lower())
 
 

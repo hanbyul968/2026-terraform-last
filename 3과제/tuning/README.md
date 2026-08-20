@@ -1,11 +1,15 @@
-# tuning/ — 부하 측정 · 응답규약 검증 · 비파괴 권장값 계산
+# tuning/ — 공식 채점 · 라이브 Kubernetes 자동 튜닝
 
-3과제 40점은 **전부 부하 테스트 결과**로 매겨진다. 이 폴더는 채점과 같은 방식으로 미리 재보고,
-어디를 고칠지 정해주는 도구 모음이다. Windows PowerShell 기준.
+3과제 40점은 **전부 부하 테스트 결과**로 매겨진다. Dashboard 계산/튜닝 탭,
+`advise.py`, `optimize.py`, `score.py`는 모두 **`rubric.py` + `tuning_engine.py` 한 엔진**을 쓴다.
+공식 36점 소계를 그대로 최대화하며, 앱별 `availability ≥99%`와 `performance ≥30%`는 하드 게이트다.
 
-> ⏱ **시간 예산: 튜닝은 ~20분 안에 끝낸다.** 트래픽은 시작 1시간 뒤 주입되고 `terraform apply`가
-> 약 30분이므로, 남는 튜닝 창은 20분뿐이다. 그래서 측정은 워밍업 후 120초(콜드스타트 제거), 자동
-> 최적화(`optimize.ps1`)는 **기본 18분 예산**으로 스스로 멈춘다. 30분씩 걸리는 긴 반복 측정은 쓰지 않는다.
+> **Source of truth는 Terraform 파일이 아니라 라이브 Deployment/HPA다.** 튜닝 명령은 현재 라이브
+> request/target/min/max를 읽어 적용하고 같은 snapshot으로 정확히 롤백한다. Terraform drift는 정상이며,
+> 튜닝 루프에 `terraform apply`를 넣지 않는다. request 변경은 rollout이므로 공식 트래픽 전에만 한다.
+
+> ⏱ **18분 하드 상한:** warmup 60초(점수 제외) → baseline 120초 → 후보 최대 3개 × 120초.
+> 각 후보 전에 settle과 150초 롤백 여유를 계산해 시간이 부족하면 새 시험을 열지 않는다.
 
 | 채점 항목 | 배점 | 확인 도구 |
 |---|---|---|
@@ -25,10 +29,12 @@
 | `verify.ps1` | 응답코드 규약 검증 (정상 2xx / 비정상 403 / 미정의 404 / 이미지 200) |
 | `loadtest.ps1` | 채점 방식 부하 측정 → 리포트 + 권장값 (+ `podcpu.csv` 실사용 기록) |
 | `autotune.ps1` | 완료된 부하 결과로 requests.cpu + HPA min/max/target 권장값만 계산(자동 변경 없음) |
-| `optimize.ps1` | **닫힌 루프 최적화** — 측정→채점→HPA 패치→재측정을 반복해 공식 총점이 최대가 되는 HPA 값을 탐색 (`-Apply` 없으면 제안만) |
-| `optimize.py` | optimize.ps1 의 두뇌. `score.py` 총점을 목적함수로 '다음 한 수'를 고름(순수 함수, 단위테스트) |
-| `score.py` | hey CSV 채점기 (`loadtest`/`autotune`/`optimize` 가 호출). `score` 모드는 총점 JSON 출력 |
-| `advise.py` | 측정 + 실사용 + 라이브 상태 → **원인 구분 후** 앱별 판정 (양방향: 비용 여유 시 target ↑ 권고) |
+| `optimize.ps1` | **18분 트랜잭션 runner** — warmup/baseline/최대 3후보 실측, 채택 또는 정확한 snapshot 롤백 (`-Apply` 없으면 제안만) |
+| `rubric.py` | 공식 rate band·비용 ratio·성능 게이트의 단일 구현 |
+| `tuning_engine.py` | 라이브 snapshot, 병목 분류, request/HPA 결합, CPU 물리 하한, 후보·명령 생성 |
+| `optimize.py` | 공통 엔진 후보를 PowerShell runner에 JSON으로 전달하는 adapter |
+| `score.py` | `rubric.py` 기반 hey CSV 호환 CLI (`report`/`score`) |
+| `advise.py` | 공통 엔진의 read-only 설명 adapter — 공식 점수, 병목, 적용/롤백 명령 출력 |
 | `waf_header_stats.py` | WAF 로그 분석 → 아직 안 막힌 비정상 패턴 + tfvars 제안 |
 
 ---
@@ -44,7 +50,7 @@ kubectl -n app get pods                               # 클러스터 보이는�
 
 .\verify.ps1                                        # 1) 응답규약 4점 먼저
 .\loadtest.ps1 -Duration 120s -Label baseline       # 2) 가용성/성능/노드 측정 (~2.5분)
-.\optimize.ps1 -Apply                               # 3) 18분 예산 안에서 HPA 자동 최적화(워밍업 포함)
+.\optimize.ps1 -Apply                               # 3) 18분 안에서 라이브 request/HPA 공식점수 최적화
 ```
 
 엔드포인트는 자동으로 `..\terraform` 의 `terraform output -raw endpoint` 에서 읽는다.
@@ -189,6 +195,22 @@ user         99.2%    4.0   52.2%   1.0
 
 ---
 
+## Dashboard 계산/튜닝 탭
+
+```powershell
+cd ..\tools
+.\dashboard.ps1
+# 변경된 앱/SLO 예: py -3 dashboard.py --namespace app --slos-ms checkout=200,worker=1000
+```
+
+Dashboard는 Deployment/HPA와 `app` label에서 앱을 발견한다. SLO는 기본 `config.ps1` 값 외에
+Deployment `*/slo-ms` annotation, 컨테이너 `SLO_MS`, `APP_SLOS_MS`, `--slos-ms`로 덮어쓸 수 있다.
+로그 지표도 공식식과 동일하게 availability=`2xx && ≤5s / 전체`, performance=`2xx && ≤SLO / 전체`다.
+**계산** 탭은 공식 점수·게이트·CPU 노드 하한·후보를, **튜닝적용** 탭은 각 후보의 라이브 적용과
+정확한 rollback 명령을 보여준다. 대시보드는 자동 적용하지 않는다.
+
+---
+
 ## advise.py — 비파괴 request/HPA 계산
 
 `loadtest.ps1` 끝에서 자동 실행된다. 측정 결과, 활성 부하창의 Pod/노드 CPU, 라이브
@@ -221,9 +243,11 @@ py -3 .\advise.py baseline --slos user=0.2,product=0.2,stress=1.0 --ns app
 py -3 .\advise.py baseline --slos user=0.2,product=0.2,stress=1.0 --ns app --app user
 ```
 
-출력은 다음 측정 회차를 위한 1-step 권장값이다. 사용자가 `k8s_apps.tf`에 직접 반영하고 apply한 뒤
-새 label로 120초 재측정한다. 여러 앱을 자동으로 반복 조정하려면 `optimize.ps1`(18분 예산)을 쓴다.
-부하 중 request 변경은 롤아웃을 일으키므로 공식 트래픽 전 작업한다.
+출력은 다음 측정 회차를 위한 최대 3개의 공통 엔진 후보이며 각 후보에 **현재 라이브 값 기반 적용 명령과
+정확한 롤백 명령**이 함께 나온다. 한 후보만 적용 → 120초 재측정 → 공식 소계가 오르고 두 게이트를
+지키면 유지, 아니면 즉시 롤백한다. `advise.py` 자체는 read-only이고 클러스터를 변경하지 않는다.
+여러 후보를 시간 제한 안에서 자동 검증하려면 `optimize.ps1 -Apply`를 쓴다. request 변경 후보는
+Deployment rollout을 일으키므로 공식 트래픽 전에만 실행한다.
 
 ---
 
@@ -249,9 +273,9 @@ CPU averageUtilization
 .\autotune.ps1 -Result baseline -App user
 ```
 
-이 스크립트와 `advise.py`는 `kubectl patch`, `kubectl set resources`, rollout 또는
-`terraform apply`를 실행하지 않는다. 출력된 값을 사용자가 검토한 뒤
-`terraform/k8s_apps.tf`에 직접 반영하고 새 label로 재측정한다.
+이 스크립트는 legacy 붙여넣기 형식과의 호환을 위해 남아 있는 read-only 계산기다. 자동 변경은 하지
+않으며, 공식 점수 기준 후보·CPU 물리 하한·정확한 롤백은 `advise.py` 또는 `optimize.ps1`을 사용한다.
+출력을 적용하려면 Dashboard **튜닝적용** 탭에서 앱별 명령을 검토하고 라이브에 적용한다.
 
 계산 원칙:
 
@@ -262,8 +286,8 @@ CPU averageUtilization
    한 회차 조정폭은 최대 25%다.
 4. request가 바뀌면 기존 HPA 민감도를 보존하도록 target을 역산한다. 성능 30% 게이트나
    가용성이 미달일 때만 파드당 목표 CPU를 추가로 5~10% 낮춘다.
-5. 활성창 총 CPU p90을 권장 파드당 목표 CPU로 나눠 필요 replica를 계산한다.
-   `minReplicas`는 항상 2로 고정해 유휴 시 관리형 2노드로 복귀하게 하고, 성능 여유는 target과 max로 확보한다.
+5. 활성창 총 CPU p90을 권장 파드당 목표 CPU로 나눠 필요 replica를 계산한다. 라이브 `minReplicas`를
+   임의로 2로 강제하지 않으며, startup/가용성 위험과 현재 min/max를 보존해 후보를 만든다.
 6. 세 앱 중 하나라도 성능 30% 미만이면 비용 12점이 전부 0이므로 30% 게이트 복구가 우선이다.
 
 권장값은 영구 정답이 아니라 **다음 측정 회차용 1-step 값**이다. 반영 후 시간이 남으면 다른 label로
@@ -277,15 +301,17 @@ CPU averageUtilization
 떨어질지)는 그 지점을 실제로 측정해야만 안다. `optimize.ps1`은 이걸 **측정→채점→조정→재측정**의
 닫힌 루프로 푼다.
 
-- 목적함수 = `score.py`의 **공식 채점 총점**(성능+가용성+비용, 36점). 근사식이 아니다.
-- 좌표상승법으로 한 회차에 **한 수**만 둔다: 게이트 위반 복구 > 성능 밴드 경계 넘기기(target↓) >
-  비용 회수(ratio>1 & 성능 여유 → target↑). 개선 후보가 없으면 수렴 선언.
-- HPA만 `kubectl patch`(즉시·되돌림 가능, terraform state 불변)로 바꿔 빠르게 탐색한다.
-  총점이 오르면 채택, 아니면 되돌리고 그 수는 재제안 금지한다. 예측이 틀려도 실측이 교정한다.
-- **시간 예산으로 스스로 멈춘다.** 기본 `-BudgetMinutes 18`을 넘으면 새 회차를 열지 않고 그때까지의
-  우승값을 출력한다. **시작 시 워밍업 1회(측정 제외)로 콜드스타트(DB 커넥션·CloudFront·파드 스케일업)를
-  걷어내고**, 회차 부하는 넉넉히(`-Duration 120s`) 재 정상상태를 측정한다. 비용 회수 수는 노드가 빠지는
-  시간(Karpenter consolidateAfter ≈ 2분)을 기다렸다 측정한다(`-CostSettleSeconds`). 긴 최종 측정(180s)은 없다.
+- 목적함수 = `rubric.py`의 **공식 가용성+성능+비용 소계(36점)**. 근사식이 아니다.
+- 후보 = 게이트 복구 → 다음 성능 band → request packing → 비용 회수. 앱 이름·SLO·트래픽·노드
+  allocatable CPU를 snapshot마다 다시 읽고, 최대 3개만 실측한다.
+- request와 HPA target은 `request × target / 100` 절대 trigger로 결합한다. request packing은 25m
+  단위로 내리되 trigger를 보존하고, 예측 노드 수가 실측 cluster CPU 물리 하한보다 작으면 폐기한다.
+- Pod startup/rollout, Karpenter drain settle, HPA max, node CPU, DB/RDS·비확장성 병목을 분류해 후보와
+  대기시간을 고른다. `availability ≥99%` 또는 모든 앱 `performance ≥30%`가 깨지면 절대 채택하지 않는다.
+- 적용은 라이브 HPA patch + 필요할 때 Deployment request 변경이다. 총점이 오르면 채택하고, 아니면
+  후보 전 snapshot으로 롤백한다. Ctrl+C/오류로 중단돼도 `finally`에서 pending 후보를 롤백한다.
+- 기본 `-BudgetMinutes 18`, `-WarmupSeconds 60`, `-Duration 120s`, 후보 하드 상한 3개다.
+  매 trial 전에 settle+측정+150초 롤백 여유를 예약하며 시간이 부족하면 새 후보를 시작하지 않는다.
 
 ```powershell
 # 안전(기본): 1회 측정 후 '다음 한 수'만 제안 — 클러스터 불변
@@ -296,13 +322,12 @@ CPU averageUtilization
 # 측정 창을 더 길게: .\optimize.ps1 -Apply -Duration 180s
 ```
 
-⚠ **탐색 중에는 `terraform apply` 금지** — kubectl 패치가 되돌려진다. 루프가 끝나면 우승 HPA 값을
-Terraform 형식으로 출력하므로, 그 값을 `k8s_apps.tf`에 반영하고 apply해 영구화한다(시간이 남으면
-90초로 두거나 120초 `loadtest.ps1`로 재확인).
+⚠ **탐색 중과 종료 후 모두 Terraform apply는 필요 없다.** 우승값은 이미 라이브 Deployment/HPA에
+적용돼 있다. 종료 출력은 기록/재현용이다. 이후 Terraform apply를 하면 라이브 우승값이 덮일 수 있으므로
+공식 운영 중에는 실행하지 않는다. request가 달라지는 후보는 rollout을 포함하므로 트래픽 시작 전에만 탐색한다.
 
-⚠ `optimize.ps1`은 **HPA(target/min/max)만** 탐색한다. Karpenter `consolidateAfter`/`budgets`
-같은 노드 회수 노브는 HPA가 아니라 건드리지 않으므로, 비용을 더 줄여야 하면 `karpenter.tf`에서
-따로 조정한다.
+⚠ Karpenter `consolidateAfter`/`budgets`와 DB 설정은 자동 변경하지 않는다. 엔진은 노드 drain 대기와
+DB/non-scalable 병목을 후보 판단에 반영하지만, 인프라·DB 변경은 별도 고위험 작업으로 남긴다.
 
 두뇌(`optimize.py`)의 결정 로직은 `test_tuning.py`로 단위 검증한다:
 
@@ -330,7 +355,7 @@ WAF 가 ALLOW 한 요청**을 뽑아준다. tfvars 제안까지 출력한다. (C
 |---|---|
 | 배포 직후 | `.\verify.ps1` — 응답규약 4점 확보 (여기서 FAIL 이면 다른 것보다 먼저) |
 | 트래픽 전(~3분) | `.\loadtest.ps1 -Duration 120s -Label t1` → 채점 환산 + 원인 진단 |
-| 트래픽 전(~18분) | `.\optimize.ps1 -Apply` → 18분 예산 안에서 HPA 자동 최적화(워밍업+120s) → 우승값을 `k8s_apps.tf`에 반영 후 apply |
+| 트래픽 전(~18분) | `.\optimize.ps1 -Apply` → warmup 60s + baseline 120s + 후보 최대 3개 실측 → 라이브 우승 snapshot 유지 |
 | 트래픽 중 | `python waf_header_stats.py ...` → 새 패턴 차단 → `.\verify.ps1` 재확인 |
 | 트래픽 중 | `.\loadtest.ps1 -Label during -Duration 90s` 로 추세 확인 (부하가 겹치니 짧게) |
 

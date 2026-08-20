@@ -18,8 +18,8 @@
 | ~0:20 | 받은 **바이너리 교체** → apply | [terraform/README "3. 바이너리 교체"](terraform/README.md#3-바이너리-교체) |
 | ~0:25 | 스펙 바뀌었으면 대응 | 아래 [스펙 바뀌면](#스펙-바뀌면) |
 | ~0:35 | **응답규약 검증 → 엔드포인트 제출** | `cd tuning ; .\verify.ps1` |
-| ~0:40 | **baseline 측정** (~3분) | `.\loadtest.ps1 -Duration 120s -Label t1` |
-| ~0:43~0:58 | **HPA 자동 최적화 (18분 예산, 워밍업+120s 측정)** → 우승값 `k8s_apps.tf` 반영 → apply | `.\optimize.ps1 -Apply` |
+| ~0:37 | **baseline 측정** (~3분) | `.\loadtest.ps1 -Duration 120s -Label t1` |
+| ~0:40~0:58 | **라이브 자동 최적화** (18분 상한, warmup 60s + baseline/candidate 각 120s, 후보 최대 3개) | `.\optimize.ps1 -Apply` |
 | 1:00~ | 트래픽 시작. **모니터링 + WAF 추가 차단** | `cd tools ; .\dashboard.ps1` |
 | 종료 | 부하 중지 / (연습계정) destroy | `terraform destroy -auto-approve` |
 
@@ -56,13 +56,18 @@ FAIL이면 원인별 처방이 같이 나온다. **여기서 실패하면 다른
 .\loadtest.ps1 -Duration 120s -Label t1     # 측정 + 채점 환산 + 앱별 권장값 자동 출력 (~3분)
 ```
 
-리포트의 **채점 환산**(가용성/성능/비용)에서 어디서 점수가 새는지 바로 보인다. 고치는 방법 두 가지:
+리포트의 **채점 환산**(가용성/성능/비용)에서 어디서 점수가 새는지 바로 보인다.
+대시보드 계산/튜닝 탭, `advise.py`, `optimize.py`, `score.py`는 모두 `tuning/tuning_engine.py`와
+`tuning/rubric.py`를 사용한다. 따라서 후보 순서·공식 36점 소계·안전 게이트·적용/롤백 명령이 같다.
+튜닝 중 source of truth는 **라이브 Deployment/HPA**이며 Terraform과의 drift는 의도된 상태다.
 
-- **자동 탐색(권장)**: `.\optimize.ps1 -Apply` — 공식 총점을 목적함수로 HPA를 measure→score→patch→
-  remeasure 루프로 최적화한다. **기본 18분 예산**(워밍업 후 120초 측정)으로 스스로 멈추고, 끝나면 우승값을 출력하니
-  `k8s_apps.tf`에 박고 apply로 영구화한다.
-- **수동 1-step**: 출력된 `advise.py` 권장값을 `k8s_apps.tf`의 해당 앱 `requests.cpu` /
-  HPA `average_utilization`·`min_replicas`에 반영 → `terraform apply` → 새 Label로 120초 재측정.
+- **자동 탐색(권장)**: `.\optimize.ps1 -Apply` — warmup 60초, baseline 120초 후 최대 3개 후보를
+  각각 120초 실측한다. 공식 총점이 오르고 `availability ≥99%`, 모든 앱 `performance ≥30%`를
+  지킬 때만 채택한다. request/HPA를 트랜잭션으로 적용하고 실패·중단 시 마지막 우승 snapshot으로
+  되돌리며, 18분 안에 롤백 시간까지 예약하고 종료한다. **튜닝 흐름에 Terraform apply는 필요 없다.**
+- **수동 1-step**: 대시보드 계산/튜닝 탭 또는 `advise.py`의 후보에서 `적용` 명령을 실행하고
+  120초 재측정한다. 개선되지 않으면 후보에 같이 표시된 **정확한 롤백 명령**을 그대로 실행한다.
+  request 변경은 Deployment rollout을 일으키므로 공식 트래픽 전에만 실행한다.
 
 자세한 사용법·주의는 [tuning/README](tuning/README.md).
 
@@ -73,8 +78,13 @@ FAIL이면 원인별 처방이 같이 나온다. **여기서 실패하면 다른
 **상태 보기**
 ```powershell
 cd tools
-.\dashboard.ps1                 # 로컬 웹 UI: avail%/perf%/pod/node/WAF + 5xx·4xx 원인
+.\dashboard.ps1                 # 로컬 웹 UI: 공식 avail/perf, Pod/node/WAF, 공통 엔진 후보
+# 앱/SLO가 바뀐 날 직접 지정하려면:
+py -3 dashboard.py --namespace app --slos-ms checkout=200,search=500,worker=1000
 ```
+Deployment/HPA 이름과 `app` label은 라이브에서 발견한다. SLO는 Deployment의 `*/slo-ms` annotation,
+컨테이너 `SLO_MS`, `APP_SLOS_MS` 환경변수, `--slos-ms` 순으로 반영할 수 있다. **계산** 탭에서 공식
+36점 소계·CPU 물리 하한·후보를 확인하고, **튜닝적용** 탭의 적용/정확한 롤백 명령을 사용한다.
 CloudShell이면 `python3 monitor.py --watch 10` 또는 `bash tunnel.sh`.
 
 **새 공격 차단**

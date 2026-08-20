@@ -17,9 +17,29 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
+# 대회 기본값. 실제 앱/SLO는 Deployment/HPA와 annotation/env/--slos-ms 에서 동적으로 덮어쓴다.
 APPS = ("user", "product", "stress")
 SLO_MS = {"user": 200, "product": 200, "stress": 1000}
 CFG = {"ns": "app", "waf_group": "aws-waf-logs-wsi2026", "waf_region": "us-east-1"}
+
+
+def parse_slos_ms(value):
+    """`app=milliseconds,...`를 검증해 반환한다."""
+    result = {}
+    for item in (value or "").split(","):
+        if not item.strip():
+            continue
+        if "=" not in item:
+            raise ValueError("SLO 형식은 app=milliseconds 입니다: " + item)
+        name, raw = item.split("=", 1)
+        name, raw = name.strip(), raw.strip()
+        if not name or float(raw) <= 0:
+            raise ValueError("앱 이름과 양수 SLO가 필요합니다: " + item)
+        result[name] = float(raw)
+    return result
+
+
+SLO_MS.update(parse_slos_ms(__import__("os").environ.get("APP_SLOS_MS", "")))
 
 
 def run(cmd, timeout=25):
@@ -122,8 +142,8 @@ def parse_rec(line):
             "raw": line[:600]}
 
 
-def collect_app(app, since):
-    out = run(["kubectl", "logs", "-n", CFG["ns"], "-l", "app=" + app,
+def collect_app(app, since, selector=None):
+    out = run(["kubectl", "logs", "-n", CFG["ns"], "-l", "app=" + (selector or app),
                "--since=" + since, "--tail=-1", "--prefix=false"])
     recs = []
     for ln in out.splitlines():
@@ -133,14 +153,19 @@ def collect_app(app, since):
     return recs
 
 
-def app_detail(app, since):
-    recs = collect_app(app, since)
+def app_detail(app, since, selector=None, slo_ms=None):
+    recs = collect_app(app, since, selector)
     ur = [r for r in recs if r["path"] != "/healthcheck"]
     total = len(ur)
     c = Counter(cls(r["status"]) for r in ur)
     durs = [r["dur"] for r in ur if isinstance(r["dur"], (int, float))]
-    slo = SLO_MS.get(app, 200)
-    within = sum(1 for d in durs if d <= slo)
+    slo = float(slo_ms if slo_ms is not None else SLO_MS.get(app, 200))
+    # 공식식: 분모는 모든 요청. 가용성은 2xx이면서 5초 이하, 성능은
+    # 2xx이면서 앱 SLO 이하만 성공이다. duration 누락도 성공으로 추정하지 않는다.
+    available = sum(1 for r in ur if cls(r["status"]) == "2"
+                    and isinstance(r["dur"], (int, float)) and r["dur"] <= 5000)
+    performant = sum(1 for r in ur if cls(r["status"]) == "2"
+                    and isinstance(r["dur"], (int, float)) and r["dur"] <= slo)
 
     def recent(k, n=50):
         rows = [{"ts": (r["ts"][11:23] if len(r["ts"]) >= 19 else r["ts"]),
@@ -151,12 +176,13 @@ def app_detail(app, since):
                  "raw": r.get("raw", "")} for r in ur if cls(r["status"]) == k]
         return rows[-n:][::-1]
 
-    return {"app": app, "total": total, "hc": len(recs) - total,
+    return {"app": app, "selector": selector or app, "total": total, "hc": len(recs) - total,
             "c2": c["2"], "c4": c["4"], "c5": c["5"],
-            "ok_rate": round(100.0 * c["2"] / total, 1) if total else 0,
+            "ok_rate": round(100.0 * available / total, 1) if total else 0,
+            "http_2xx_rate": round(100.0 * c["2"] / total, 1) if total else 0,
             "err_rate": round(100.0 * (c["4"] + c["5"]) / total, 1) if total else 0,
             "status": dict(sorted(Counter(r["status"] for r in ur).items())),
-            "slo_ms": slo, "slo_rate": round(100.0 * within / len(durs), 1) if durs else 0,
+            "slo_ms": slo, "slo_rate": round(100.0 * performant / total, 1) if total else 0,
             "p50": pctl(durs, 50), "p95": pctl(durs, 95), "p99": pctl(durs, 99),
             "max": round(max(durs)) if durs else 0,
             "paths": Counter(r["path"] for r in ur).most_common(10),
@@ -239,10 +265,70 @@ def nodes_detail():
     return out
 
 
-def deploy_cpu():
+def _deployment_slo_ms(item, default=200):
+    """Deployment annotation 또는 컨테이너 env에서 SLO(ms)를 찾는다."""
+    metadata = item.get("metadata", {}) or {}
+    template = item.get("spec", {}).get("template", {}) or {}
+    sources = [metadata.get("annotations", {}) or {},
+               (template.get("metadata", {}) or {}).get("annotations", {}) or {}]
+    for annotations in sources:
+        for key, value in annotations.items():
+            normalized = key.lower().replace("_", "-")
+            if normalized == "slo-ms" or normalized.endswith("/slo-ms"):
+                try:
+                    if float(value) > 0:
+                        return float(value)
+                except (TypeError, ValueError):
+                    pass
+    containers = template.get("spec", {}).get("containers", []) or []
+    for container in containers:
+        for env in container.get("env", []) or []:
+            if env.get("name", "").upper() in ("SLO_MS", "PERFORMANCE_SLO_MS"):
+                try:
+                    if float(env.get("value")) > 0:
+                        return float(env["value"])
+                except (TypeError, ValueError):
+                    pass
+    return float(default)
+
+
+def discover_app_specs(deployments=None, hpas=None):
+    """라이브 Deployment/HPA에서 모니터링할 앱, selector, SLO를 찾는다."""
+    deployments = deployments if deployments is not None else kjson(["get", "deploy", "-n", CFG["ns"]])
+    hpas = hpas if hpas is not None else kjson(["get", "hpa", "-n", CFG["ns"]])
+    by_name = {it.get("metadata", {}).get("name"): it
+               for it in deployments.get("items", []) if it.get("metadata", {}).get("name")}
+    ordered = []
+    for item in hpas.get("items", []):
+        ref = (item.get("spec", {}).get("scaleTargetRef", {}) or {})
+        if ref.get("kind", "Deployment").lower() == "deployment" and ref.get("name"):
+            ordered.append(ref["name"])
+    for name, item in by_name.items():
+        labels = ((item.get("spec", {}).get("template", {}) or {}).get("metadata", {}) or {}).get("labels", {}) or {}
+        if labels.get("app"):
+            ordered.append(name)
+    if not ordered:
+        ordered = list(APPS)
+    result, seen = [], set()
+    for name in ordered:
+        if name in seen:
+            continue
+        seen.add(name)
+        item = by_name.get(name, {})
+        template = item.get("spec", {}).get("template", {}) or {}
+        labels = (template.get("metadata", {}) or {}).get("labels", {}) or {}
+        selector = labels.get("app") or name
+        default_slo = SLO_MS.get(name, SLO_MS.get(selector, 200))
+        result.append({"name": name, "selector": selector,
+                       "slo_ms": _deployment_slo_ms(item, default_slo)})
+    return result
+
+
+def deploy_cpu(deployments=None):
     """앱별 현재 requests.cpu (예: '200m') — 계산 탭의 과투자 판정용."""
+    deployments = deployments if deployments is not None else kjson(["get", "deploy", "-n", CFG["ns"]])
     out = {}
-    for it in kjson(["get", "deploy", "-n", CFG["ns"]]).get("items", []):
+    for it in deployments.get("items", []):
         name = it["metadata"]["name"]
         try:
             for c in it["spec"]["template"]["spec"]["containers"]:
@@ -255,12 +341,14 @@ def deploy_cpu():
     return out
 
 
-def hpa_detail():
+def hpa_detail(hpas=None):
     ns = CFG["ns"]
+    hpas = hpas if hpas is not None else kjson(["get", "hpa", "-n", ns])
     out = []
-    for it in kjson(["get", "hpa", "-n", ns]).get("items", []):
+    for it in hpas.get("items", []):
         sp = it.get("spec", {})
         st = it.get("status", {})
+        name = (sp.get("scaleTargetRef", {}) or {}).get("name") or it["metadata"]["name"]
         cur = "-"
         for m in st.get("currentMetrics") or []:
             if m.get("resource", {}).get("name") == "cpu":
@@ -269,7 +357,7 @@ def hpa_detail():
         for m in sp.get("metrics") or []:
             if m.get("resource", {}).get("name") == "cpu":
                 tgt = str(m["resource"].get("target", {}).get("averageUtilization", "?")) + "%"
-        out.append({"name": it["metadata"]["name"], "cur": cur, "tgt": tgt,
+        out.append({"name": name, "hpa_name": it["metadata"]["name"], "cur": cur, "tgt": tgt,
                     "min": sp.get("minReplicas"), "max": sp.get("maxReplicas"),
                     "replicas": st.get("currentReplicas")})
     return out
@@ -461,13 +549,16 @@ def diagnose(apps, pods, waf):
 
 
 def build_data(since, waf_minutes):
-    apps = [app_detail(a, since) for a in APPS]
-    dc = deploy_cpu()
+    deployments = kjson(["get", "deploy", "-n", CFG["ns"]])
+    hpas_json = kjson(["get", "hpa", "-n", CFG["ns"]])
+    specs = discover_app_specs(deployments, hpas_json)
+    apps = [app_detail(spec["name"], since, spec["selector"], spec["slo_ms"]) for spec in specs]
+    dc = deploy_cpu(deployments)
     for a in apps:
         a["cpu_req"] = dc.get(a["app"], "")
     pods = pods_detail()
     nodes = nodes_detail()
-    hpa = hpa_detail()
+    hpa = hpa_detail(hpas_json)
     waf = waf_detail(waf_minutes)
     allow_total = sum(a["total"] for a in apps)
     summary = {"allow": allow_total, "block": waf.get("total", 0),
@@ -529,7 +620,7 @@ function appCard(a){var s=cr(a.slo_rate,90,70),o=cr(a.ok_rate,90,70);
  +'<div class=bar><div class="'+s+'" style="width:'+a.slo_rate+'%;background:currentColor"></div></div>'
  +'<div class=row><span>요청수</span><b>'+a.total+'</b></div>'
  +'<div class=row><span>2xx / 4xx / 5xx</span><span><span class=good>'+a.c2+'</span> / <span class=warn>'+a.c4+'</span> / <span class=bad>'+a.c5+'</span></span></div>'
- +'<div class=row><span>성공률</span><span class="'+o+'">'+a.ok_rate+'%</span></div>'
+ +'<div class=row><span>가용성 (2xx≤5s)</span><span class="'+o+'">'+a.ok_rate+'%</span></div>'
  +'<div class=row><span>p50/p95/p99</span><span>'+a.p50+'/'+a.p95+'/'+a.p99+'ms</span></div></div>'}
 
 function vOverview(){var s=D.summary;
@@ -545,7 +636,7 @@ function vOverview(){var s=D.summary;
 function vApp(a){var s=cr(a.slo_rate,90,70),o=cr(a.ok_rate,90,70);
  var k='<div class="grid g4">'
  +'<div class=card><div class=lbl>SLO ≤'+a.slo_ms+'ms</div><div class="kpi '+s+'">'+a.slo_rate+'%</div></div>'
- +'<div class=card><div class=lbl>성공률 2xx</div><div class="kpi '+o+'">'+a.ok_rate+'%</div></div>'
+ +'<div class=card><div class=lbl>가용성 2xx≤5s</div><div class="kpi '+o+'">'+a.ok_rate+'%</div></div>'
  +'<div class=card><div class=lbl>요청수 (+hc)</div><div class="kpi sm">'+a.total+' <span class=muted style="font-size:13px">+'+a.hc+'</span></div></div>'
  +'<div class=card><div class=lbl>p99 / max</div><div class="kpi sm">'+a.p99+' / '+a.max+'ms</div></div></div>';
  var cnt='<div class="grid g3" style="margin-top:14px">'
@@ -690,12 +781,14 @@ def main():
     ap.add_argument("--waf-log-group", default="aws-waf-logs-wsi2026")
     ap.add_argument("--waf-region", default="us-east-1")
     ap.add_argument("--since", default="15m", help="조회 기간 (예: 5m, 15m, 1h)")
+    ap.add_argument("--slos-ms", default="", help="앱별 SLO(ms): user=200,product=200,stress=1000")
     ap.add_argument("--once", action="store_true", help="웹서버 대신 터미널에 1회 출력 (CloudShell용)")
     ap.add_argument("--watch", type=int, default=0, metavar="SEC", help="N초마다 터미널 갱신 (CloudShell용)")
     a = ap.parse_args()
     CFG["ns"] = a.namespace
     CFG["waf_group"] = a.waf_log_group
     CFG["waf_region"] = a.waf_region
+    SLO_MS.update(parse_slos_ms(a.slos_ms))
     if a.once or a.watch:
         wm = _mins(a.since)
         try:

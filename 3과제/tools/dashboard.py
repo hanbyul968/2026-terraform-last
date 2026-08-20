@@ -7,12 +7,21 @@
        → http://<host>:8080
 """
 import argparse
+import os
 import sys
+from collections import defaultdict, deque
 
 from flask import Flask, jsonify, request, Response
 import monitor  # 같은 폴더의 monitor.py (수집/진단 로직 재사용)
 
+# tools/dashboard.py 와 tuning/ CLI 가 동일한 공식 채점/후보 엔진을 쓴다.
+_TUNING_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "tuning"))
+if _TUNING_DIR not in sys.path:
+    sys.path.insert(0, _TUNING_DIR)
+import tuning_engine
+
 app = Flask(__name__)
+_TUNE_CPU_HISTORY = defaultdict(lambda: deque(maxlen=600))
 
 PAGE = r"""<!doctype html><html lang="ko"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>3과제 모니터링</title>
@@ -93,7 +102,7 @@ function appCard(a){var s=cr(a.slo_rate,90,70),o=cr(a.ok_rate,90,70);
  +'<div class=bar><div class="'+s+'" style="width:'+a.slo_rate+'%;background:currentColor"></div></div>'
  +'<div class=row><span>요청수</span><b>'+a.total+'</b></div>'
  +'<div class=row><span>2xx / 4xx / 5xx</span><span><span class=gd>'+a.c2+'</span> / <span class=wn>'+a.c4+'</span> / <span class=bd>'+a.c5+'</span></span></div>'
- +'<div class=row><span>성공률</span><span class="'+o+'">'+a.ok_rate+'%</span></div>'
+ +'<div class=row><span>가용성 (2xx≤5s)</span><span class="'+o+'">'+a.ok_rate+'%</span></div>'
  +'<div class=row><span>p50/p95/p99</span><span>'+a.p50+'/'+a.p95+'/'+a.p99+'ms</span></div></div>'}
 function vOverview(){var s=D.summary;
  var k='<div class="grid g4">'
@@ -107,7 +116,7 @@ function vOverview(){var s=D.summary;
 function vApp(a){var s=cr(a.slo_rate,90,70),o=cr(a.ok_rate,90,70);
  var k='<div class="grid g4">'
  +'<div class=card><div class=lbl>SLO ≤'+a.slo_ms+'ms</div><div class="kpi '+s+'">'+a.slo_rate+'%</div></div>'
- +'<div class=card><div class=lbl>성공률 2xx</div><div class="kpi '+o+'">'+a.ok_rate+'%</div></div>'
+ +'<div class=card><div class=lbl>가용성 2xx≤5s</div><div class="kpi '+o+'">'+a.ok_rate+'%</div></div>'
  +'<div class=card><div class=lbl>요청수 (+hc)</div><div class="kpi sm">'+a.total+' <span class=mut style="font-size:13px">+'+a.hc+'</span></div></div>'
  +'<div class=card><div class=lbl>p99 / max</div><div class="kpi sm">'+a.p99+' / '+a.max+'ms</div></div></div>';
  var cnt='<div class="grid g3" style="margin-top:15px"><div class=card><div class=lbl>2xx</div><div class="kpi gd">'+a.c2+'</div></div>'
@@ -210,7 +219,25 @@ function nodeTypes(){
  var m={};(D.nodes||[]).forEach(function(nd){var k=nd.type||'?';m[k]=(m[k]||0)+1});
  return Object.keys(m).map(function(k){return k+' x'+m[k]}).join(', ')||'-';
 }
-function vCalc(){
+function tuneCmdBlock(title,lines){if(!lines||!lines.length)return '';return '<div class=mut style="font-size:11px;margin:7px 0 3px">'+title+'</div><pre style="margin:0 0 7px;background:#f6f7f9;border:1px solid var(--line);border-radius:8px;padding:9px 11px;font-size:11px;white-space:pre-wrap;overflow-x:auto">'+esc(lines.join('\n'))+'</pre>'}
+function vEnginePlan(t){
+ var s=t.score||{},cl=t.cluster||{};
+ var head='<div class="grid g4" style="margin-bottom:15px">'
+  +'<div class=card><div class=lbl>공식 소계</div><div class="kpi sm">'+(s.total==null?'-':s.total+'/36')+'</div></div>'
+  +'<div class=card><div class=lbl>비용 ratio / 점수</div><div class="kpi sm">'+(s.cost_ratio==null?'-':(+s.cost_ratio).toFixed(2))+'</div><div class=mut>'+(s.cost_points==null?'-':s.cost_points+'/12')+'</div></div>'
+  +'<div class=card><div class=lbl>실CPU 노드 하한</div><div class="kpi sm">'+(cl.cluster_cpu_p95_m&&cl.node_alloc_m?Math.ceil(cl.cluster_cpu_p95_m/cl.node_alloc_m):'-')+'</div><div class=mut>p95 '+(cl.cluster_cpu_p95_m||0)+'m / '+(cl.node_alloc_m||0)+'m</div></div>'
+  +'<div class=card><div class=lbl>안전 게이트</div><div class="kpi sm '+(s.avail_gate_pass&&s.perf_gate_pass?'gd':'bd')+'">'+(s.avail_gate_pass&&s.perf_gate_pass?'PASS':'FAIL')+'</div><div class=mut>avail≥99 · perf≥30</div></div></div>';
+ var rows=(t.apps||[]).map(function(a){return '<div class=row><span><b>'+esc(a.app)+'</b> <span class=mut>'+esc(a.bottleneck)+'</span></span><span>perf '+a.performance.toFixed(1)+'% · avail '+a.availability.toFixed(1)+'% · request '+a.request+'m · target '+a.target+'% · trigger '+a.trigger+'m · CPU p90 '+a.cpu_p90+'m</span></div>'}).join('');
+ var cs=(t.candidates||[]).map(function(c,i){var p=c.proposed,x=c.current;return '<div class=card><div class=lbl>#'+(i+1)+' '+esc(c.kind)+' · '+esc(c.app)+' <span class="'+(c.disruptive?'wn':'gd')+'">'+(c.disruptive?'rollout':'HPA-only')+'</span></div>'
+  +'<div class=row><span>현재 → 후보</span><span>request '+x.request+'→<b>'+p.request+'m</b> · target '+x.target+'→<b>'+p.target+'%</b> · min '+x.min+'→'+p.min+' · max '+x.max+'→'+p.max+'</span></div>'
+  +'<div class=row><span>HPA trigger</span><span>'+c.trigger_before+'m → <b>'+c.trigger_after+'m</b></span></div>'
+  +'<div class=row><span>노드 안전성</span><span>예상 '+c.predicted_nodes+'대 · 실CPU 하한 '+c.observed_cpu_floor+'대 · confidence '+esc(c.confidence)+'</span></div>'
+  +'<div class=mut style="font-size:12px;margin-top:7px">근거: '+esc(c.reason)+'</div>'
+  +tuneCmdBlock('라이브 적용',c.apply_commands)+tuneCmdBlock('정확한 롤백',c.rollback_commands)+'</div>'}).join('');
+ if(!cs)cs='<div class="tip good"><h3>안전하게 공식 점수를 올릴 후보 없음</h3><div class=why>'+esc(t.reason||'현재값 유지')+'</div></div>';
+ return '<div class=lbl style="margin-bottom:9px">공통 Python 엔진 — dashboard / advise / optimize 동일 판단</div>'+head+'<div class=card style="margin-bottom:15px"><h2>앱 상태</h2>'+rows+'</div><div class="grid g3">'+cs+'</div>';
+}
+function vCalc(){if(D.tuning&&D.tuning.schema_version)return vEnginePlan(D.tuning);
  var apps=D.apps||[];var nodeMax=nodeCpuMax();var sMin=0,sMinCpu=0;
  useRecord();  // 폴링마다 실사용 관측을 누적 (순간값 한 점으로 판단하지 않기 위해)
  var ALLOC=nodeAllocM();  // 라이브 노드에서 유도 (노드 타입 변경에 자동 대응)
@@ -404,7 +431,7 @@ function wafxRun(){var text=document.getElementById('wafx_in').value;var ep=docu
       +'<pre style="margin:0;background:#f6f7f9;border:1px solid var(--line);border-radius:8px;padding:9px 11px;font-size:11.5px;white-space:pre-wrap;color:#1a1d23;overflow-x:auto">'+esc(wafxTest(f,ep))+'</pre></div>';});
   out+='<div class="tip dim"><h3>적용 순서</h3><div class=why>1) 위 변수 줄들을 terraform/terraform.tfvars 에 추가·병합 (같은 변수는 한 줄로 합치기)\n2) cd terraform; terraform apply -auto-approve\n3) 위 curl 로 403 확인, 없는 경로(/.env)는 404 확인\n4) waf_header_stats.py 다시 돌려 붙여넣고 「막을 게 없습니다」 나올 때까지 반복\n5) 대시보드 avail% 100% 유지(정상 오차단 없는지) — 오차단이면 그 변수만 되돌려 apply\n※ 확신 없으면 waf_custom_rule_action = "count" 로 먼저 관찰 (확인 후 반드시 "block" 복귀)</div></div>';
   document.getElementById('wafx_out').innerHTML=out;}
-// ---- 튜닝적용 탭: autotune 출력 붙여넣기 → 적용 명령(kubectl + k8s_apps.tf) ----
+// ---- 튜닝적용 탭: legacy 앱별 출력 붙여넣기 → 라이브 적용 + 정확한 롤백 명령 ----
 // autotune.ps1 마지막 출력 예:
 //   ### terraform/k8s_apps.tf 반영값 (stress 만):
 //     requests.cpu = "300m",  HPA averageUtilization = 45,  min=3 max=12
@@ -423,8 +450,8 @@ function tuneParse(text){
     var mx=field(body,/(?:max_?replicas|max)\s*=\s*(\d+)/i);
     // 부분값에 임의 기본값을 채우면 기존 설정을 망칠 수 있으므로 네 값이 모두 있어야 인정한다.
     if(cpu===null||util===null||mn===null||mx===null)return null;
-    // 비용 기준선이 관리형 2노드이므로 붙여넣은 값과 무관하게 minReplicas는 2로 고정한다.
-    return {app:app,cpu:cpu+'m',util:util,min:2,max:mx};
+    // 네 값을 그대로 보존한다. min을 임의로 2로 덮으면 cold-start/비용 판단과 롤백이 깨진다.
+    return {app:app,cpu:cpu+'m',util:util,min:mn,max:mx};
   }
   function add(x){
     if(!x)return;
@@ -476,30 +503,29 @@ function tuneCmds(f){
       +'<br>대상 앱이 없는 단일값은 안전을 위해 전체 앱에 복제하지 않습니다.</div></div>';
   }
   var out='<div class="tip good"><h3>적용 대상: '+items.map(function(x){return x.app}).join(', ')+'</h3>'
-    +'<div class=why>'+items.map(function(x){
-        return x.app+' → cpu='+(x.cpu||'유지')+' util='+(x.util!=null?x.util+'%':'유지')
-             +' min='+(x.min!=null?x.min:'유지')+' max='+(x.max!=null?x.max:'유지');
-      }).join('\n')+'</div></div>';
-
+    +'<div class=why>'+items.map(function(x){return x.app+' → cpu='+x.cpu+' util='+x.util+'% min='+x.min+' max='+x.max;}).join('\n')+'</div></div>';
+  var ns=(D&&D.namespace)||'app';
+  function patch(n,mn,mx,util){
+    var body=JSON.stringify({spec:{minReplicas:mn,maxReplicas:mx,metrics:[{type:"Resource",resource:{name:"cpu",target:{type:"Utilization",averageUtilization:util}}}]}});
+    return 'kubectl -n '+ns+' patch hpa '+n+' --type=merge -p \''+body.replace(/"/g,'\\"')+'\'';
+  }
   items.forEach(function(x){
-    var n=x.app, mn=x.min, mx=x.max, util=x.util, cpu=x.cpu;
-    var patch=JSON.stringify({spec:{minReplicas:mn,maxReplicas:mx,metrics:[{type:"Resource",resource:{name:"cpu",target:{type:"Utilization",averageUtilization:util}}}]}});
-    // PowerShell 은 네이티브 exe 에 큰따옴표를 벗겨 넘겨서 -p '{"spec":...}' 가 깨진다
-    // (kubectl: invalid character 's'). \" 로 이스케이프해야 그대로 전달된다.
-    var imm='kubectl -n app set resources deploy/'+n+' --requests=cpu='+cpu+'\n'
-      +'kubectl -n app patch hpa '+n+' --type=merge -p \''+patch.replace(/"/g,'\\"')+'\'\n'
-      +'kubectl -n app rollout status deploy/'+n;
-    var tf='# terraform/k8s_apps.tf — kubernetes_deployment.'+n+'\n'
-      +'resources { requests = { cpu = "'+cpu+'", memory = "128Mi" } }\n'
-      +'# kubernetes_horizontal_pod_autoscaler_v2.'+n+'\n'
-      +'min_replicas = '+mn+'\nmax_replicas = '+mx+'\naverage_utilization = '+util;
+    var n=x.app, live=(D.apps||[]).find(function(a){return a.app===n})||{}, h=hpaOf(n);
+    var deployment=live.deployment_name||n, hpaName=h.hpa_name||n;
+    var current={cpu:live.cpu_req||x.cpu,min:h.min!=null?h.min:x.min,max:h.max!=null?h.max:x.max,util:pctn(h.tgt)};
+    if(current.util==null)current.util=x.util;
+    var changedCpu=current.cpu!==x.cpu;
+    var apply=[patch(hpaName,x.min,x.max,x.util)];
+    if(changedCpu)apply.push('kubectl -n '+ns+' set resources deploy/'+deployment+' --requests=cpu='+x.cpu,
+                             'kubectl -n '+ns+' rollout status deploy/'+deployment+' --timeout=120s');
+    var rollback=[];
+    if(changedCpu)rollback.push('kubectl -n '+ns+' set resources deploy/'+deployment+' --requests=cpu='+current.cpu,
+                                'kubectl -n '+ns+' rollout status deploy/'+deployment+' --timeout=120s');
+    rollback.push(patch(hpaName,current.min,current.max,current.util));
     out+='<div class=card style="margin-bottom:12px"><div class=lbl>'+n+'</div>'
-      +'<div class=mut style="font-size:12px;margin:6px 0 4px">① 즉시 적용 (임시 — 재배포 시 사라짐)</div>'
-      +'<pre style="margin:0 0 9px;background:#f6f7f9;border:1px solid var(--line);border-radius:8px;padding:9px 11px;font-size:11.5px;white-space:pre-wrap;color:#1a1d23;overflow-x:auto">'+esc(imm)+'</pre>'
-      +'<div class=mut style="font-size:12px;margin-bottom:4px">② 영구 반영 (k8s_apps.tf 수정 후 apply)</div>'
-      +'<pre style="margin:0;background:#f6f7f9;border:1px solid var(--line);border-radius:8px;padding:9px 11px;font-size:11.5px;white-space:pre-wrap;color:#1a1d23;overflow-x:auto">'+esc(tf)+'</pre></div>';
+      +tuneCmdBlock('① 라이브 적용',apply)+tuneCmdBlock('② 점수 미개선/오류 시 정확한 롤백',rollback)+'</div>';
   });
-  out+='<div class="tip dim"><h3>순서</h3><div class=why>① kubectl 로 즉시 적용해 효과 확인 (loadtest 재측정) → 좋으면 ② k8s_apps.tf 에 박고 <code>terraform apply -auto-approve</code>.\n한 번에 한 앱만. avail% 99% 는 사수.</div></div>';
+  out+='<div class="tip dim"><h3>순서</h3><div class=why>한 번에 한 앱만 적용 → 120초 재측정 → 공식 소계 상승 및 availability≥99%, 모든 performance≥30%면 유지. 아니면 즉시 롤백. Terraform apply는 튜닝에 필요하지 않습니다.</div></div>';
   return out;
 }
 function tuneRun(){
@@ -507,7 +533,12 @@ function tuneRun(){
   document.getElementById('tune_out').innerHTML=tuneCmds(f);
 }
 function vTuneApply(){
-  return '<div class=card><h2>튜닝적용 — 앱별 권장값으로 적용 명령 만들기</h2>'
+  var live='';
+  if(D.tuning&&D.tuning.candidates&&D.tuning.candidates.length){
+   live='<div class=card style="margin-bottom:15px"><h2>공통 엔진 라이브 후보 — 공식 총점 기준</h2><div class=mut style="font-size:12px;margin-bottom:9px">아래 명령은 현재 라이브 snapshot 기준입니다. request 변경은 rollout을 일으키므로 공식 트래픽 전에만 실행하세요.</div>'
+    +D.tuning.candidates.map(function(c,i){return '<div class=card style="margin-bottom:10px"><div class=lbl>#'+(i+1)+' '+esc(c.kind)+' · '+esc(c.app)+'</div><div class=mut>'+esc(c.reason)+'</div>'+tuneCmdBlock('① 적용',c.apply_commands)+tuneCmdBlock('② 점수 미개선/오류 시 롤백',c.rollback_commands)+'</div>'}).join('')+'</div>';
+  }
+  return live+'<div class=card><h2>튜닝적용 — 앱별 권장값으로 적용 명령 만들기</h2>'
    +'<div class=mut style="font-size:12px;margin-bottom:9px"><code>.\\autotune.ps1 -Result baseline</code> 출력의 <b>「수동 반영할 값」 앱별 줄</b>을 붙여넣고 [명령 생성]. 출력에 없는 앱은 적용 대상에서 제외합니다. 대시보드는 값을 자동 적용하지 않습니다.</div>'
    +'<textarea id=tune_in placeholder=\'예) stress: requests.cpu="375m", min_replicas=2, max_replicas=17, average_utilization=52\nuser: requests.cpu="200m", min_replicas=2, max_replicas=17, average_utilization=50\' style="width:100%;height:130px;background:#f6f7f9;color:#1a1d23;border:1px solid var(--line);border-radius:8px;padding:10px;font-size:12px;font-family:monospace"></textarea>'
    +'<button onclick="tuneRun()" style="margin-top:10px">명령 생성</button>'
@@ -633,12 +664,31 @@ def index():
     return Response(PAGE, mimetype="text/html")
 
 
+def _add_tuning_plan(data):
+    """대시보드 폴링값을 공통 엔진 snapshot으로 바꿔 공식 점수/후보를 붙인다."""
+    data["namespace"] = monitor.CFG["ns"]
+    for pod in data.get("pods", []):
+        if pod.get("phase") == "Running" and pod.get("app") and pod.get("cpu") not in (None, "-", ""):
+            _TUNE_CPU_HISTORY[pod["app"]].append(pod["cpu"])
+    try:
+        snapshot = tuning_engine.snapshot_from_dashboard(
+            data, baseline_nodes=float(os.environ.get("TUNE_BASELINE_NODES", "2")),
+            cpu_history={name: list(values) for name, values in _TUNE_CPU_HISTORY.items()},
+            availability_gate=99.0,
+        )
+        data["tuning"] = tuning_engine.plan(snapshot, namespace=monitor.CFG["ns"])
+    except Exception as exc:
+        data["tuning"] = {"schema_version": 1, "done": True, "reason": "튜닝 엔진 오류: " + str(exc),
+                          "score": {}, "apps": [], "cluster": {}, "candidates": [], "best": None}
+    return data
+
+
 @app.route("/api/data")
 def api_data():
     if DEMO:
-        return jsonify(demo_data())
+        return jsonify(_add_tuning_plan(demo_data()))
     since = request.args.get("since", "15m")
-    return jsonify(monitor.build_data(since, monitor._mins(since)))
+    return jsonify(_add_tuning_plan(monitor.build_data(since, monitor._mins(since))))
 
 
 def _tf_endpoint():
@@ -702,12 +752,14 @@ def main():
     ap.add_argument("--namespace", default="app")
     ap.add_argument("--waf-log-group", default="aws-waf-logs-wsi2026")
     ap.add_argument("--waf-region", default="us-east-1")
+    ap.add_argument("--slos-ms", default="", help="앱별 SLO(ms): user=200,product=200,stress=1000")
     ap.add_argument("--demo", action="store_true", help="클러스터 없이 샘플 데이터로 레이아웃 확인")
     a = ap.parse_args()
     DEMO = a.demo
     monitor.CFG["ns"] = a.namespace
     monitor.CFG["waf_group"] = a.waf_log_group
     monitor.CFG["waf_region"] = a.waf_region
+    monitor.SLO_MS.update(monitor.parse_slos_ms(a.slos_ms))
     mode = " [DEMO]" if DEMO else ""
     print("3과제 모니터링(Flask)%s  http://%s:%d  (Ctrl+C 종료)" % (mode, a.host, a.port))
     app.run(host=a.host, port=a.port, threaded=True)

@@ -3,6 +3,7 @@ import pathlib
 import subprocess
 import unittest
 
+ROOT = pathlib.Path(__file__).parent
 SOURCE = pathlib.Path(__file__).with_name("dashboard.py").read_text(encoding="utf-8-sig")
 
 
@@ -18,8 +19,11 @@ TUNE_CMDS_JS = extract_function("tuneCmds", "tuneRun")
 
 def run_parser(text, with_html=False):
     script = (
-        "var D={apps:[{app:'user'},{app:'product'},{app:'stress'}]};\n"
+        "var D={namespace:'app',apps:[{app:'user',cpu_req:'100m'},{app:'product',cpu_req:'100m'},{app:'stress',cpu_req:'250m'}],hpa:[{name:'user',tgt:'60%',min:2,max:10},{name:'product',tgt:'60%',min:2,max:10},{name:'stress',tgt:'55%',min:2,max:12}]};\n"
         "function esc(x){return String(x);}\n"
+        "function pctn(s){var n=parseInt((''+(s||'')).replace('%',''));return isNaN(n)?null:n}\n"
+        "function hpaOf(n){return (D.hpa||[]).find(function(h){return h.name===n})||{}}\n"
+        "function tuneCmdBlock(t,c){return t+' '+c.join('\\n')}\n"
         + TUNE_PARSE_JS + "\n"
         + (TUNE_CMDS_JS + "\n" if with_html else "")
         + ("var r=tuneParse(process.argv[1]); console.log(JSON.stringify({parsed:r,html:tuneCmds(r)}));"
@@ -38,25 +42,31 @@ user: requests.cpu="200m", min_replicas=3, max_replicas=17, average_utilization=
 자동 적용하지 않았습니다.'''
         result = run_parser(text, with_html=True)
         self.assertEqual(result["parsed"]["items"], [
-            {"app": "stress", "cpu": "375m", "util": 52, "min": 2, "max": 17},
-            {"app": "user", "cpu": "200m", "util": 50, "min": 2, "max": 17},
+            {"app": "stress", "cpu": "375m", "util": 52, "min": 3, "max": 17},
+            {"app": "user", "cpu": "200m", "util": 50, "min": 3, "max": 17},
         ])
         self.assertIn("적용 대상: stress, user", result["html"])
-        self.assertIn("stress → cpu=375m util=52% min=2 max=17", result["html"])
-        self.assertIn("user → cpu=200m util=50% min=2 max=17", result["html"])
+        self.assertIn("stress → cpu=375m util=52% min=3 max=17", result["html"])
+        self.assertIn("user → cpu=200m util=50% min=3 max=17", result["html"])
         self.assertNotIn("product →", result["html"])
+        self.assertIn("점수 미개선/오류 시 정확한 롤백", result["html"])
+        self.assertIn("requests=cpu=250m", result["html"])
+        self.assertIn("minReplicas\\\":2", result["html"])
+        self.assertIn("Terraform apply는 튜닝에 필요하지 않습니다", result["html"])
+        self.assertNotIn("k8s_apps.tf", result["html"])
+
 
     def test_field_order_is_free(self):
         text = "user: max_replicas=9, average_utilization=44, requests.cpu=225m, min_replicas=4"
         self.assertEqual(run_parser(text)["items"], [
-            {"app": "user", "cpu": "225m", "util": 44, "min": 2, "max": 9}
+            {"app": "user", "cpu": "225m", "util": 44, "min": 4, "max": 9}
         ])
 
     def test_arrow_summary_format(self):
         text = "user → cpu=200m util=50% min=3 max=17\nstress → max=15 min=4 target=48% request=350m"
         self.assertEqual(run_parser(text)["items"], [
-            {"app": "user", "cpu": "200m", "util": 50, "min": 2, "max": 17},
-            {"app": "stress", "cpu": "350m", "util": 48, "min": 2, "max": 15},
+            {"app": "user", "cpu": "200m", "util": 50, "min": 3, "max": 17},
+            {"app": "stress", "cpu": "350m", "util": 48, "min": 4, "max": 15},
         ])
 
     def test_advise_block_format(self):
@@ -66,8 +76,8 @@ user: requests.cpu="200m", min_replicas=3, max_replicas=17, average_utilization=
 [user] avail=100.0% perf=28.0%
   권장: request=200m min=3 max=17 target=50%'''
         self.assertEqual(run_parser(text)["items"], [
-            {"app": "stress", "cpu": "375m", "util": 52, "min": 2, "max": 17},
-            {"app": "user", "cpu": "200m", "util": 50, "min": 2, "max": 17},
+            {"app": "stress", "cpu": "375m", "util": 52, "min": 3, "max": 17},
+            {"app": "user", "cpu": "200m", "util": 50, "min": 3, "max": 17},
         ])
 
     def test_unscoped_single_value_is_not_copied_to_all_apps(self):
@@ -80,8 +90,31 @@ user: requests.cpu="200m", min_replicas=3, max_replicas=17, average_utilization=
         text = '''### 반영값 (stress 만):
 requests.cpu = "300m", HPA averageUtilization = 45, min=3 max=12'''
         self.assertEqual(run_parser(text)["items"], [
-            {"app": "stress", "cpu": "300m", "util": 45, "min": 2, "max": 12}
+            {"app": "stress", "cpu": "300m", "util": 45, "min": 3, "max": 12}
         ])
+
+
+class SharedDashboardPlanTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import sys
+        sys.path.insert(0, str(ROOT))
+        import dashboard
+        cls.dashboard = dashboard
+
+    def test_demo_data_contains_shared_official_plan(self):
+        data = self.dashboard._add_tuning_plan(self.dashboard.demo_data())
+        self.assertIn("tuning", data)
+        self.assertEqual(data["tuning"]["schema_version"], 1)
+        self.assertIn("score", data["tuning"])
+        for candidate in data["tuning"]["candidates"]:
+            self.assertTrue(candidate["apply_commands"])
+            self.assertTrue(candidate["rollback_commands"])
+
+    def test_page_prefers_shared_engine_renderer(self):
+        self.assertIn("function vEnginePlan", self.dashboard.PAGE)
+        self.assertIn("공통 엔진 라이브 후보", self.dashboard.PAGE)
+        self.assertIn("정확한 롤백", self.dashboard.PAGE)
 
 
 if __name__ == "__main__":

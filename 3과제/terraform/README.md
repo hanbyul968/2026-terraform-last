@@ -19,8 +19,8 @@
 | ~0:20 | 받은 바이너리 반영               | [3. 바이너리 교체](#3-바이너리-교체)          |
 | ~0:25 | **스펙이 바뀌었으면 대응** | [4. API/스펙 변경 대응](#4-apispec-변경-대응) |
 | ~0:35 | 스모크 테스트 → 엔드포인트 제출 | [5. 스모크 테스트](#5-스모크-테스트)          |
-| ~0:45 | 부하도구 준비                    | `..\tuning\setup.ps1` → `loadtest.ps1`  |
-| 1:00~ | 트래픽 시작. 모니터링 + 튜닝     | [7. 튜닝](#7-성능비용-튜닝)                   |
+| ~0:40 | 라이브 부하 측정·자동 튜닝        | [7. 튜닝](#7-성능비용-튜닝)                   |
+| 1:00~ | 트래픽 시작. 모니터링 + WAF 대응 | `..\tools\dashboard.ps1`                      |
 | 종료  | 부하 중지 확인                   |                                              |
 
 ---
@@ -348,12 +348,14 @@ python waf_header_stats.py --log-group aws-waf-logs-wsi2026 --region us-east-1 -
 ```powershell
 cd ..\tuning
 .\loadtest.ps1 -Duration 120s -Label t1    # 병목 앱 찾기 (채점 환산 + perf% 낮은 앱)
-.\optimize.ps1 -Apply                      # 18분 예산 안에서 HPA 자동 최적화(워밍업+120s, 예산 초과 시 자동 중단)
+.\optimize.ps1 -Apply                      # 18분 안에서 라이브 request/HPA 공식점수 최적화
 ```
 
-`optimize.ps1`이 출력한 우승값을 `k8s_apps.tf`의 해당 앱 `requests.cpu` / HPA
-`average_utilization`·`min_replicas`에 박고 apply한다 (`kubectl patch`는 재배포 시 사라짐).
-상세는 [`../tuning/README.md`](../tuning/README.md).
+`optimize.ps1`은 현재 **라이브 Deployment/HPA**를 snapshot으로 읽고 request/target/min/max 후보를
+트랜잭션으로 적용한다. 총점이 오르면 라이브 우승값을 유지하고, 실패·게이트 위반·중단이면 정확히
+이전 snapshot으로 롤백한다. **튜닝 결과를 `k8s_apps.tf`에 옮기거나 Terraform apply할 필요가 없다.**
+Terraform drift는 의도된 운영 상태이며, 이후 apply는 우승값을 덮을 수 있다. 상세는
+[`../tuning/README.md`](../tuning/README.md).
 
 **avail% < 99면 비용보다 무조건 용량부터.**
 
@@ -400,7 +402,7 @@ terraform/
 ├── lb_controller.tf          # AWS LB Controller (TargetGroupBinding용)
 ├── alb.tf                    # ALB + TG + 리스너 (유효경로 forward / 미정의 404 / 직접호출 403)
 ├── k8s_base.tf               # namespace + Secret/ConfigMap + db-init Job
-├── k8s_apps.tf               # user/product/stress Deploy+Svc+HPA  ← 튜닝값 반영처
+├── k8s_apps.tf               # user/product/stress Deploy+Svc+HPA 초기 배포 기본값
 ├── waf.tf                    # WAFv2 (변수로만 제어 — 수정할 일 없음)
 └── cloudfront.tf             # 단일 엔드포인트 + 캐싱 + /images rewrite
 ```

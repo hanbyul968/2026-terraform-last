@@ -1041,11 +1041,44 @@ def _commands(namespace, snapshot, knobs):
     return apply, rollback
 
 
+def _safe_target_max(app: AppSnapshot):
+    """SLO 여유에 따른 HPA target 상한. p90 지연이 SLO에 가까울수록 낮게(파드를 여유롭게).
+
+    p90 <= SLO*0.5 → 여유 큼 → 90%까지 허용
+    p90 ~ SLO      → 여유 없음 → 55%로 제한(파드 일찍 확장, 꼬리지연 방지)
+    측정이 없으면 보수적으로 70%.
+    """
+    slo_ms = app.slo_seconds * 1000.0
+    p90 = float(app.per_pod_p95 or 0)  # per-pod가 아니라 응답 p90이 필요하나 없으면
+    lat_p90 = None
+    if app.latencies:
+        ordered = sorted(app.latencies)
+        lat_p90 = ordered[min(len(ordered) - 1, int(len(ordered) * .9))] * 1000.0
+    if not slo_ms or lat_p90 is None:
+        return 70
+    ratio = lat_p90 / slo_ms
+    if ratio <= 0.5:
+        return TARGET_MAX
+    if ratio >= 0.9:
+        return 55
+    # 0.5~0.9 선형: 90% -> 55%
+    return int(clamp(round(TARGET_MAX - (ratio - 0.5) / 0.4 * (TARGET_MAX - 55)), 55, TARGET_MAX))
+
+
 def _make_candidate(snapshot, app, kind, proposed, reason, priority, namespace="app",
                     knobs=None):
     lead = app.name if hasattr(app, "name") else app
     knobs = knobs or {lead: dict(proposed)}
     knobs = {name: dict(values) for name, values in knobs.items()}
+    # SLO 여유가 적은 앱은 HPA target을 높게 잡으면 파드가 뜨겁게 돌아 꼬리지연이 SLO를 넘긴다.
+    # (실측: user target 90%에서 p90이 200ms 초과 → 성능 14.8%). 비용/밴드 후보가 target을
+    # 그 상한 위로 올리지 못하게 막는다. gate-recovery는 오히려 target을 낮추므로 제외.
+    if kind not in ("gate-recovery",):
+        for name, values in knobs.items():
+            cap = _safe_target_max(snapshot.apps[name])
+            cur_t = _current_dict(snapshot.apps[name])["target"]
+            if values["target"] > cap and values["target"] > cur_t:
+                values["target"] = max(cap, cur_t)
     for name, values in knobs.items():
         values["estimated_replicas"] = _predicted_replicas(snapshot.apps[name], values)
     proposed = knobs[lead]

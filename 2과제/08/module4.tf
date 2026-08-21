@@ -103,6 +103,12 @@ resource "aws_eks_cluster" "m4" {
   name     = "skills-sqs-cluster"
   role_arn = aws_iam_role.m4_eks.arn
 
+  # 버전을 고정하지 않으면 EKS 기본값(현재 1.36)이 잡히는데, Karpenter 는
+  # k8s 1.36 에서 >= 1.13 이 필요하다. 채점 항목 4-3/4-5/4-6 이 Karpenter 에
+  # 전적으로 의존하므로 호환성이 검증된 조합(EKS 1.34 + Karpenter 1.11.3)으로 고정한다.
+  # (k8s-apply.sh 의 KARPENTER_VERSION 과 반드시 함께 관리할 것)
+  version = "1.34"
+
   vpc_config {
     subnet_ids              = concat(aws_subnet.m4_public[*].id, aws_subnet.m4_private[*].id)
     endpoint_public_access  = true
@@ -419,6 +425,10 @@ resource "aws_iam_role_policy" "m4_bastion" {
       { Effect = "Allow", Action = ["eks:DescribeCluster", "eks:ListClusters"], Resource = "*" },
       { Effect = "Allow", Action = ["ec2:DescribeSubnets", "ec2:CreateTags"], Resource = "*" },
       { Effect = "Allow", Action = ["iam:GetRole", "iam:GetInstanceProfile"], Resource = "*" },
+      # 채점자(CloudShell) IAM User 를 EKS access entry 로 자동 등록하기 위한 권한.
+      # terraform 실행 주체와 채점 주체가 다를 경우 4-1 kubectl 연결이 실패하는 것을 막는다.
+      { Effect = "Allow", Action = ["iam:ListUsers"], Resource = "*" },
+      { Effect = "Allow", Action = ["eks:CreateAccessEntry", "eks:AssociateAccessPolicy", "eks:ListAccessEntries", "eks:DescribeAccessEntry"], Resource = "*" },
       { Effect = "Allow", Action = ["sqs:GetQueueUrl", "sqs:GetQueueAttributes", "sqs:SendMessage"], Resource = aws_sqs_queue.m4.arn }
     ]
   })

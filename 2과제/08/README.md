@@ -51,7 +51,7 @@ terraform apply -var="docdb_password=Skills2026!" -auto-approve
 - **모듈4** — VPC + EKS + Fargate Profile + SQS + IRSA Role + **in-VPC bastion EC2**
 
 **모듈4 bastion 이 자동으로 하는 일** (user_data → `k8s-apply.sh`):
-CoreDNS 를 Fargate 로 패치 → KEDA/Karpenter Helm 설치 → `sqs-worker` SA/Deployment → KEDA `ScaledObject`/`TriggerAuthentication` → Karpenter `NodePool`/`EC2NodeClass` → 서브넷 태깅 → Worker 이미지 ECR build/push.
+채점자 IAM User EKS access entry 등록 → CoreDNS 를 Fargate 로 패치 → Worker 이미지 ECR build/push → 서브넷 태깅 → KEDA/Karpenter Helm 설치(`--wait`) → `sqs-worker` SA/Deployment → KEDA `TriggerAuthentication`(`podIdentity.provider: aws-eks`)/`ScaledObject` → Karpenter `EC2NodeClass`/`NodePool`.
 
 > terraform 인프라 apply 는 먼저 끝나고, bastion 의 K8s 배포는 **백그라운드로 수 분** 더 걸립니다. 완료 확인은 **2장** 참고.
 
@@ -230,7 +230,7 @@ kubectl get nodes -l karpenter.sh/nodepool=skills-sqs-nodepool,skills-nodepool=e
 - Fargate Profile `skills-sqs-fp-keda`(ns keda) / `skills-sqs-fp-karpenter`(ns karpenter) (+ kube-system for CoreDNS)
 - SQS `skills-sqs-queue`(Standard, **Visibility 60초** ≥30)
 - IRSA: `keda/keda-operator`, `karpenter/karpenter`, `skills-sqs/sqs-worker-sa` (SA 에 `eks.amazonaws.com/role-arn` annotation)
-- Worker: 제공 `worker.py`+`boto3` 이미지, ns `skills-sqs` / Deploy `sqs-worker` / SA `sqs-worker-sa`, label `app=sqs-worker`, env `SQS_QUEUE_URL/AWS_REGION/PROCESSING_SECONDS=5`, nodeSelector `karpenter.sh/nodepool=skills-sqs-nodepool` + `skills-nodepool=event-worker` (**Fargate 아닌 Karpenter EC2 노드에서 실행**)
+- Worker: 제공 `worker.py`+`boto3` 이미지, ns `skills-sqs` / Deploy `sqs-worker` / SA `sqs-worker-sa`, label `app=sqs-worker`, env `SQS_QUEUE_URL/AWS_REGION/PROCESSING_SECONDS=20`, nodeSelector `karpenter.sh/nodepool=skills-sqs-nodepool` + `skills-nodepool=event-worker` (**Fargate 아닌 Karpenter EC2 노드에서 실행**)
 - KEDA: `sqs-worker-scaledobject` / `sqs-worker-trigger-auth`, trigger `aws-sqs-queue` **queueLength 2, min 0, max 6, pollingInterval 15, cooldownPeriod 30**
 - Karpenter: NodePool `skills-sqs-nodepool`(label `skills-nodepool=event-worker`, `disruption.consolidationPolicy` 포함) / EC2NodeClass `skills-sqs-nodeclass`
 
@@ -313,7 +313,7 @@ Client/Service VPC·서브넷 CIDR, **Client VPC CIDR 변경 시 `aws_security_g
 VPC/서브넷 CIDR, Lambda runtime(`python3.12`)/timeout(`30`). CloudTrail S3 버킷은 Global Unique → 비번호 지정 시 `aws_s3_bucket.m3_trail` 를 `bucket = "skills-ceh-trail-<비번호>"` 로.
 
 ### 모듈4 — `module4.tf` + `k8s-apply.sh`
-VPC/서브넷 CIDR, SQS Visibility(`aws_sqs_queue.m4` = 60), Bastion 인스턴스 타입. K8s 파라미터는 `k8s-apply.sh`: KEDA `queueLength "2"`/`pollingInterval 15`/`cooldownPeriod 30`/`maxReplicaCount 6`, NodePool instance-type/`consolidateAfter 30s`, Worker `PROCESSING_SECONDS "5"`, Karpenter `--version 1.4.0`.
+VPC/서브넷 CIDR, SQS Visibility(`aws_sqs_queue.m4` = 60), Bastion 인스턴스 타입. K8s 파라미터는 `k8s-apply.sh`: KEDA `queueLength "2"`/`pollingInterval 15`/`cooldownPeriod 30`/`maxReplicaCount 6`, NodePool instance-type/`consolidateAfter 30s`, Worker `PROCESSING_SECONDS "20"`, KEDA `--version 2.20.2`, Karpenter `--version 1.11.3` (EKS `version = "1.34"` 와 한 쌍으로 관리).
 
 ---
 

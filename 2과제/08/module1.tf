@@ -206,4 +206,12 @@ resource "aws_instance" "m1_client" {
   })
 
   tags = { Name = "skills-nosql-client-ec2" }
+
+  # userdata 가 부팅 직후 DocumentDB 에 접속해 seed + Index/TTL 을 만든다.
+  # Cluster/Instance 가 available 되기 전에 EC2 가 뜨면 seed 가 실패해
+  # 채점 1-3/1-4/1-5 가 전부 무너지므로 명시적으로 순서를 강제한다.
+  depends_on = [
+    aws_docdb_cluster_instance.m1,
+    aws_secretsmanager_secret_version.m1,
+  ]
 }

@@ -78,18 +78,13 @@ resource "aws_route_table_association" "m2_client" {
   route_table_id = aws_route_table.m2_client.id
 }
 
-# Service VPC needs NAT for userdata
+# Service VPC 의 IGW.
+# service EC2 에는 Public IP 를 붙이지 않으므로(2-2 채점: PublicIp 없어야 함)
+# 인터넷 인바운드는 불가능하다. userdata 가 OS 기본 python3 만 쓰기 때문에
+# 외부 패키지 다운로드가 필요 없어 NAT 없이도 부팅이 완료된다.
 resource "aws_internet_gateway" "m2_service" {
   provider = aws.tokyo
   vpc_id   = aws_vpc.m2_service.id
-}
-
-resource "aws_subnet" "m2_service_public" {
-  provider                = aws.tokyo
-  vpc_id                  = aws_vpc.m2_service.id
-  cidr_block              = "10.62.2.0/24"
-  availability_zone       = data.aws_availability_zones.tokyo.names[0]
-  map_public_ip_on_launch = true
 }
 
 resource "aws_route_table" "m2_service" {
@@ -104,12 +99,6 @@ resource "aws_route_table" "m2_service" {
 resource "aws_route_table_association" "m2_service" {
   provider       = aws.tokyo
   subnet_id      = aws_subnet.m2_service.id
-  route_table_id = aws_route_table.m2_service.id
-}
-
-resource "aws_route_table_association" "m2_service_public" {
-  provider       = aws.tokyo
-  subnet_id      = aws_subnet.m2_service_public.id
   route_table_id = aws_route_table.m2_service.id
 }
 
@@ -201,6 +190,16 @@ resource "aws_instance" "m2_client" {
   user_data = file("${path.module}/app/module2/client/lattice-client-userdata.sh")
 
   tags = { Name = "skills-lattice-client-ec2" }
+
+  # client userdata 는 부팅 시 VPC Lattice Service 의 Generated Domain 을 조회해
+  # SERVICE_URL 을 만든다. Service / Listener / VPC Association 이 먼저 없으면
+  # 조회에 실패하므로(2-5 End-to-End 실패) 명시적으로 순서를 강제한다.
+  depends_on = [
+    aws_vpclattice_listener.m2,
+    aws_vpclattice_service_network_service_association.m2,
+    aws_vpclattice_service_network_vpc_association.m2_client,
+    aws_vpclattice_target_group_attachment.m2,
+  ]
 }
 
 # VPC Lattice
@@ -242,9 +241,19 @@ resource "aws_vpclattice_target_group" "m2" {
     port           = 8080
     protocol       = "HTTP"
     vpc_identifier = aws_vpc.m2_service.id
+    # 2-4 채점: Target 이 HEALTHY 여야 한다. 기본값(30초 간격/임계 5회)이면
+    # HEALTHY 판정까지 수 분이 걸리므로 간격과 임계치를 낮춘다.
     health_check {
-      path     = "/health"
-      protocol = "HTTP"
+      enabled                       = true
+      path                          = "/health"
+      protocol                      = "HTTP"
+      protocol_version              = "HTTP1"
+      port                          = 8080
+      health_check_interval_seconds = 10
+      health_check_timeout_seconds  = 5
+      healthy_threshold_count       = 2
+      unhealthy_threshold_count     = 2
+      matcher { value = "200" }
     }
   }
   tags = { Name = "skills-lattice-order-tg" }

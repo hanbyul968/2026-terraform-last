@@ -118,6 +118,14 @@ data "archive_file" "m3_lambda" {
   output_path = "${path.module}/app/module3/lambda.zip"
 }
 
+# 3-5 채점에서 /aws/lambda/skills-ceh-remediate-fn Log Group 조회를 확인한다.
+# 첫 invoke 시 자동 생성되기를 기다리지 않고 미리 만들어 둔다.
+resource "aws_cloudwatch_log_group" "m3_lambda" {
+  provider          = aws.singapore
+  name              = "/aws/lambda/skills-ceh-remediate-fn"
+  retention_in_days = 7
+}
+
 resource "aws_lambda_function" "m3" {
   provider         = aws.singapore
   function_name    = "skills-ceh-remediate-fn"
@@ -136,6 +144,8 @@ resource "aws_lambda_function" "m3" {
   }
 
   tags = { Name = "skills-ceh-remediate-fn" }
+
+  depends_on = [aws_cloudwatch_log_group.m3_lambda]
 }
 
 # CloudTrail
@@ -203,10 +213,11 @@ resource "aws_cloudwatch_event_rule" "m3" {
 }
 
 resource "aws_cloudwatch_event_target" "m3" {
-  provider  = aws.singapore
-  rule      = aws_cloudwatch_event_rule.m3.name
-  target_id = "lambda"
-  arn       = aws_lambda_function.m3.arn
+  provider       = aws.singapore
+  rule           = aws_cloudwatch_event_rule.m3.name
+  event_bus_name = "default"
+  target_id      = "lambda"
+  arn            = aws_lambda_function.m3.arn
 }
 
 resource "aws_lambda_permission" "m3" {

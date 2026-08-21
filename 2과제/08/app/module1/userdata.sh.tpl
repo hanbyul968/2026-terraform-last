@@ -60,15 +60,25 @@ systemctl daemon-reload
 systemctl enable --now skills-nosql-app.service
 
 # ---- 5) 앱 기동 대기 후 데이터 seed ----
-for i in $(seq 1 60); do
+# /health 는 DocumentDB 접속이 성공해야 200 을 준다. 클러스터가 available 될 때까지
+# 최대 30분 대기한다. (짧게 끊으면 seed 가 통째로 누락돼 1-3/1-4/1-5 가 전부 실패)
+for i in $(seq 1 360); do
   if curl -fsS http://127.0.0.1:8080/health >/dev/null 2>&1; then break; fi
   sleep 5
 done
-curl -fsS -X POST http://127.0.0.1:8080/v1/admin/seed || true
+
+# seed 도 실패 시 재시도한다. (docdb 가 막 available 된 직후 일시적 오류 대비)
+for i in $(seq 1 30); do
+  if curl -fsS -X POST http://127.0.0.1:8080/v1/admin/seed >/dev/null 2>&1; then
+    echo "seed ok (attempt $i)"; break
+  fi
+  echo "seed retry $i"; sleep 10
+done
 
 # ---- 6) 요구 Index / TTL 생성 (docdb_client 의 db() 재사용) ----
 cd "$APP_DIR"
-"$VENV_DIR/bin/python" - <<'PYIDX'
+for i in $(seq 1 30); do
+  if "$VENV_DIR/bin/python" - <<'PYIDX'
 from docdb_client import db, ASCENDING, DESCENDING
 d = db()
 d.orders.create_index([('orderId', ASCENDING)], unique=True, name='orderId_1')
@@ -81,5 +91,16 @@ d.sessions.create_index([('expiresAt', ASCENDING)], expireAfterSeconds=0, name='
 d.sessions.create_index([('customerId', ASCENDING), ('lastSeen', DESCENDING)], name='customerId_1_lastSeen_-1')
 print("indexes created")
 PYIDX
+  then
+    echo "indexes ok (attempt $i)"; break
+  fi
+  echo "index retry $i"; sleep 10
+done
+
+# ---- 7) 최종 검증 로그 (부팅 로그만 봐도 채점 항목 상태를 알 수 있게) ----
+curl -s http://127.0.0.1:8080/v1/admin/summary || true
+echo
+curl -s http://127.0.0.1:8080/v1/admin/indexes || true
+echo
 
 echo "SKILLS_NOSQL_BOOTSTRAP_DONE"

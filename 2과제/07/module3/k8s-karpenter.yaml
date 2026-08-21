@@ -8,6 +8,8 @@ spec:
       taints:
         - key: skm-app-nodepool
           effect: NoSchedule
+      # 노드 반환(Scale-in)이 2분 내로 끝나도록 drain 대기 상한을 짧게 둔다.
+      terminationGracePeriod: 30s
       requirements:
         - key: node.kubernetes.io/instance-type
           operator: In
@@ -21,7 +23,11 @@ spec:
         name: skm-app-nodeclass
   disruption:
     consolidationPolicy: WhenEmptyOrUnderutilized
+    # 유휴/저활용 노드는 60초 후 반환
     consolidateAfter: 60s
+    # 반환 대상 노드를 동시에 처리해 Scale-in 이 2분을 넘지 않도록 한다.
+    budgets:
+      - nodes: "100%"
   limits:
     cpu: "8"
     memory: "16Gi"

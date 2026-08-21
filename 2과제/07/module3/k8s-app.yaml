@@ -27,6 +27,8 @@ spec:
         app: order-processor
     spec:
       serviceAccountName: order-processor-sa
+      # Pod 종료가 지연되면 노드 반환도 늦어지므로 grace period 를 짧게 둔다.
+      terminationGracePeriodSeconds: 10
       tolerations:
         - key: "skm-app-nodepool"
           operator: "Exists"

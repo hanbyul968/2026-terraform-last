@@ -1,0 +1,3 @@
+ip-10-20-0-131 [baseline]: ['app/stress=750m', 'app/user=600m', 'kube-system/aws-load-balancer-co=0m', 'kube-system/karpenter-76fb846574=200m', 'kube-system/metrics-server-8c569=100m']
+ip-10-20-1-197 [KARPENTER]: ['app/user=600m']
+ip-10-20-1-59 [baseline]: ['app/product=250m', 'app/product=250m', 'app/stress=750m', 'kube-system/aws-load-balancer-co=0m', 'kube-system/coredns-69775bf776-c=100m', 'kube-system/coredns-69775bf776-v=100m', 'kube-system/metrics-server-8c569=100m']

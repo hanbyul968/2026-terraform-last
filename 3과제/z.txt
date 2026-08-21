@@ -1,0 +1,3 @@
+ip-10-20-0-131 zone=ap-northeast-2a [baseline]
+ip-10-20-1-197 zone=ap-northeast-2b [KARPENTER]
+ip-10-20-1-59 zone=ap-northeast-2b [baseline]

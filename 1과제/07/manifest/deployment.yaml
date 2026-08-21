@@ -28,6 +28,9 @@ spec:
           value: "ap-northeast-2"
         - name: TABLE_NAME
           value: "unicorn-concert-db"
+        # 로그 timestamp 를 KST 로 (채점 12-1-A). 이미지에 Asia/Seoul zone 포함.
+        - name: TZ
+          value: "Asia/Seoul"
         livenessProbe:
           httpGet:
             path: /health

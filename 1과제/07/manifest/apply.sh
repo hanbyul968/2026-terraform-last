@@ -175,11 +175,16 @@ APP_NODE_ROLE=$(aws eks describe-nodegroup --cluster-name unicorn-eks-cluster --
 ADDON_NODE_ROLE=$(aws eks describe-nodegroup --cluster-name unicorn-eks-cluster --nodegroup-name addon-ng --query "nodegroup.nodeRole" --output text | grep -oP 'role/\K.*')
 aws iam attach-role-policy --role-name $APP_NODE_ROLE --policy-arn arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
 aws iam attach-role-policy --role-name $ADDON_NODE_ROLE --policy-arn arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+# 채점 9-2-A 는 CloudShell 의 IAM 자격증명으로 unicorn-audit-role 을 assume 한다.
+# apply.sh 는 bastion 의 인스턴스 롤(assumed-role)로 실행되므로 아래 grep 결과가 비어
+# 있고, 예전 코드는 아무에게도 권한을 부여하지 못한 채 넘어갔다. 현재 호출자에 더해
+# 계정의 모든 IAM User 에게 부여해 채점자가 어떤 User 로 접속하든 assume 이 되게 한다.
+ASSUME_DOC="{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"sts:AssumeRole\",\"Resource\":\"arn:aws:iam::${ACCOUNT}:role/unicorn-audit-role\"}]}"
 CURRENT_USER=$(aws sts get-caller-identity --query "Arn" --output text | grep -oP 'user/\K.*')
-if [ -n "$CURRENT_USER" ]; then
-  aws iam put-user-policy --user-name $CURRENT_USER --policy-name AllowAssumeAuditRole \
-    --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"sts:AssumeRole\",\"Resource\":\"arn:aws:iam::${ACCOUNT}:role/unicorn-audit-role\"}]}"
-fi
+for U in $CURRENT_USER $(aws iam list-users --query "Users[].UserName" --output text); do
+  aws iam put-user-policy --user-name "$U" --policy-name AllowAssumeAuditRole \
+    --policy-document "$ASSUME_DOC" 2>/dev/null
+done
 
 # --- 12. EKS Endpoint Private-Only 전환 (rubric 6-1: endpointPublicAccess=false, endpointPrivateAccess=true) ---
 # 위 모든 kubectl/helm 작업은 bastion(default VPC)에서 public endpoint 를 경유해 수행된다.

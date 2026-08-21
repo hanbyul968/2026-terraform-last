@@ -24,6 +24,11 @@ vpc:
     privateAccess: true
     publicAccess: true
 
+# 채점 6-1-A: aws eks describe-cluster --query "cluster.accessConfig.authenticationMode" -> API
+# (apply.sh 의 create-access-entry / associate-access-policy 도 API 모드를 전제로 한다)
+accessConfig:
+  authenticationMode: API
+
 secretsEncryption:
   keyARN: KEY_ARN
 

@@ -260,6 +260,12 @@ spec:
         - name: otel-collector
           image: otel/opentelemetry-collector-contrib:latest
           args: ["--config=/etc/otel/config.yaml"]
+          # /var/log/pods 의 컨테이너 로그는 root 소유다. 컨트리브 이미지 기본 uid(10001)
+          # 로 실행하면 filelog receiver 가 permission denied 로 아무 로그도 수집하지 못해
+          # 4-5(LogQL 조회)/4-6(대시보드)이 통째로 날아간다.
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
           volumeMounts:
             - name: config
               mountPath: /etc/otel
@@ -301,7 +307,7 @@ cat > /tmp/log-overview-dashboard.json <<EOF
 {"id":1,"title":"Log Count Over Time","type":"timeseries","gridPos":{"h":9,"w":14,"x":0,"y":0},"datasource":{"type":"loki","uid":"${LOKI_UID}"},"fieldConfig":{"defaults":{"custom":{"drawStyle":"bars","fillOpacity":80,"stacking":{"mode":"normal","group":"A"}}}},"options":{"legend":{"displayMode":"list","placement":"bottom"}},"targets":[{"expr":"sum by (level) (count_over_time({k8s_namespace_name=\"o11y\"} | json | level=~\"INFO|WARN|ERROR\" [1m]))","refId":"A","legendFormat":"{{level}}"}]},
 {"id":2,"title":"Log Level Distribution","type":"piechart","gridPos":{"h":9,"w":10,"x":14,"y":0},"datasource":{"type":"loki","uid":"${LOKI_UID}"},"options":{"legend":{"displayMode":"list","placement":"right"}},"targets":[{"expr":"sum by (level) (count_over_time({k8s_namespace_name=\"o11y\"} | json | level=~\"INFO|WARN|ERROR\" [\$__range]))","refId":"A","legendFormat":"{{level}}"}]},
 {"id":3,"title":"Recent Logs","type":"logs","gridPos":{"h":12,"w":24,"x":0,"y":9},"datasource":{"type":"loki","uid":"${LOKI_UID}"},"targets":[{"expr":"{k8s_namespace_name=\"o11y\"} | json | level=~\"INFO|WARN|ERROR\"","refId":"A"}]}
-],"schemaVersion":39,"time":{"from":"now-1h","to":"now"},"refresh":"10s"},"overwrite":true}
+],"schemaVersion":39,"time":{"from":"now-24h","to":"now"},"refresh":"10s"},"overwrite":true}
 EOF
 
 curl -s -X POST -H "Content-Type: application/json" \

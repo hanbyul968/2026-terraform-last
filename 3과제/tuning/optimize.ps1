@@ -144,66 +144,36 @@ try {
     $bestScore=Get-Score $out; Save-Snapshot $out $bestOut
     Write-Host ("사이징 후 {0:N1}/36 ratio={1:N2}" -f $bestScore.total,$bestScore.cost_ratio)
   }
-  for($i=1;$i -le $candidateLimit;$i++){
-    $step=Get-NextStep $bestOut $rejFile
-    if($step.done){Write-Host "수렴: $($step.reason)" -ForegroundColor Green;break}
-    $candidate=$step.candidate
+  # 반복 측정 루프 없음: 한 번 계산한 '전 앱 HPA 묶음'을 1회 적용하고 1회만 확인한다.
+  # (회차당 120초 측정을 3번 도는 게 시간의 주범이었다. 값은 baseline 측정 한 번으로 다 나온다.)
+  $step=Get-NextStep $bestOut $rejFile
+  if($step.done){
+    Write-Host "조정할 HPA 없음: $($step.reason)" -ForegroundColor Green
+  } else {
     $knobSet=if($step.knob_set){$step.knob_set}else{$null}
-    # 한 앱이 남은 회차를 다 먹지 않게, 이미 시도한 앱만 담긴 후보는 대안이 있으면 건너뛴다.
-    function Test-Untried { param($Ks,$App)
-      $names=if($Ks){@($Ks.PSObject.Properties.Name)}else{@($App)}
-      foreach($n in $names){ if(-not $triedApps.Contains($n)){ return $true } }
-      return $false
-    }
-    if(-not (Test-Untried $knobSet $step.app)){
-      foreach($alt in @($step.candidates)){
-        $altKs=$alt.knobs
-        if(Test-Untried $altKs $alt.app){
-          Write-Host ("이미 시도한 앱 대신 다른 앱 후보로 전환: {0} -> {1}" -f $step.app,$alt.app) -ForegroundColor DarkGray
-          $candidate=$alt; $knobSet=$altKs; $step.app=$alt.app; $step.kind=$alt.kind; $step.knob=$alt.proposed
-          break
-        }
-      }
-    }
-    $settle=[int]$candidate.settle_seconds
-    if($step.kind -eq 'cost-reclaim'){$settle=[Math]::Max($settle,$CostSettleSeconds)}elseif(-not $candidate.disruptive){$settle=[Math]::Max($settle,$SettleSeconds)}
-    $durationSec=ConvertTo-DurationSeconds $Duration
-    # request rollback은 rollout + 재settle 까지 필요하므로 넉넉히 예약한다.
-    $required=[TimeSpan]::FromSeconds($settle*2+$durationSec+150)
-    if($sw.Elapsed+$required -ge $deadline){Write-Host '남은 예산이 측정+롤백 시간보다 짧아 종료' -ForegroundColor Yellow;break}
-    $app=$step.app;$pending=$app
-    $knobSet=if($step.knob_set){$step.knob_set}else{$null}
-    $touched=if($knobSet){@($knobSet.PSObject.Properties.Name)}else{@($app)}
-    foreach($n in $touched){ [void]$triedApps.Add($n) }
-    Write-Host ("--- {0}/{1} [{2}] {3}: request {4}->{5}m target {6}->{7}% 예약노드 {8}대 CPU공급부족 {9}배" -f $i,$candidateLimit,$step.kind,($touched -join '+'),$candidate.current.request,$candidate.proposed.request,$candidate.current.target,$candidate.proposed.target,$candidate.predicted_nodes,$candidate.cpu_supply_ratio)
-    if($knobSet){Set-TuningSet $knobSet}else{Set-Tuning $app $step.knob}
-    Start-Sleep -Seconds $settle
+    $touched=if($knobSet){@($knobSet.PSObject.Properties.Name)}else{@($step.app)}
+    $pending=$touched[0]
+    Write-Host ("--- 전 앱 HPA 한 번에 적용: {0}" -f ($touched -join '+')) -ForegroundColor Cyan
+    if($knobSet){
+      foreach($n in $touched){$k=$knobSet.$n;Write-Host ("    {0}: target={1}% min={2} max={3}" -f $n,$k.target,$k.min,$k.max)}
+      Set-TuningSet $knobSet
+    } else { Set-Tuning $step.app $step.knob }
+    Start-Sleep -Seconds $SettleSeconds
     & $loadtest @ltArgs | Out-Null
     $score=Get-Score $out
-    # 공식 채점 기준선: 가용성 90%+면 앱당 만점, 성능 30% 미만이면 비용 12점 전부 0.
-    # 비용 우선 모드는 그 실제 선(기본 92% / 35%)만 지키고 비용을 챙긴다.
     $availFloor=if($step.avail_floor){[double]$step.avail_floor}else{$AvailFloor}
     $perfFloor=if($step.perf_floor){[double]$step.perf_floor}else{$PerfFloor}
     $gate=($score.min_avail -ge $availFloor) -and ($score.min_perf -ge $perfFloor) -and ($score.cost_points -gt 0)
-    # 99% availability/30% performance는 점수보다 우선하는 hard gate다.
-    # 공식 band 점수가 동률이어도 gate 방향으로 개선되면 채택해 다음 복구 수를 허용한다.
-    $availImproved=(-not $bestScore.avail_gate_pass) -and ($score.min_avail -gt $bestScore.min_avail) -and ($score.min_perf -ge $bestScore.min_perf)
-    $perfImproved=(-not $bestScore.perf_gate_pass) -and ($score.min_perf -gt $bestScore.min_perf) -and ($score.min_avail -ge $bestScore.min_avail)
-    $safetyImproved=$availImproved -or $perfImproved
-    if($safetyImproved -or ($gate -and $score.total -gt $bestScore.total)){
-      Write-Host ("채택 {0:N1}->{1:N1}, ratio={2:N2}, safetyImproved={3}" -f $bestScore.total,$score.total,$score.cost_ratio,$safetyImproved) -ForegroundColor Green
+    $safety=($score.min_perf -gt $bestScore.min_perf) -or ($score.min_avail -gt $bestScore.min_avail)
+    if($safety -or ($gate -and $score.total -ge $bestScore.total)){
+      Write-Host ("채택 {0:N1}->{1:N1}, ratio={2:N2}, minPerf {3:N1}%" -f $bestScore.total,$score.total,$score.cost_ratio,$score.min_perf) -ForegroundColor Green
       $bestScore=$score
       foreach($name in $touched){ if($knobSet){$bestKnobs.$name=$knobSet.$name}else{$bestKnobs.$name=$step.knob} }
-      $pending=$null
-      Save-Snapshot $out $bestOut
-    }else{
-      Write-Host ("거절 score={0:N1} gate={1}; snapshot 롤백 후 {2}초 안정화" -f $score.total,$gate,$settle) -ForegroundColor Yellow
+      $pending=$null; Save-Snapshot $out $bestOut
+    } else {
+      Write-Host ("거절 score={0:N1} gate={1}; 롤백" -f $score.total,$gate) -ForegroundColor Yellow
       foreach($name in $touched){ if($bestKnobs.$name){ Set-Tuning $name $bestKnobs.$name } }
       $pending=$null
-      # 롤백 직후 바로 재측정하면 Karpenter/HPA가 정리되기 전 값이 잡혀 다음 회차가 오염된다.
-      Start-Sleep -Seconds $settle
-      $rejected+=@{key=$candidate.key;app=$app;kind=$step.kind;nodes=[int]$candidate.predicted_nodes}
-      Write-Rejected $rejected $rejFile
     }
   }
   Write-Host ("`n=== 종료 {0:N1}분 / best {1:N1}/36 ratio={2:N2} ===" -f $sw.Elapsed.TotalMinutes,$bestScore.total,$bestScore.cost_ratio) -ForegroundColor Green

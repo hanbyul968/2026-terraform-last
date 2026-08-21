@@ -1261,39 +1261,39 @@ def generate_candidates(snapshot: TuningSnapshot, rejected=None, namespace="app"
     kind_rank = {"gate-recovery": 5, "bundle": 5, "idle-fit": 5, "usage-sized": 4,
                  "pod-consolidate": 4, "performance-band": 3, "request-optimal": 2,
                  "pod-cap": 2, "cost-reclaim": 1}
-    # (A) 모든 앱 변경을 한 회차에 묶는다. 회차당 4~5분이라 앱별로 나누면 예산이 한 앱에서 끝난다.
+    if hpa_only:
+        # 부하 중에는 request를 바꾸지 않는다. request 변경은 rollout을 일으켜(적용+롤백 각각)
+        # 회차 시간을 몇 분씩 잡아먹고, rollout 자체가 가용성을 깎는다. HPA(target/min/max)만
+        # 만지는 후보는 즉시 적용/롤백된다. request 사이징은 부하 전 1회로 끝낸다.
+        candidates = [c for c in candidates
+                      if not any(v["request"] != _current_dict(snapshot.apps[n])["request"]
+                                 for n, v in c.knobs.items())]
+    # (A) 모든 앱 변경을 '한 번'에 묶는다. 반복 측정 루프 없이 1회 적용/1회 확인으로 끝내기 위해
+    #     bundle을 항상 최상위로 둔다(멤버 delta 합). runner는 이 bundle 하나만 적용한다.
     per_app_best = {}
     for c in candidates:
         if c.kind in ("gate-recovery", "usage-sized", "pod-consolidate", "request-optimal",
-                      "performance-band", "pod-cap"):
+                      "performance-band", "pod-cap", "cost-reclaim", "idle-fit"):
             prev = per_app_best.get(c.app)
             if prev is None or c.predicted_delta > prev.predicted_delta:
                 per_app_best[c.app] = c
-    if len(per_app_best) > 1:
+    if len(per_app_best) >= 1:
         merged = {}
         for c in per_app_best.values():
             merged.update(c.knobs)
         lead = max(per_app_best.values(), key=lambda c: c.predicted_delta)
         detail = ", ".join(
-            f"{name} request {_current_dict(snapshot.apps[name])['request']}→{values['request']}m "
-            f"target {_current_dict(snapshot.apps[name])['target']}→{values['target']}%"
+            f"{name} target {_current_dict(snapshot.apps[name])['target']}→{values['target']}%"
+            + (f" request {_current_dict(snapshot.apps[name])['request']}→{values['request']}m"
+               if values['request'] != _current_dict(snapshot.apps[name])['request'] else "")
             for name, values in sorted(merged.items()))
         bundle = _make_candidate(
             snapshot, snapshot.apps[lead.app], "bundle", merged[lead.app],
-            f"앱 {len(merged)}개 동시 적용(회차 절약): {detail}", 0.0, namespace, knobs=merged)
+            f"앱 {len(merged)}개 한 번에 적용(반복 측정 없음): {detail}", 0.0, namespace, knobs=merged)
         if bundle and bundle.key() not in rejected:
+            # 멤버 delta 합으로 최상위 보장
+            bundle.predicted_delta = round(sum(c.predicted_delta for c in per_app_best.values()), 2)
             candidates.insert(0, bundle)
-    if hpa_only:
-        # 부하 중에는 request를 바꾸지 않는다. request 변경은 rollout을 일으켜(적용+롤백 각각)
-        # 회차 시간을 몇 분씩 잡아먹고, rollout 자체가 가용성을 깎는다. HPA(target/min/max)만
-        # 만지는 후보는 즉시 적용/롤백된다. request 사이징은 부하 전 1회로 끝낸다.
-        kept = []
-        for c in candidates:
-            if any(v["request"] != _current_dict(snapshot.apps[n])["request"]
-                   for n, v in c.knobs.items()):
-                continue
-            kept.append(c)
-        candidates = kept
     candidates.sort(key=lambda c: (c.predicted_delta, -max(c.cpu_supply_ratio, 1.0),
                                    kind_rank.get(c.kind, 0),
                                    -int(c.disruptive), -c.predicted_nodes), reverse=True)

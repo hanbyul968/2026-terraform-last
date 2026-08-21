@@ -16,6 +16,37 @@ provider "aws" {
 
 data "aws_caller_identity" "current" {}
 
+# ── 채점 기준 선택 ───────────────────────────────────────────────────
+# 과제지_v8(=배포파일 v8 lambda.md)과 채점기준표_v8(=채점스크립트 mark2-3.sh)이
+# 모듈 3에서 서로 다른 리소스를 요구한다. 어느 쪽이 실제 채점에 쓰일지 확정되지 않아
+# apply 시점에 선택할 수 있도록 한다.
+#
+#   spec = "task"   과제지·배포파일 기준
+#                   Lambda 4개(sg/role/terminate/type) + 규칙 4개
+#                   SG 인바운드 tcp/80(정적 웹), AWS Config 없음
+#
+#   spec = "rubric" 채점기준표·채점스크립트 기준 (기본값)
+#                   위 4개에 더해 stop-remediation / tag-alert Lambda,
+#                   ec2-stop-rule / tag-compliance-rule / 상시 guard,
+#                   AWS Config 2개 규칙, SG 인바운드 0건, 중지 보호(DisableApiStop)
+#
+# 사용: terraform apply -var="spec=task"
+variable "spec" {
+  description = "채점 기준 선택: task(과제지) 또는 rubric(채점기준표)"
+  type        = string
+  default     = "rubric"
+  validation {
+    condition     = contains(["task", "rubric"], var.spec)
+    error_message = "spec 은 task 또는 rubric 이어야 합니다."
+  }
+}
+
+locals {
+  is_rubric = var.spec == "rubric"
+  # count 용 (0/1)
+  rubric_count = local.is_rubric ? 1 : 0
+}
+
 # ── VPC event-vpc 172.16.0.0/16 ──────────────────────────────────────
 resource "aws_vpc" "main" {
   cidr_block           = "172.16.0.0/16"
@@ -89,14 +120,25 @@ resource "aws_iam_instance_profile" "ec2" {
   role = aws_iam_role.ec2.name
 }
 
-# SG 최소 구성: 인바운드 0건, 아웃바운드 전체.
-# 채점(3-4)은 SSH 규칙 주입 후 "SG Inbound Count (expect 0)" 을 확인하므로
-# 정상 상태의 인바운드는 반드시 0건이어야 한다. (과제지의 "보안그룹 최소 구성"과도 일치)
-# 인스턴스 접근은 SSM 으로만 수행한다.
+# SG 최소 구성.
+#   task   : 정적 웹을 위한 인바운드 tcp/80 만 허용
+#   rubric : 인바운드 0건. 채점 3-4 가 SSH 주입 후
+#            "SG Inbound Count (expect 0)" 을 확인하므로 상시 0이어야 한다.
+#            (인스턴스 접근은 SSM 으로만 수행)
 resource "aws_security_group" "ec2" {
   name        = "wsc2026-event-sg"
-  description = "minimal - no inbound, SSM only"
+  description = local.is_rubric ? "minimal - no inbound, SSM only" : "minimal - allow http 80"
   vpc_id      = aws_vpc.main.id
+  dynamic "ingress" {
+    for_each = local.is_rubric ? [] : [1]
+    content {
+      description = "static web"
+      from_port   = 80
+      to_port     = 80
+      protocol    = "tcp"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
+  }
   egress {
     from_port   = 0
     to_port     = 0
@@ -117,11 +159,11 @@ resource "aws_instance" "ec2" {
   iam_instance_profile   = aws_iam_instance_profile.ec2.name
 
   disable_api_termination = true # 지속 배포 위한 종료 방지
-  # 무단 중지 차단. 채점(3-4)은 stop-instances 30초 뒤 State=running 을 확인하는데,
-  # 실제 stop -> stopped -> start -> running 은 60~90초가 걸려 사후 복구로는 창을 맞출 수 없다.
-  # 중지 자체를 API 레벨에서 막아 가용성을 보장하고, wsc2026-ec2-stop-remediation 은
-  # 보호가 해제된 경우를 위한 2차 방어로 유지한다.
-  disable_api_stop = true
+  # rubric 에서만 무단 중지를 차단한다. 채점(3-4)은 stop-instances 30초 뒤 State=running 을
+  # 확인하는데 실제 stop -> stopped -> start -> running 은 60~90초가 걸려 사후 복구로는
+  # 창을 맞출 수 없다. 중지 자체를 API 레벨에서 막아 가용성을 보장하고,
+  # wsc2026-ec2-stop-remediation 은 보호가 해제된 경우를 위한 2차 방어로 유지한다.
+  disable_api_stop = local.is_rubric
 
   user_data_base64 = "IyEvYmluL2Jhc2gKZG5mIHVwZGF0ZQpkbmYgaW5zdGFsbCBodHRwZCAteQpzeXN0ZW1jdGwgZW5hYmxlIC0tbm93IGh0dHBkCmhvc3RuYW1lID4gL3Zhci93d3cvaHRtbC9pbmRleC5odG1s"
   tags             = { Name = "wsc2026-event-ec2" }
@@ -200,10 +242,10 @@ data "archive_file" "lambda" {
 }
 
 # 모든 함수가 동일 코드(index.py) + handler=index.handler + python3.12.
-#   sg / role / termination / type : 과제지·lambda.md 가 요구하는 4개
-#   stop / tag                     : 채점기준표 3-1 이 이름으로 확인하는 2개
+#   sg / role / termination / type : 과제지·lambda.md 가 요구하는 4개 (양쪽 공통)
+#   stop / tag                     : 채점기준표 3-1 이 이름으로 확인하는 2개 (rubric 전용)
 locals {
-  event_lambdas = {
+  event_lambdas_common = {
     sg = {
       name        = "wsc2026-sg-remediation"
       environment = { SECURITY_GROUP_ID = aws_security_group.ec2.id }
@@ -220,6 +262,8 @@ locals {
       name        = "wsc2026-ec2-type-remediation"
       environment = { INSTANCE_ID = aws_instance.ec2.id, INSTANCE_TYPE = "t3.micro" }
     }
+  }
+  event_lambdas_rubric = {
     stop = {
       name        = "wsc2026-ec2-stop-remediation"
       environment = { INSTANCE_ID = aws_instance.ec2.id }
@@ -229,6 +273,10 @@ locals {
       environment = { CONFIG_RULE_NAME = "wsc2026-required-tags-rule" }
     }
   }
+  event_lambdas = merge(
+    local.event_lambdas_common,
+    local.is_rubric ? local.event_lambdas_rubric : {}
+  )
 }
 
 resource "aws_lambda_function" "event" {
@@ -369,9 +417,11 @@ resource "aws_cloudwatch_event_target" "ec2_type_change" {
   arn  = aws_lambda_function.event["type"].arn
 }
 
+# ── 아래 3개 규칙은 rubric 전용 ──────────────────────────────────────
 # 5) EC2 인스턴스 중지 (채점 3-2: wsc2026-ec2-stop-rule -> wsc2026-ec2-stop-remediation)
 resource "aws_cloudwatch_event_rule" "ec2_stop" {
-  name = "wsc2026-ec2-stop-rule"
+  count = local.rubric_count
+  name  = "wsc2026-ec2-stop-rule"
   event_pattern = jsonencode({
     source      = ["aws.ec2"]
     detail-type = ["EC2 Instance State-change Notification"]
@@ -381,13 +431,15 @@ resource "aws_cloudwatch_event_rule" "ec2_stop" {
   })
 }
 resource "aws_cloudwatch_event_target" "ec2_stop" {
-  rule = aws_cloudwatch_event_rule.ec2_stop.name
-  arn  = aws_lambda_function.event["stop"].arn
+  count = local.rubric_count
+  rule  = aws_cloudwatch_event_rule.ec2_stop[0].name
+  arn   = local.fn_stop.arn
 }
 
 # 6) AWS Config 필수 태그 규칙 위반 -> wsc2026-tag-alert
 resource "aws_cloudwatch_event_rule" "tag_compliance" {
-  name = "wsc2026-tag-compliance-rule"
+  count = local.rubric_count
+  name  = "wsc2026-tag-compliance-rule"
   event_pattern = jsonencode({
     source      = ["aws.config"]
     detail-type = ["Config Rules Compliance Change"]
@@ -400,8 +452,9 @@ resource "aws_cloudwatch_event_rule" "tag_compliance" {
   })
 }
 resource "aws_cloudwatch_event_target" "tag_compliance" {
-  rule = aws_cloudwatch_event_rule.tag_compliance.name
-  arn  = aws_lambda_function.event["tag"].arn
+  count = local.rubric_count
+  rule  = aws_cloudwatch_event_rule.tag_compliance[0].name
+  arn   = local.fn_tag.arn
 }
 
 # 7) 상시 guard (rate 1 minute)
@@ -409,20 +462,23 @@ resource "aws_cloudwatch_event_target" "tag_compliance" {
 # 걸리므로 위 이벤트 기반 규칙만으로는 창을 맞출 수 없다. 각 실행이 약 55초 동안 3초 간격으로
 # 점검하여 SG 인바운드 회수 / 인스턴스 가동을 30초 내에 보장한다.
 resource "aws_cloudwatch_event_rule" "guard" {
+  count               = local.rubric_count
   name                = "wsc2026-event-guard-rule"
   description         = "Fast-path compliance guard for wsc2026-event-sg and wsc2026-event-ec2"
   schedule_expression = "rate(1 minute)"
 }
 resource "aws_cloudwatch_event_target" "guard_sg" {
-  rule      = aws_cloudwatch_event_rule.guard.name
+  count     = local.rubric_count
+  rule      = aws_cloudwatch_event_rule.guard[0].name
   target_id = "sg-guard"
   arn       = aws_lambda_function.event["sg"].arn
   input     = jsonencode({ guard = "sg" })
 }
 resource "aws_cloudwatch_event_target" "guard_ec2" {
-  rule      = aws_cloudwatch_event_rule.guard.name
+  count     = local.rubric_count
+  rule      = aws_cloudwatch_event_rule.guard[0].name
   target_id = "ec2-guard"
-  arn       = aws_lambda_function.event["stop"].arn
+  arn       = local.fn_stop.arn
   input     = jsonencode({ guard = "ec2" })
 }
 
@@ -445,26 +501,36 @@ locals {
       rule_arn      = aws_cloudwatch_event_rule.ec2_type_change.arn
       function_name = aws_lambda_function.event["type"].function_name
     }
+  }
+  # 삼항 연산자는 양쪽 가지를 모두 평가하므로, task 모드에 존재하지 않는
+  # stop/tag 함수 참조는 lookup 으로 감싼다.
+  fn_stop = lookup(aws_lambda_function.event, "stop", null)
+  fn_tag  = lookup(aws_lambda_function.event, "tag", null)
+  event_targets_rubric = {
     stop = {
-      rule_arn      = aws_cloudwatch_event_rule.ec2_stop.arn
-      function_name = aws_lambda_function.event["stop"].function_name
+      rule_arn      = one(aws_cloudwatch_event_rule.ec2_stop[*].arn)
+      function_name = try(local.fn_stop.function_name, null)
     }
     tag = {
-      rule_arn      = aws_cloudwatch_event_rule.tag_compliance.arn
-      function_name = aws_lambda_function.event["tag"].function_name
+      rule_arn      = one(aws_cloudwatch_event_rule.tag_compliance[*].arn)
+      function_name = try(local.fn_tag.function_name, null)
     }
     guard_sg = {
-      rule_arn      = aws_cloudwatch_event_rule.guard.arn
+      rule_arn      = one(aws_cloudwatch_event_rule.guard[*].arn)
       function_name = aws_lambda_function.event["sg"].function_name
     }
     guard_ec2 = {
-      rule_arn      = aws_cloudwatch_event_rule.guard.arn
-      function_name = aws_lambda_function.event["stop"].function_name
+      rule_arn      = one(aws_cloudwatch_event_rule.guard[*].arn)
+      function_name = try(local.fn_stop.function_name, null)
     }
   }
+  event_targets_all = merge(
+    local.event_targets,
+    local.is_rubric ? local.event_targets_rubric : {}
+  )
 }
 resource "aws_lambda_permission" "events" {
-  for_each      = local.event_targets
+  for_each      = local.event_targets_all
   statement_id  = "AllowEventBridge-${each.key}"
   action        = "lambda:InvokeFunction"
   function_name = each.value.function_name
@@ -476,14 +542,16 @@ resource "aws_lambda_permission" "events" {
 # Config Rule 은 configuration recorder 가 있어야 생성되므로 recorder + delivery channel 을
 # 함께 구성한다. 기록 대상은 규칙이 평가하는 두 리소스 타입으로 한정한다.
 resource "aws_s3_bucket" "config" {
+  count         = local.rubric_count
   bucket        = "wsc2026-event-config-${data.aws_caller_identity.current.account_id}"
   force_destroy = true
 }
 data "aws_iam_policy_document" "config_bucket" {
+  count = local.rubric_count
   statement {
     sid       = "AWSConfigBucketPermissionsCheck"
     actions   = ["s3:GetBucketAcl", "s3:ListBucket"]
-    resources = [aws_s3_bucket.config.arn]
+    resources = [aws_s3_bucket.config[0].arn]
     principals {
       type        = "Service"
       identifiers = ["config.amazonaws.com"]
@@ -492,7 +560,7 @@ data "aws_iam_policy_document" "config_bucket" {
   statement {
     sid       = "AWSConfigBucketDelivery"
     actions   = ["s3:PutObject"]
-    resources = ["${aws_s3_bucket.config.arn}/AWSLogs/${data.aws_caller_identity.current.account_id}/Config/*"]
+    resources = ["${aws_s3_bucket.config[0].arn}/AWSLogs/${data.aws_caller_identity.current.account_id}/Config/*"]
     principals {
       type        = "Service"
       identifiers = ["config.amazonaws.com"]
@@ -505,31 +573,35 @@ data "aws_iam_policy_document" "config_bucket" {
   }
 }
 resource "aws_s3_bucket_policy" "config" {
-  bucket = aws_s3_bucket.config.id
-  policy = data.aws_iam_policy_document.config_bucket.json
+  count  = local.rubric_count
+  bucket = aws_s3_bucket.config[0].id
+  policy = data.aws_iam_policy_document.config_bucket[0].json
 }
 
 resource "aws_iam_role" "config" {
-  name = "wsc2026-event-config-role"
+  count = local.rubric_count
+  name  = "wsc2026-event-config-role"
   assume_role_policy = jsonencode({
     Version   = "2012-10-17"
     Statement = [{ Action = "sts:AssumeRole", Effect = "Allow", Principal = { Service = "config.amazonaws.com" } }]
   })
 }
 resource "aws_iam_role_policy_attachment" "config" {
-  role       = aws_iam_role.config.name
+  count      = local.rubric_count
+  role       = aws_iam_role.config[0].name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWS_ConfigRole"
 }
 resource "aws_iam_role_policy" "config_delivery" {
-  name = "config-delivery"
-  role = aws_iam_role.config.id
+  count = local.rubric_count
+  name  = "config-delivery"
+  role  = aws_iam_role.config[0].id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
         Effect   = "Allow"
         Action   = "s3:PutObject"
-        Resource = "${aws_s3_bucket.config.arn}/AWSLogs/${data.aws_caller_identity.current.account_id}/Config/*"
+        Resource = "${aws_s3_bucket.config[0].arn}/AWSLogs/${data.aws_caller_identity.current.account_id}/Config/*"
         Condition = {
           StringEquals = { "s3:x-amz-acl" = "bucket-owner-full-control" }
         }
@@ -537,15 +609,16 @@ resource "aws_iam_role_policy" "config_delivery" {
       {
         Effect   = "Allow"
         Action   = "s3:GetBucketAcl"
-        Resource = aws_s3_bucket.config.arn
+        Resource = aws_s3_bucket.config[0].arn
       }
     ]
   })
 }
 
 resource "aws_config_configuration_recorder" "main" {
+  count    = local.rubric_count
   name     = "wsc2026-event-recorder"
-  role_arn = aws_iam_role.config.arn
+  role_arn = aws_iam_role.config[0].arn
   recording_group {
     all_supported                 = false
     include_global_resource_types = false
@@ -553,8 +626,9 @@ resource "aws_config_configuration_recorder" "main" {
   }
 }
 resource "aws_config_delivery_channel" "main" {
+  count          = local.rubric_count
   name           = "wsc2026-event-delivery"
-  s3_bucket_name = aws_s3_bucket.config.id
+  s3_bucket_name = aws_s3_bucket.config[0].id
   depends_on = [
     aws_config_configuration_recorder.main,
     aws_s3_bucket_policy.config,
@@ -562,14 +636,16 @@ resource "aws_config_delivery_channel" "main" {
   ]
 }
 resource "aws_config_configuration_recorder_status" "main" {
-  name       = aws_config_configuration_recorder.main.name
+  count      = local.rubric_count
+  name       = aws_config_configuration_recorder.main[0].name
   is_enabled = true
   depends_on = [aws_config_delivery_channel.main]
 }
 
 # 3-3: SSH(22) 무제한 개방 탐지
 resource "aws_config_config_rule" "sg_ssh" {
-  name = "wsc2026-sg-ssh-rule"
+  count = local.rubric_count
+  name  = "wsc2026-sg-ssh-rule"
   source {
     owner             = "AWS"
     source_identifier = "INCOMING_SSH_DISABLED"
@@ -583,7 +659,8 @@ resource "aws_config_config_rule" "sg_ssh" {
 # 3-3 / 3-5: 필수 태그(Name) 검사. 대상 EC2 인스턴스는 Name 태그를 가지므로
 # NON_COMPLIANT 결과가 없어야 한다(3-5 기대값 None).
 resource "aws_config_config_rule" "required_tags" {
-  name = "wsc2026-required-tags-rule"
+  count = local.rubric_count
+  name  = "wsc2026-required-tags-rule"
   source {
     owner             = "AWS"
     source_identifier = "REQUIRED_TAGS"
@@ -601,19 +678,19 @@ output "lambda_functions" {
   value = { for key, fn in aws_lambda_function.event : key => fn.function_name }
 }
 output "event_rules" {
-  value = [
+  value = concat([
     aws_cloudwatch_event_rule.sg_change.name,
     aws_cloudwatch_event_rule.role_change.name,
     aws_cloudwatch_event_rule.termination_protection_change.name,
     aws_cloudwatch_event_rule.ec2_type_change.name,
-    aws_cloudwatch_event_rule.ec2_stop.name,
-    aws_cloudwatch_event_rule.tag_compliance.name,
-    aws_cloudwatch_event_rule.guard.name,
-  ]
+    ], aws_cloudwatch_event_rule.ec2_stop[*].name,
+    aws_cloudwatch_event_rule.tag_compliance[*].name,
+  aws_cloudwatch_event_rule.guard[*].name)
 }
 output "config_rules" {
-  value = [
-    aws_config_config_rule.sg_ssh.name,
-    aws_config_config_rule.required_tags.name,
-  ]
+  value = concat(
+    aws_config_config_rule.sg_ssh[*].name,
+    aws_config_config_rule.required_tags[*].name,
+  )
 }
+output "spec" { value = var.spec }

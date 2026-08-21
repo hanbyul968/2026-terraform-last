@@ -3,11 +3,22 @@
 #   module1 Workflow(ap-southeast-1) → module2 Analytics(ap-northeast-2)
 #   → module3 Cloud Event(eu-west-1) → module4 MSK(ap-northeast-1)
 #
+# module3 는 과제지_v8 과 채점기준표_v8 이 서로 다른 리소스를 요구하므로 기준을 선택한다.
+#   SPEC=rubric (기본) 채점기준표·채점스크립트(mark2-3.sh) 기준
+#   SPEC=task          과제지·배포파일 기준
+# 예: BIBUNHO=103 SPEC=task bash /opt/task2/deploy.sh
+#
 # 참고: module1(순수 서버리스)과 module3(순수 TF)은 로컬 PowerShell 에서도 apply 가능.
 #       module2(Flink CLI/null_resource=bash)와 module4(MSK/producer in-VPC)는 Bastion 권장.
 set -euo pipefail
 ROOT=/opt/task2
 if [ -z "${BIBUNHO:-}" ]; then read -rp "비번호(bibunho) 입력: " BIBUNHO; fi
+SPEC="${SPEC:-rubric}"
+case "$SPEC" in
+  task|rubric) ;;
+  *) echo "SPEC 은 task 또는 rubric 이어야 합니다 (현재: $SPEC)" >&2; exit 1 ;;
+esac
+echo "module3 채점 기준: SPEC=$SPEC"
 
 echo "===== module1: Student-score Workflow (ap-southeast-1) ====="
 cd "$ROOT/module1" && terraform init -input=false && terraform apply -auto-approve -var="bibunho=$BIBUNHO"
@@ -20,10 +31,14 @@ echo "      Managed Flink Studio(wsc2026-analytics-flink) 는 null_resource(aws 
 echo "      Flink Notebook SQL 은 콘솔에서 수행."
 
 echo "===== module3: Cloud event handling (eu-west-1) ====="
-cd "$ROOT/module3" && terraform init -input=false && terraform apply -auto-approve
+cd "$ROOT/module3" && terraform init -input=false && terraform apply -auto-approve -var="spec=$SPEC"
 echo "NOTE: SNS(wsc2026-event-alert) 이메일 구독 시 Confirm 필요."
-echo "      AWS Config recorder/2 rules(wsc2026-sg-ssh-rule, wsc2026-required-tags-rule) 생성."
-echo "      SG 인바운드 추가→sg-remediation 회수, EC2 중지→ec2-stop-remediation 재기동."
+if [ "$SPEC" = "rubric" ]; then
+  echo "      [rubric] Lambda 6개 + AWS Config(wsc2026-sg-ssh-rule, wsc2026-required-tags-rule) 생성."
+  echo "      [rubric] SG 인바운드 0건 + DisableApiStop + rate(1 minute) guard 로 3-4 복구 보장."
+else
+  echo "      [task] Lambda 4개(sg/role/terminate/type) + 규칙 4개, SG 인바운드 tcp/80, Config 없음."
+fi
 
 echo "===== module4: MSK (ap-northeast-1) ====="
 cd "$ROOT/module4" && terraform init -input=false && terraform apply -auto-approve -var="bibunho=$BIBUNHO"

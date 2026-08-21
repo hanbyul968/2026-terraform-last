@@ -20,7 +20,7 @@ output "eks_cluster_name" {
   value = aws_eks_cluster.this.name
 }
 
-output "grafana_lb_hint" {
-  description = "Grafana LB 주소는 다음으로 확인: kubectl get svc grafana -n monitoring"
-  value       = "kubectl get svc grafana -n monitoring -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'"
+output "grafana_alb_hint" {
+  description = "Grafana ALB(wskorea26-grafana-alb) 주소 확인 방법 (채점 10-0과 동일한 명령)"
+  value       = "aws elbv2 describe-load-balancers --names wskorea26-grafana-alb --query 'LoadBalancers[0].DNSName' --output text"
 }

@@ -119,7 +119,7 @@ terraform destroy -auto-approve
 | 7 | ALB | internet-facing / 80 HTTP / 룰 헤더 wskorea26-cf / 직접 /book → 403 |
 | 8 | CloudFront | S3 기본·ALB /book* / redirect-to-https / 커스텀헤더 / main.jpeg 180926B |
 | 9 | Application | CF 경유 POST·GET /book. **created_at 은 KST(+09:00)** — 이미지 tzdata + `TZ=Asia/Seoul` |
-| 10 | Monitoring | Grafana 로그인 `skills-<비번호>-admin / $korea26!!`, 대시보드 5개 지표 |
+| 10 | Monitoring | `wskorea26-grafana-alb`(Ingress/ALB) HTTP 80 접속, Grafana 로그인 `skills-<비번호>-admin / $korea26!!`, `wskorea26-monitoring` 대시보드에서 book app 의 CPU/Memory·Pod 수·재시작·네트워크 수신량 확인 |
 
 ---
 

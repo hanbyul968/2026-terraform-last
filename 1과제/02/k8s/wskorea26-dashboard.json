@@ -1,61 +1,96 @@
 {
   "uid": "wskorea26",
   "title": "wskorea26-monitoring",
-  "tags": ["wskorea26"],
+  "tags": ["wskorea26", "book"],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "30s",
   "time": { "from": "now-30m", "to": "now" },
   "panels": [
     {
       "id": 1,
-      "title": "Container CPU Usage",
+      "title": "Book App - Container CPU Usage (cores)",
+      "description": "wskorea26 namespace 의 book 애플리케이션 파드 CPU 사용량",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] } },
       "targets": [
-        { "refId": "A", "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{container!=\"\"}[5m]))", "legendFormat": "{{pod}}" }
+        {
+          "refId": "A",
+          "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"wskorea26\", pod=~\"wskorea26-book.*\", container!=\"\", container!=\"POD\"}[5m]))",
+          "legendFormat": "{{pod}}"
+        }
       ]
     },
     {
       "id": 2,
-      "title": "Container Memory Usage",
+      "title": "Book App - Container Memory Usage",
+      "description": "wskorea26 namespace 의 book 애플리케이션 파드 메모리 사용량",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] } },
       "targets": [
-        { "refId": "A", "expr": "sum by (pod) (container_memory_usage_bytes{container!=\"\"})", "legendFormat": "{{pod}}" }
+        {
+          "refId": "A",
+          "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=\"wskorea26\", pod=~\"wskorea26-book.*\", container!=\"\", container!=\"POD\"})",
+          "legendFormat": "{{pod}}"
+        }
       ]
     },
     {
       "id": 3,
-      "title": "Running Pod Count",
+      "title": "Book App - Running Pod Count",
+      "description": "실행중(Running)인 book 애플리케이션 파드 개수",
       "type": "stat",
       "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } },
       "targets": [
-        { "refId": "A", "expr": "sum(kube_pod_status_phase{phase=\"Running\"})" }
+        {
+          "refId": "A",
+          "expr": "sum(kube_pod_status_phase{namespace=\"wskorea26\", pod=~\"wskorea26-book.*\", phase=\"Running\"})",
+          "legendFormat": "running pods"
+        }
       ]
     },
     {
       "id": 4,
-      "title": "Container Restarts",
+      "title": "Book App - Container Restarts",
+      "description": "book 애플리케이션 컨테이너 재시작 누적 횟수",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] } },
       "targets": [
-        { "refId": "A", "expr": "sum by (pod) (kube_pod_container_status_restarts_total)", "legendFormat": "{{pod}}" }
+        {
+          "refId": "A",
+          "expr": "sum by (pod) (kube_pod_container_status_restarts_total{namespace=\"wskorea26\", pod=~\"wskorea26-book.*\"})",
+          "legendFormat": "{{pod}}"
+        }
       ]
     },
     {
       "id": 5,
-      "title": "Container Network Receive",
+      "title": "Book App - Container Network Receive",
+      "description": "book 애플리케이션 컨테이너 네트워크 수신량",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "Bps" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] } },
       "targets": [
-        { "refId": "A", "expr": "sum by (pod) (rate(container_network_receive_bytes_total[5m]))", "legendFormat": "{{pod}}" }
+        {
+          "refId": "A",
+          "expr": "sum by (pod) (rate(container_network_receive_bytes_total{namespace=\"wskorea26\", pod=~\"wskorea26-book.*\"}[5m]))",
+          "legendFormat": "{{pod}}"
+        }
       ]
     }
   ]

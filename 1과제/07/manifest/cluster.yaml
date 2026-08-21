@@ -24,9 +24,6 @@ vpc:
     privateAccess: true
     publicAccess: true
 
-accessConfig:
-  authenticationMode: API
-
 secretsEncryption:
   keyARN: KEY_ARN
 

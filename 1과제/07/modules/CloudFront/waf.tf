@@ -1,3 +1,13 @@
+locals {
+  # AWSManagedRulesCommonRuleSet 내 XSS 탐지 룰
+  xss_rule_names = [
+    "CrossSiteScripting_COOKIE",
+    "CrossSiteScripting_QUERYARGUMENTS",
+    "CrossSiteScripting_BODY",
+    "CrossSiteScripting_URIPATH",
+  ]
+}
+
 # WAF Web ACL (us-east-1 for CloudFront)
 resource "aws_wafv2_web_acl" "this" {
   provider = aws.us_east_1
@@ -21,6 +31,24 @@ resource "aws_wafv2_web_acl" "this" {
       managed_rule_group_statement {
         name        = "AWSManagedRulesCommonRuleSet"
         vendor_name = "AWS"
+
+        # 채점 시 XSS 공격이 들어온다. 관리형 룰 그룹의 기본 Block 응답은
+        # AWS 기본 403 본문을 반환하므로, XSS 탐지 룰만 rule_action_override 로
+        # 덮어써서 과제지가 요구하는 커스텀 403 본문을 내려준다.
+        dynamic "rule_action_override" {
+          for_each = local.xss_rule_names
+          content {
+            name = rule_action_override.value
+            action_to_use {
+              block {
+                custom_response {
+                  response_code            = 403
+                  custom_response_body_key = "blocked"
+                }
+              }
+            }
+          }
+        }
       }
     }
 

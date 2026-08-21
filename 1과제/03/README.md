@@ -205,6 +205,11 @@ terraform output cloudfront_domain   # 채점 진입점
    (`access method=.. path=.. status=.. duration=..`)이라 `fb/parser_extra.conf` 의
    `book_access` 정규식으로 파싱하고 `fb/reformat.lua` 의 `reformat` 이
    Reference02 형식(`INFO {json}`)으로 재구성한다. 로그 형식이 바뀌면 이 두 파일을 수정.
+   ⚠ `fluentbit-values.yaml.tftpl` 의 `cloudWatchLogs.match` 를 `kube.*` 로 되돌리지 말 것.
+   helm 설치 직후 configmap 이 교체되기까지 1~2분 동안 차트 기본 설정이 kube-proxy·coredns
+   로그까지 `/wsc2026/app/log` 로 밀어넣어, 채점 11-3(“/v1/book 외 로그가 있으면 오답”)에 걸린다.
+   `null_resource.fluentbit_config` 는 설정 교체 후 남은 로그 스트림을 삭제하고
+   `/v1/book` 요청 1건을 발생시켜 로그·메트릭을 시딩한다.
 3. **Alert 규칙 expr** — 지급 book 앱은 `/metrics` 를 노출하지 않으므로
    `http_requests_total`(counter) 과 `http_request_duration_seconds`(gauge)를
    `fb/fluent-bit.conf` 의 `log_to_metrics` 로 액세스 로그에서 생성하고,

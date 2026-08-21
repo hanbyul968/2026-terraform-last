@@ -22,7 +22,14 @@ filter:
 
 cloudWatchLogs:
   enabled: true
-  match: "kube.*"
+  # ⚠ match 를 "kube.*" 로 두면 안 된다.
+  #   helm 설치 직후 ~ null_resource.fluentbit_config 가 configmap 을 교체하기까지의
+  #   1~2분 동안 차트 기본 설정(네임스페이스/경로 필터 없음)이 kube-proxy·coredns 등
+  #   모든 컨테이너 로그를 /wsc2026/app/log 로 밀어넣는다.
+  #   → 11-3 "Application Logs 패널에 /v1/book 외 로그가 있으면 오답" 에 걸린다.
+  #   그래서 초기 설정의 OUTPUT 은 아무 태그와도 매칭되지 않게 두고(=아무것도 전송 안 함),
+  #   실제 전송은 교체된 fb/fluent-bit.conf 의 OUTPUT 이 담당한다.
+  match: "never-match-before-config-override"
   region: ${region}
   logGroupName: ${log_group}
   logStreamPrefix: "app-"

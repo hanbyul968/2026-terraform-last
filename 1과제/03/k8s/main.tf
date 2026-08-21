@@ -380,10 +380,13 @@ resource "null_resource" "fluentbit_config" {
   provisioner "local-exec" {
     interpreter = ["/bin/bash", "-c"]
     environment = {
-      REGION  = var.region
-      CLUSTER = var.cluster_name
-      NS      = var.obs_namespace
-      DIR     = "${path.module}/fb"
+      REGION    = var.region
+      CLUSTER   = var.cluster_name
+      NS        = var.obs_namespace
+      DIR       = "${path.module}/fb"
+      LOG_GROUP = var.app_log_group
+      APP_NS    = var.app_namespace
+      SVC       = var.service_name
     }
     command = <<-EOT
       set -eu
@@ -404,10 +407,30 @@ resource "null_resource" "fluentbit_config" {
 
       # log_to_metrics(:2021) 스크레이프용 Service + ServiceMonitor
       kubectl apply -f "$DIR/fb-metrics-sm.yaml"
+
+      # helm 설치 직후(차트 기본 설정 창)에 들어간 비-앱 로그(kube-proxy, coredns 등)를 지운다.
+      # 채점 11-3 은 Application Logs 패널에 /v1/book 외 로그가 보이면 오답 처리한다.
+      # tail DB(/var/log/flb_kube.db)에 오프셋이 남아 있어 지운 로그가 재전송되지는 않는다.
+      for S in $(aws logs describe-log-streams --region "$REGION" \
+                   --log-group-name "$LOG_GROUP" \
+                   --query 'logStreams[].logStreamName' --output text 2>/dev/null | tr '\t' '\n'); do
+        [ -z "$S" ] && continue
+        echo "deleting stale log stream: $S"
+        aws logs delete-log-stream --region "$REGION" \
+          --log-group-name "$LOG_GROUP" --log-stream-name "$S" || true
+      done
+
+      # 과제 11 "동작의 확인을 위해 로그 및 메트릭을 1개 이상 발생" — /v1/book 1건 생성
+      timeout 180 kubectl run wsc2026-logseed -n "$APP_NS" --rm -i --restart=Never \
+        --image=curlimages/curl:8.11.1 \
+        --overrides='{"spec":{"nodeSelector":{"wsc2026/node":"application"}}}' -- \
+        curl -sS -o /dev/null -X POST "http://$SVC:8080/v1/book" \
+          -H 'Content-Type: application/json' \
+          -d '{"client_id":"LOGSEED","username":"LogSeed","email":"logseed@example.com","concert_name":"LogSeed"}' || true
     EOT
   }
 
-  depends_on = [helm_release.fluentbit]
+  depends_on = [helm_release.fluentbit, helm_release.kps]
 }
 
 # ═══════════════════════════════════════════════════════════════

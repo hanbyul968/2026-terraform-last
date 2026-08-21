@@ -152,35 +152,35 @@
     { "id": 103, "title": "Application Traffic", "type": "row", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 42 }, "panels": [] },
     {
       "id": 13, "title": "Request Count", "type": "timeseries",
-      "description": "CloudWatch Logs 기반 전체 애플리케이션 요청 수(health 제외).",
+      "description": "CloudWatch Logs 기반 전체 애플리케이션 요청 수(/v1/book).",
       "gridPos": { "h": 8, "w": 8, "x": 0, "y": 43 },
       "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
       "fieldConfig": { "defaults": { "custom": { "drawStyle": "bars", "fillOpacity": 60 } }, "overrides": [] },
-      "targets": [ { "refId": "A", "datasource": { "type": "cloudwatch", "uid": "cloudwatch" }, "queryMode": "Logs", "region": "ap-northeast-2", "logGroupNames": ["/wsc2026/app/log"], "expression": "filter @message not like /health/ | stats count(*) as requests by bin(1m)" } ]
+      "targets": [ { "refId": "A", "datasource": { "type": "cloudwatch", "uid": "cloudwatch" }, "queryMode": "Logs", "region": "ap-northeast-2", "logGroupNames": ["/wsc2026/app/log"], "expression": "filter @message like /v1\\/book/ | stats count(*) as requests by bin(1m)" } ]
     },
     {
       "id": 14, "title": "Response Time", "type": "timeseries",
-      "description": "CloudWatch Logs 기반 평균 응답 시간(health 제외).",
+      "description": "CloudWatch Logs 기반 평균 응답 시간(/v1/book).",
       "gridPos": { "h": 8, "w": 8, "x": 8, "y": 43 },
       "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
       "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
-      "targets": [ { "refId": "A", "datasource": { "type": "cloudwatch", "uid": "cloudwatch" }, "queryMode": "Logs", "region": "ap-northeast-2", "logGroupNames": ["/wsc2026/app/log"], "expression": "parse @message /\"duration\":\"(?<d>[0-9.]+)(?<u>[a-zµ]+)\"/ | filter @message not like /health/ | fields (u=\"µs\")*d/1000000 + (u=\"ms\")*d/1000 + (u=\"s\")*d as sec | stats avg(sec) as avg_seconds by bin(1m)" } ]
+      "targets": [ { "refId": "A", "datasource": { "type": "cloudwatch", "uid": "cloudwatch" }, "queryMode": "Logs", "region": "ap-northeast-2", "logGroupNames": ["/wsc2026/app/log"], "expression": "parse @message /\"duration\":\"(?<d>[0-9.]+)(?<u>[a-zµ]+)\"/ | filter @message like /v1\\/book/ | fields (u=\"µs\")*d/1000000 + (u=\"ms\")*d/1000 + (u=\"s\")*d as sec | stats avg(sec) as avg_seconds by bin(1m)" } ]
     },
     {
       "id": 15, "title": "Status Code", "type": "timeseries",
-      "description": "CloudWatch Logs 기반 상태 코드별 응답 수(health 제외).",
+      "description": "CloudWatch Logs 기반 상태 코드별 응답 수(/v1/book).",
       "gridPos": { "h": 8, "w": 8, "x": 16, "y": 43 },
       "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
       "fieldConfig": { "defaults": { "custom": { "drawStyle": "bars", "fillOpacity": 60 } }, "overrides": [] },
-      "targets": [ { "refId": "A", "datasource": { "type": "cloudwatch", "uid": "cloudwatch" }, "queryMode": "Logs", "region": "ap-northeast-2", "logGroupNames": ["/wsc2026/app/log"], "expression": "parse @message /\"status\":\"(?<status>[0-9]+)\"/ | filter @message not like /health/ | fields concat(substr(status,0,1),\"XX\") as class | stats count(*) by class, bin(1m)" } ]
+      "targets": [ { "refId": "A", "datasource": { "type": "cloudwatch", "uid": "cloudwatch" }, "queryMode": "Logs", "region": "ap-northeast-2", "logGroupNames": ["/wsc2026/app/log"], "expression": "parse @message /\"status\":\"(?<status>[0-9]+)\"/ | filter @message like /v1\\/book/ | fields concat(substr(status,0,1),\"XX\") as class | stats count(*) by class, bin(1m)" } ]
     },
     {
       "id": 16, "title": "Application Logs", "type": "logs",
-      "description": "CloudWatch Logs(/wsc2026/app/log) 애플리케이션 액세스 로그. health 로그는 제외.",
+      "description": "CloudWatch Logs(/wsc2026/app/log) 애플리케이션 액세스 로그. /v1/book 요청만 표시(health 및 그 외 로그 제외).",
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 51 },
       "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
       "options": { "showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true, "sortOrder": "Descending" },
-      "targets": [ { "refId": "A", "datasource": { "type": "cloudwatch", "uid": "cloudwatch" }, "queryMode": "Logs", "region": "ap-northeast-2", "logGroupNames": ["/wsc2026/app/log"], "expression": "fields @timestamp, @message | filter @message not like /\\/health/ | sort @timestamp desc | limit 100" } ]
+      "targets": [ { "refId": "A", "datasource": { "type": "cloudwatch", "uid": "cloudwatch" }, "queryMode": "Logs", "region": "ap-northeast-2", "logGroupNames": ["/wsc2026/app/log"], "expression": "fields @timestamp, @message | filter @message like /v1\\/book/ | sort @timestamp desc | limit 100" } ]
     },
     { "id": 104, "title": "Alert", "type": "row", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 59 }, "panels": [] },
     {

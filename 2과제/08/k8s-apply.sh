@@ -148,8 +148,10 @@ spec:
           value: "$SQS_URL"
         - name: AWS_REGION
           value: "$REGION"
+        # 문제지 6-5 권장값 5초. (노드 프로비저닝만 60초 이상 걸리므로
+        #  4-6 채점의 60/120초 확인 시점에 Pod 는 Pending/Running 상태로 관측된다)
         - name: PROCESSING_SECONDS
-          value: "20"
+          value: "5"
 EOF
 
 # KEDA CRD 등록 대기 (webhook Ready 이후에도 CRD 인식까지 잠깐 걸릴 수 있다)

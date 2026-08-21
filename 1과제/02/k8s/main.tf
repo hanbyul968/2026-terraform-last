@@ -190,6 +190,15 @@ resource "helm_release" "lb_controller" {
     name  = "nodeSelector.node-type"
     value = "addon"
   }
+  # Grafana Ingress 가 ingressClassName: alb 를 참조하므로 IngressClass 를 만든다.
+  set {
+    name  = "createIngressClassResource"
+    value = "true"
+  }
+  set {
+    name  = "ingressClass"
+    value = "alb"
+  }
 }
 
 # LB Controller 웹훅이 Ready(엔드포인트 보유)될 때까지 대기.
@@ -345,6 +354,8 @@ resource "helm_release" "grafana" {
     admin_user     = "skills-${var.bi_number}-admin"
     admin_password = var.grafana_admin_password
     ds_url         = "http://prometheus-server.monitoring.svc.cluster.local"
+    # Grafana ALB(wskorea26-grafana-alb) 가 붙을 퍼블릭 서브넷 (과제 12)
+    pub_subnets = join(",", var.pub_subnet_names)
   })]
 
   depends_on = [

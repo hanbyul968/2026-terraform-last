@@ -100,7 +100,8 @@ terraform destroy -auto-approve
 | 대시보드 이름/uid | `k8s/wskorea26-dashboard.json` `title`/`uid` |
 | 표시 지표(패널) | `k8s/wskorea26-dashboard.json` `panels[].targets[].expr` |
 | Grafana 계정 | `run.sh`에서 받은 `bi_number`로 `skills-<비번호>-admin` 자동 생성, 비밀번호는 `k8s/variables.tf` |
-| Grafana LB 이름 | `k8s/grafana-values.yaml.tftpl` `aws-load-balancer-name` |
+| Grafana ALB 이름 | `k8s/grafana-values.yaml.tftpl` Ingress `alb.ingress.kubernetes.io/load-balancer-name` |
+| Grafana ALB 서브넷 | `k8s/variables.tf` `pub_subnet_names` |
 | 모니터링 배치 노드 | `k8s/*-values.yaml.tftpl` `nodeSelector.node-type` |
 
 ---

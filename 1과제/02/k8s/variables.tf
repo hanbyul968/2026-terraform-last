@@ -81,3 +81,10 @@ variable "grafana_admin_password" {
   default     = "\\$korea26!!"
   sensitive   = true
 }
+
+# Grafana ALB(Ingress) 가 배치될 퍼블릭 서브넷 이름 (Reference01)
+variable "pub_subnet_names" {
+  description = "Grafana ALB 를 배치할 퍼블릭 서브넷 Name 태그 목록."
+  type        = list(string)
+  default     = ["wskorea26-pub-subnet-c", "wskorea26-pub-subnet-d"]
+}

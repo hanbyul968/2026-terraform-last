@@ -49,6 +49,40 @@ def plan_step(knobs, summary, rejected=None, avail_gate=99.0):
             "reason": c.reason, "candidate": c.to_dict()}
 
 
+def print_frontier(frontier, verbose=False):
+    """노드 수 -> 총점 곡선. 비용 분모 B가 비공개라 B별 총점을 나란히 보여준다.
+
+    성능+가용성 24점은 B와 무관하므로 이 표의 '품질' 열은 확정값이다. B가 흔드는 것은
+    비용 12점뿐이고, 그래서 열이 갈려도 추천이 같은 경우가 많다(robust).
+    """
+    if not frontier or not frontier.get("knees"):
+        return
+    grid = [f"{b:g}" for b in frontier["baselines"]]
+    print()
+    print("--- 노드 수별 총점 (비용 분모 B 미상 -> B별 병기) ---")
+    print("  품질 = 성능+가용성 24점(B 무관) / 표 값 = 품질 + 그 B에서의 비용 12점")
+    print("  {:>4} {:>6} {:>7} ".format("노드", "품질", "느려짐")
+          + " ".join(f"B={b:>5}" for b in grid)
+          + "  {:>8} {:>8}".format("기대총점", "최악손해"))
+    rows = frontier["knees"]
+    if not verbose:
+        pick = frontier.get("recommended_nodes") or rows[0]["nodes"]
+        rows = [r for r in rows if abs(r["nodes"] - pick) <= 3]
+    for row in rows:
+        mark = "  <== 추천" if row["nodes"] == frontier.get("recommended_nodes") else ""
+        cells = " ".join("{:>7.1f}".format(row["total_by_baseline"][b]) for b in grid)
+        gate = "" if row["perf_gate_ok"] else "  [성능<30% -> 비용 0점]"
+        print("  {:>4} {:>6.1f} {:>7.2f} ".format(
+            row["nodes"], row["quality"], row["slowdown"]) + cells
+            + "  {:>8.2f} {:>8.2f}".format(row["expected_total"], row["max_regret"])
+            + mark + gate)
+    print(f"  B별 최적 노드 수: {frontier['picks']}")
+    print(f"  추천 {frontier['recommended_nodes']}대"
+          f" (기대값 기준 {frontier['expected_nodes']}대,"
+          f" 최악 손해 {frontier['minimax_regret']:.2f}점)")
+    print("  " + frontier["note"])
+
+
 def _rejected_keys(path):
     if not path or not os.path.isfile(path):
         return [], []
@@ -85,8 +119,8 @@ def main():
     parser.add_argument("--ns", default="app")
     parser.add_argument("--avail-gate", type=float, default=99.0)
     parser.add_argument("--objective", choices=["cost", "balanced"], default="cost",
-                        help="cost: 공식 밴드 기준(가용성 90%+, 성능 30%+)에서 비용 우선. "
-                             "balanced: 가용성 99% 유지")
+                        help="cost: 공식 밴드 기준(가용성 90%%+, 성능 30%%+)에서 비용 우선. "
+                             "balanced: 가용성 99%% 유지")
     parser.add_argument("--avail-floor", type=float, default=None,
                         help="비용 우선 모드에서 지킬 최소 가용성%% (기본 92)")
     parser.add_argument("--perf-floor", type=float, default=None,
@@ -97,6 +131,12 @@ def main():
                         help="앱별 목표 초당 요청수: user=100,stress=10 (측정 부하와 무관하게 고정)")
     parser.add_argument("--hpa-only", action="store_true",
                         help="request 변경(rollout) 후보 제외. 부하 중 라이브 루프의 기본값")
+    parser.add_argument("--cost-baselines", default="",
+                        help="비용 ratio 분모(B) 후보 목록. 예: 2,3,4 (기본 %s). "
+                             "B는 비공개이므로 하나로 찍지 않고 이 그리드 전체에서 평가한다."
+                             % ",".join(f"{b:g}" for b in rubric.DEFAULT_COST_BASELINES))
+    parser.add_argument("--frontier", action="store_true",
+                        help="노드 수별 총점 곡선과 B별 최적을 전 구간 표로 출력한다")
     parser.add_argument("--rejected", default="")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
@@ -111,6 +151,9 @@ def main():
         snapshot.avail_floor = args.avail_floor
     if args.perf_floor is not None:
         snapshot.perf_floor = args.perf_floor
+    if args.cost_baselines:
+        grid = tuple(float(x) for x in args.cost_baselines.replace(" ", "").split(",") if x)
+        snapshot.cost_baselines = tuple(b for b in grid if b > 0) or rubric.DEFAULT_COST_BASELINES
     snapshot.load_scale = max(args.load_scale, 0.0)
     snapshot.target_rps = {kv.split("=")[0]: float(kv.split("=")[1])
                            for kv in args.target_rps.split(",") if "=" in kv}
@@ -145,12 +188,15 @@ def main():
         "idle_nodes_after_presize": data.get("idle_nodes_after_presize"),
         "baseline_node_count": data.get("baseline_node_count"),
         "reservation_fit": data.get("reservation_fit"),
+        "frontier": data.get("frontier"),
+        "target_nodes": data.get("target_nodes"),
     }
     if args.json:
         print(json.dumps(result, ensure_ascii=True, separators=(",", ":")))
         return
     print("\n=== 공통 엔진: 다음 라이브 튜닝 후보 ===")
     print(f"공식 소계 {result['current_total']:.1f}/36 | 비용 ratio {result['current_cost_ratio']:.2f}")
+    print_frontier(result.get("frontier"), args.frontier)
     if result["done"]:
         print("수렴: " + result["reason"])
     else:

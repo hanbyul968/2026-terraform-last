@@ -568,5 +568,88 @@ class PowerShellRunnerContractTests(unittest.TestCase):
 
 
 
+class CostBaselineUncertaintyTests(unittest.TestCase):
+    """비용 ratio의 분모(B)는 비공개다. 그 불확실성 아래에서 총점을 최대화하는지 검증한다."""
+
+    def lat(self, count, low, high):
+        return tuple(round(low + (high - low) * i / (count - 1), 4) for i in range(count))
+
+    def snapshot(self, **cluster):
+        values = dict(baseline_nodes=2, node_average=4, node_count=4, node_alloc_m=1930,
+                      node_mem_alloc_mi=3292, cluster_cpu_p95_m=6000,
+                      system_reserved_m=1200, baseline_node_count=2, zone_count=2)
+        values.update(cluster)
+        apps = {
+            "user": engine.AppSnapshot(
+                name="user", slo_seconds=.2, samples=20000, window_seconds=120.0,
+                availability=99.5, performance=86.0, request_m=600, memory_request_mi=128,
+                target=90, min_replicas=2, max_replicas=9, replicas=6, pods_p90=6, pods_max=6,
+                per_pod_p90=300, per_pod_p95=420, total_cpu_p90=1800, total_cpu_p95=2100,
+                cpu_samples=90, success_ratio=.995, latencies=self.lat(400, .04, .34)),
+            "stress": engine.AppSnapshot(
+                name="stress", slo_seconds=1.0, samples=2400, window_seconds=120.0,
+                availability=99.0, performance=84.0, request_m=750, memory_request_mi=128,
+                cpu_limit_m=2000, target=55, min_replicas=2, max_replicas=8, replicas=6,
+                pods_p90=6, pods_max=6, per_pod_p90=900, per_pod_p95=1400,
+                total_cpu_p90=5400, total_cpu_p95=6200, cpu_samples=90,
+                success_ratio=.99, latencies=self.lat(400, .20, 1.30)),
+        }
+        return engine.TuningSnapshot(apps, engine.ClusterSnapshot(**values))
+
+    def test_performance_prediction_uses_all_requests_as_denominator(self):
+        """latencies 에는 2xx 만 담기므로 그대로 나누면 실패분이 분모에서 빠져 낙관 편향이 된다."""
+        app = engine.AppSnapshot(
+            name="a", slo_seconds=1.0, samples=1000, window_seconds=100.0,
+            availability=90.0, performance=90.0, success_ratio=.90,
+            latencies=tuple([.10] * 900))
+        perf, avail = app.performance_at(1.0)
+        # 전부 SLO 안이지만 10% 는 애초에 실패했다 -> 90% 이지 100% 가 아니다.
+        self.assertAlmostEqual(perf, 90.0, places=6)
+        self.assertAlmostEqual(avail, 90.0, places=6)
+
+    def test_quality_curve_does_not_depend_on_secret_baseline(self):
+        """성능+가용성 24점은 B와 무관하다. 이게 성립해야 B를 몰라도 곡선을 그릴 수 있다."""
+        snapshot = self.snapshot()
+        snapshot.cost_baselines = (2.0,)
+        a = {row["nodes"]: row["quality"] for row in engine.score_frontier(snapshot)}
+        snapshot.cost_baselines = (3.0, 5.0, 9.0)
+        b = {row["nodes"]: row["quality"] for row in engine.score_frontier(snapshot)}
+        shared = set(a) & set(b)
+        self.assertTrue(shared)
+        for nodes in shared:
+            self.assertEqual(a[nodes], b[nodes])
+
+    def test_cost_floor_means_fewer_nodes_is_not_always_better(self):
+        """ratio<0.50 이면 비용 12점이 통째로 0이다. 저구간에서는 노드를 늘리는 쪽이 이득이다.
+
+        이 성질 때문에 '적은 노드가 항상 우월'이라는 가지치기를 쓸 수 없다.
+        """
+        self.assertEqual(rubric.cost_points_for_nodes(2, 5.0), 0.0)   # ratio 0.40 -> 하한 미달
+        self.assertEqual(rubric.cost_points_for_nodes(3, 5.0), 12.0)  # ratio 0.60 -> 만점
+        # 프론티어는 하한 절벽이 보이도록 0.5*maxB 아래까지 훑어야 한다.
+        snapshot = self.snapshot()
+        snapshot.cost_baselines = (8.0,)
+        nodes = [row["nodes"] for row in engine.score_frontier(snapshot)]
+        self.assertGreaterEqual(max(nodes), 5)
+
+    def test_report_picks_operating_point_and_flags_baseline_sensitivity(self):
+        snapshot = self.snapshot()
+        report = engine.frontier_report(snapshot)
+        self.assertTrue(report["knees"])
+        self.assertIn(report["recommended_nodes"], [r["nodes"] for r in report["knees"]])
+        self.assertEqual(report["recommended_nodes"], report["minimax_nodes"])
+        # 추천값의 최악 손해는 모든 후보 중 최소여야 한다.
+        worst = {r["nodes"]: r["max_regret"] for r in report["knees"]}
+        self.assertEqual(worst[report["recommended_nodes"]], min(worst.values()))
+        # B별 최적이 모두 같을 때만 robust 로 보고한다.
+        self.assertEqual(report["robust"], len(set(report["picks"].values())) == 1)
+
+    def test_plan_exposes_frontier_and_targets_it(self):
+        snapshot = self.snapshot()
+        result = engine.plan(snapshot)
+        self.assertIn("frontier", result)
+        self.assertEqual(result["target_nodes"], result["frontier"]["recommended_nodes"])
+
+
 if __name__ == "__main__":
     unittest.main()

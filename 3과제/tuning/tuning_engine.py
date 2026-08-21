@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import bisect
 import csv
 import json
 import math
@@ -153,6 +154,9 @@ class AppSnapshot:
     proxy_borrow_ms: Optional[float] = None
     latencies: Tuple[float, ...] = ()
     window_seconds: float = 0.0
+    # 2xx 응답 비율 (= len(2xx) / 전체 요청). latencies 는 2xx 만 담고 있으므로,
+    # 채점식과 같은 분모(전체 요청)로 환산하려면 이 비율을 곱해야 한다.
+    success_ratio: float = 1.0
 
     @property
     def cpu_seconds_per_request(self):
@@ -200,18 +204,34 @@ class AppSnapshot:
         rps = target_rps if target_rps else self.measured_rps
         return int(round(cpu_seconds * max(rps, 0.0) * 1000))
 
+    @property
+    def sorted_latencies(self):
+        """정렬본을 캐시한다. performance_at 은 노드 수 후보마다 반복 호출되므로
+        (프론티어 스캔 + request×target 완전탐색) 매번 전수 순회하면 수천만 연산이 된다.
+        정렬해 두면 bisect 로 O(log n) 이다."""
+        cache = self.__dict__.get("_sorted_latency_cache")
+        if cache is None or cache[0] is not self.latencies:
+            cache = (self.latencies, sorted(self.latencies))
+            self.__dict__["_sorted_latency_cache"] = cache
+        return cache[1]
+
     def performance_at(self, slowdown: float):
         """CPU 공급이 slowdown배 부족할 때의 성능%/가용성% 추정.
 
         지연 = CPU 처리분 + 대기분으로 보고 CPU 처리분만 공급 부족 배수로 늘린다.
         비중은 실측(요청당 CPU 시간 / 평균 지연)에서 구한다.
+
+        분모는 **전체 요청**이다. latencies 에는 2xx 만 들어 있으므로 그대로 나누면
+        실패분이 분모에서 빠져 예측이 낙관적으로 편향된다(가용성 95%면 약 +5%p).
+        그 편향은 "노드를 더 줄여도 된다"는 잘못된 결론으로 이어지므로 success_ratio 를 곱한다.
         """
         if not self.latencies:
             return self.performance, self.availability
         factor = 1.0 + (max(1.0, float(slowdown)) - 1.0) * self.cpu_bound_fraction
-        total = len(self.latencies)
-        perf = 100.0 * sum(1 for x in self.latencies if x * factor <= self.slo_seconds) / total
-        avail = 100.0 * sum(1 for x in self.latencies if x * factor <= 5.0) / total
+        ordered = self.sorted_latencies
+        scale = 100.0 * self.success_ratio / len(ordered)
+        perf = scale * bisect.bisect_right(ordered, self.slo_seconds / factor)
+        avail = scale * bisect.bisect_right(ordered, 5.0 / factor)
         return perf, avail
 
     @property
@@ -274,6 +294,10 @@ class TuningSnapshot:
     # 0.5면 그 절반 부하를 목표로 사이징한다. 앱별 목표 rps를 직접 줄 수도 있다.
     load_scale: float = 1.0
     target_rps: Dict[str, float] = field(default_factory=dict)
+    # 비용 ratio의 분모(B)는 비공개다. 하나로 찍지 않고 그럴듯한 후보 위에서 평가한다.
+    cost_baselines: Tuple[float, ...] = rubric.DEFAULT_COST_BASELINES
+    # 프론티어가 고른 총점 최대 지점의 노드 수. plan()이 채우고 후보 탐색이 하한으로 쓴다.
+    target_nodes: Optional[int] = None
 
     def app_target_rps(self, name):
         app = self.apps[name]
@@ -522,6 +546,7 @@ def _response_measurement(path, slo):
         "p95_latency": nearest_rank(latencies, .95),
         "early_performance": rate(early), "steady_performance": rate(steady),
         "latencies": tuple(ok2[::step]),
+        "success_ratio": len(ok2) / len(rows),
     }
 
 
@@ -793,6 +818,114 @@ def _predicted_score(snapshot: TuningSnapshot, nodes: int, node_average=None):
             round(max(slowdown, 0.0), 3))
 
 
+def _robust_total(snapshot: TuningSnapshot, predicted: rubric.RubricScore,
+                  node_average: float) -> float:
+    """B를 모를 때의 총점. 품질 24점은 B와 무관하고, 비용 12점만 B 그리드 기대값으로 잡는다."""
+    quality = predicted.availability_points + predicted.performance_points
+    return quality + rubric.expected_cost_points(
+        node_average, snapshot.cost_baselines, predicted.perf_gate_pass)
+
+
+def quality_at_nodes(snapshot: TuningSnapshot, nodes: float):
+    """노드 수 N에서의 앱별 예측 성능/가용성.
+
+    비용 분모 B가 전혀 들어가지 않는다. 채점 40점 중 성능+가용성 24점은 B와 무관하므로,
+    이 곡선은 B를 몰라도 확정적으로 그릴 수 있다.
+    """
+    supply = float(nodes) * snapshot.cluster.node_alloc_m
+    demand = snapshot.required_cluster_cpu_m()
+    slowdown = demand / supply if supply and demand else 1.0
+    perfs, avails = {}, {}
+    for name, app in snapshot.apps.items():
+        perf, avail = app.performance_at(slowdown)
+        perfs[name], avails[name] = perf, avail
+    return perfs, avails, round(max(slowdown, 0.0), 3)
+
+
+def score_frontier(snapshot: TuningSnapshot, max_nodes=None, baselines=None):
+    """노드 수 N에 대한 (품질 24점, B별 비용 12점, 총점) 곡선을 전 구간 그린다.
+
+    품질은 N에 단조 증가하지만 **비용은 그렇지 않다**. ratio < 0.50이면 비용 12점이 통째로
+    0이 되므로(하한 절벽), 노드를 줄이는 쪽이 오히려 손해인 저구간이 존재한다. 따라서
+    '적은 노드가 항상 우월'이라는 가지치기는 쓸 수 없고 구간 전체를 평가해야 한다.
+    """
+    grid = tuple(b for b in (baselines or snapshot.cost_baselines) if b > 0)
+    alloc = snapshot.cluster.node_alloc_m
+    demand = snapshot.required_cluster_cpu_m()
+    if alloc <= 0 or demand <= 0 or not grid:
+        return []
+    if max_nodes is None:
+        # 위로는 '공급이 수요를 덮는 지점'과 현재 운영 규모를, 아래로는 하한 절벽(0.5B)을
+        # 모두 포함해야 곡선의 양쪽 끝이 잘리지 않는다.
+        max_nodes = max(int(math.ceil(demand / alloc)) + 1,
+                        int(math.ceil(snapshot.cluster.node_average)) + 1,
+                        int(math.ceil(0.5 * max(grid))) + 1)
+    ceiling = int(clamp(max_nodes, 2, 40))
+    rows = []
+    for nodes in range(1, ceiling + 1):
+        perfs, avails, slowdown = quality_at_nodes(snapshot, nodes)
+        quality = rubric.quality_points(perfs, avails)
+        gate = rubric.perf_gate_ok(perfs)
+        cost = {f"{b:g}": rubric.cost_points_for_nodes(nodes, b, gate) for b in grid}
+        rows.append({
+            "nodes": nodes,
+            "quality": round(quality, 2),
+            "slowdown": slowdown,
+            "perf_gate_ok": gate,
+            "min_performance": round(min(perfs.values()), 2) if perfs else 0.0,
+            "min_availability": round(min(avails.values()), 2) if avails else 0.0,
+            "performances": {k: round(v, 2) for k, v in sorted(perfs.items())},
+            "availabilities": {k: round(v, 2) for k, v in sorted(avails.items())},
+            "cost_by_baseline": cost,
+            "total_by_baseline": {k: round(quality + v, 2) for k, v in cost.items()},
+            "expected_total": round(
+                quality + rubric.expected_cost_points(nodes, grid, gate), 2),
+        })
+    return rows
+
+
+def frontier_report(snapshot: TuningSnapshot, baselines=None):
+    """총점이 최대인 운영점을 B 불확실성 아래에서 고른다.
+
+    비용 분모 B는 비공개다. 하나로 찍는 대신 그리드 전체에서 평가하고 두 기준을 함께 낸다.
+      - expected : B 균등 가중 기대 총점이 최대인 노드 수
+      - minimax  : 어떤 B가 진짜여도 손해(regret)가 가장 작은 노드 수 -> 이 값을 추천으로 쓴다
+    모든 B에서 최적이 같으면(robust=True) B를 몰라도 답이 하나로 확정된다.
+    """
+    grid = tuple(b for b in (baselines or snapshot.cost_baselines) if b > 0)
+    rows = score_frontier(snapshot, baselines=grid)
+    if not rows:
+        return {"knees": [], "baselines": list(grid), "picks": {}, "robust": False,
+                "expected_nodes": None, "minimax_nodes": None,
+                "recommended_nodes": None, "note": "측정 부족 — 프론티어를 그릴 수 없음"}
+    picks, best_by_baseline = {}, {}
+    for b in grid:
+        key = f"{b:g}"
+        winner = max(rows, key=lambda r: (r["total_by_baseline"][key], -r["nodes"]))
+        picks[key] = winner["nodes"]
+        best_by_baseline[key] = winner["total_by_baseline"][key]
+    for row in rows:
+        row["max_regret"] = round(max(best_by_baseline[key] - row["total_by_baseline"][key]
+                                      for key in best_by_baseline), 2)
+    expected = max(rows, key=lambda r: (r["expected_total"], -r["nodes"]))
+    minimax = min(rows, key=lambda r: (r["max_regret"], r["nodes"]))
+    robust = len(set(picks.values())) == 1
+    return {
+        "knees": rows,
+        "baselines": list(grid),
+        "picks": picks,
+        "expected_nodes": expected["nodes"],
+        "expected_total": expected["expected_total"],
+        "minimax_nodes": minimax["nodes"],
+        "minimax_regret": minimax["max_regret"],
+        "robust": robust,
+        "recommended_nodes": minimax["nodes"],
+        "note": ("모든 기준선에서 같은 노드 수가 최적 — B를 몰라도 확정"
+                 if robust else
+                 "기준선에 따라 최적이 갈린다 — 최악 손해가 가장 작은 값을 쓴다"),
+    }
+
+
 def deterministic_reservation(snapshot: TuningSnapshot):
     """실측 CPU 수요에서 '필요 노드 수와 그에 맞는 앱별 request'를 한 번에 계산한다.
 
@@ -997,13 +1130,16 @@ def _optimal_request_target(snapshot: TuningSnapshot, app: AppSnapshot, current:
             nodes = _estimated_nodes(snapshot, app.name, proposed)
             if node_floor is not None and nodes < node_floor:
                 continue
-            predicted, slowdown = _predicted_score(
-                snapshot, nodes, _estimated_node_average(snapshot, app.name, proposed))
+            node_average = _estimated_node_average(snapshot, app.name, proposed)
+            predicted, slowdown = _predicted_score(snapshot, nodes, node_average)
             if slowdown > snapshot.max_slowdown:
                 continue
             if not snapshot.acceptable(predicted):
                 continue
-            rank = (predicted.total, -nodes, -request_m, -abs(target - current["target"]))
+            # 비용 ratio의 분모는 비공개다. 한 값으로 찍은 총점 대신 B 그리드 기대 총점으로
+            # 고른다. 품질 24점은 B와 무관하므로 순위가 B에 크게 흔들리지 않는다.
+            rank = (_robust_total(snapshot, predicted, node_average),
+                    -nodes, -request_m, -abs(target - current["target"]))
             options.append((rank, proposed, nodes, predicted.total, slowdown,
                             protected_replicas))
     if not options:
@@ -1211,6 +1347,11 @@ def generate_candidates(snapshot: TuningSnapshot, rejected=None, namespace="app"
         current_nodes = _estimated_nodes(snapshot, app.name, current_probe)
         node_floor = min_nodes_allowed if snapshot.cost_first else max(
             _safe_node_floor(snapshot, current_nodes), min_nodes_allowed)
+        # 프론티어가 고른 총점 최대 지점 아래로는 내려가지 않는다. 그 아래는 '비용에서 버는 것보다
+        # 성능/가용성에서 잃는 게 크다'는 계산이 이미 끝난 구간이다. 이미 그보다 낮게 돌고 있으면
+        # 현재 노드 수를 하한으로 써서 도달 불가능한 바닥을 만들지 않는다.
+        if snapshot.target_nodes:
+            node_floor = max(node_floor, min(int(snapshot.target_nodes), current_nodes))
         # (1) 실측 사용량에서 바로 역산한 값. 탐색 없이 한 회차로 확정한다.
         sized = _usage_sized(snapshot, app, current)
         if sized:
@@ -1345,6 +1486,11 @@ def generate_candidates(snapshot: TuningSnapshot, rejected=None, namespace="app"
 def plan(snapshot: TuningSnapshot, rejected=None, namespace="app", rejected_nodes=None,
          hpa_only=False):
     score = snapshot.score()
+    # 후보를 만들기 전에 '노드 수 -> 총점' 프론티어를 먼저 푼다. 어느 지점을 노려야 하는지
+    # 정하고 나서 그 지점에 도달하는 request/target 조합을 찾는 순서다.
+    frontier = frontier_report(snapshot)
+    if frontier.get("recommended_nodes"):
+        snapshot.target_nodes = int(frontier["recommended_nodes"])
     candidates = generate_candidates(snapshot, rejected, namespace, rejected_nodes, hpa_only)
     fit = deterministic_reservation(snapshot)
     cost_locked = ""
@@ -1392,7 +1538,9 @@ def plan(snapshot: TuningSnapshot, rejected=None, namespace="app", rejected_node
                 presize[name] = sz
         presize = presize or None
     return {
-        "schema_version": 1,
+        "schema_version": 2,
+        "frontier": frontier,
+        "target_nodes": snapshot.target_nodes,
         "done": not candidates,
         "reason": ((cost_locked + " ") if cost_locked else "")
                   + ("개선 후보 없음 — 현재 측정에서 안전하게 공식 점수를 올릴 수 없음" if not candidates else ""),

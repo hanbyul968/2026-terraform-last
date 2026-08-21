@@ -16,6 +16,9 @@ param(
   [double]$PerfFloor = 80,
   [double]$LoadScale = 1,
   [string]$TargetRps = '',
+  # 비용 ratio의 분모(B)는 비공개다. 하나로 찍지 않고 후보 그리드 전체에서 총점을 평가한다.
+  # 기준 구성이 더 크다고 판단되면 '3,4,6' 처럼 넓혀서 준다(추천이 노드 증가 쪽으로 움직인다).
+  [string]$CostBaselines = '',
   # 부하 중 라이브 루프는 기본적으로 HPA(target/min/max)만 만진다. request 변경은 rollout을
   # 일으켜 회차 시간을 잡아먹고 가용성을 깎으므로, 켜려면 -AllowRequestChange 를 명시한다.
   [switch]$AllowRequestChange,
@@ -47,6 +50,7 @@ function Get-NextStep { param([string]$OutDir,[string]$RejFile)
        '--load-scale',"$LoadScale",'--json')
   if(-not $AllowRequestChange){$a+=@('--hpa-only')}
   if($TargetRps){$a+=@('--target-rps',$TargetRps)}
+  if($CostBaselines){$a+=@('--cost-baselines',$CostBaselines)}
   if($RejFile){$a+=@('--rejected',$RejFile)}
   $raw=Invoke-Py $a; return ($raw | Select-Object -Last 1 | ConvertFrom-Json)
 }
@@ -120,6 +124,17 @@ try {
   }
   & $loadtest @ltArgs | Out-Null
   $out=Join-Path $env:TEMP 'tune-opt';$bestScore=Get-Score $out;$first=Get-NextStep $out $null
+  # 노드 수 -> 총점 프론티어. 비용과 성능 중 무엇을 얼마나 내줄지를 여기서 결정한다.
+  if($first.frontier -and $first.frontier.knees){
+    $fr=$first.frontier
+    Write-Host ("프론티어: 추천 {0}대 (기대 총점 {1:N2}, 최악 손해 {2:N2}점) - {3}" -f $fr.recommended_nodes,$fr.expected_total,$fr.minimax_regret,$fr.note) -ForegroundColor Cyan
+    foreach($k in $fr.knees){
+      if([math]::Abs([int]$k.nodes - [int]$fr.recommended_nodes) -le 2){
+        $cells=($fr.baselines|ForEach-Object{'{0:N1}' -f $k.total_by_baseline."$_"}) -join ' / '
+        Write-Host ("    {0}대: 품질 {1:N1} | B별 총점 {2} | 기대 {3:N2}" -f $k.nodes,$k.quality,$cells,$k.expected_total) -ForegroundColor DarkGray
+      }
+    }
+  }
   $bestOut=Join-Path $env:TEMP 'tune-opt-best'; Save-Snapshot $out $bestOut
   $bestKnobs=$first.knobs
   Write-Host ("[baseline] {0:N1}/36 ratio={1:N2} elapsed={2:N1}m" -f $bestScore.total,$bestScore.cost_ratio,$sw.Elapsed.TotalMinutes)

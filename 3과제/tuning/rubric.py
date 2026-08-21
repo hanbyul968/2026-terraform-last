@@ -63,6 +63,49 @@ def next_band(value: float) -> Tuple[float, float]:
     return RATE_BANDS[-1], 0.0
 
 
+# 비용 ratio의 분모(기준 인스턴스 비용)는 공개되지 않는다. 하나로 찍지 않고 그럴듯한
+# 후보 위에서 평가한다. 문제지가 t3.medium 고정 + "최소한의 자원"을 요구하고 채점 밴드가
+# 1.00~3.75(12칸)로 끊겨 있으므로, 기준 구성은 소수 노드일 수밖에 없다.
+# 문제지가 t3.medium 고정 + "트래픽 처리를 위한 최소한의 자원"을 요구하고, 3앱 x HA 2레플리카가
+# 2AZ에 흩어지는 구성이므로 기준 구성은 2~4노드로 본다. 이 그리드가 유일한 모델링 가정이며
+# optimize.py --cost-baselines 로 바꿀 수 있다. 넓힐수록 추천이 보수적(노드 증가)으로 움직인다.
+DEFAULT_COST_BASELINES = (2.0, 3.0, 4.0)
+
+
+def cost_points_at(ratio: float) -> float:
+    """성능 게이트를 뺀 순수 비용 점수. ratio 하나만 보는 곡선."""
+    if ratio < COST_RATIO_FLOOR:
+        return 0.0
+    return float(sum(1 for limit in COST_LIMITS if ratio <= limit))
+
+
+def cost_points_for_nodes(nodes: float, baseline: float, perf_gate_ok: bool = True) -> float:
+    """평균 노드 수와 가정한 기준선 baseline(B)에서의 비용 점수."""
+    if not perf_gate_ok or baseline <= 0:
+        return 0.0
+    return cost_points_at(float(nodes) / float(baseline))
+
+
+def expected_cost_points(nodes: float, baselines: Iterable[float] = DEFAULT_COST_BASELINES,
+                         perf_gate_ok: bool = True) -> float:
+    """B를 모를 때의 비용 점수 기대값(균등 가중)."""
+    grid = [b for b in baselines if b > 0]
+    if not grid:
+        return 0.0
+    return sum(cost_points_for_nodes(nodes, b, perf_gate_ok) for b in grid) / len(grid)
+
+
+def quality_points(performances: Dict[str, float], availabilities: Dict[str, float]) -> float:
+    """성능+가용성 24점. 비용 분모 B와 무관한 부분이다."""
+    return (sum(band_points(v) for v in performances.values())
+            + sum(band_points(v) for v in availabilities.values()))
+
+
+def perf_gate_ok(performances: Dict[str, float]) -> bool:
+    """비용 12점의 전제조건: 모든 앱 성능 >= 30%."""
+    return bool(performances) and min(performances.values()) >= COST_PERF_GATE
+
+
 def cost_points(ratio: float, performances: Dict[str, float]) -> Tuple[float, str]:
     if ratio < COST_RATIO_FLOOR:
         return 0.0, "ratio %.2f < %.2f (하한 미달)" % (ratio, COST_RATIO_FLOOR)

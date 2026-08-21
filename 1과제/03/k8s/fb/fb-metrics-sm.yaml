@@ -32,10 +32,16 @@ spec:
       interval: 15s
       honorLabels: true
       metricRelabelings:
-        # FB는 log_metric_counter_http_requests_total로 노출 -> 알림 expr과 맞게 rename + namespace 부여
+        # FB는 log_metric_counter_http_requests_total로 노출 -> 알림 expr과 맞게 rename
         - sourceLabels: [__name__]
           regex: 'log_metric_counter_http_requests_total'
           targetLabel: __name__
           replacement: 'http_requests_total'
+        # FB는 log_metric_gauge_http_request_duration_seconds로 노출 -> rename
+        - sourceLabels: [__name__]
+          regex: 'log_metric_gauge_http_request_duration_seconds'
+          targetLabel: __name__
+          replacement: 'http_request_duration_seconds'
+        # 알림/대시보드가 namespace 라벨로 필터하므로 앱 네임스페이스를 부여
         - targetLabel: namespace
           replacement: 'wsc2026'

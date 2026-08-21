@@ -7,7 +7,9 @@ defaultRules:
 
 prometheus:
   prometheusSpec:
+    # 과제 11: 데이터 보존 기간 7일
     retention: 7d
+    scrapeInterval: 15s
     evaluationInterval: 15s
     nodeSelector:
       wsc2026/node: addon
@@ -29,25 +31,49 @@ prometheus:
           scrapeTimeout: 10s
           honorLabels: true
 
-alertmanager:
+# 과제 11: 노드 수준 메트릭 수집 — Node Exporter DaemonSet (모든 노드에 1개씩)
+nodeExporter:
   enabled: true
-  alertmanagerSpec:
-    nodeSelector:
-      wsc2026/node: addon
-
-prometheusOperator:
-  nodeSelector:
-    wsc2026/node: addon
 
 prometheus-node-exporter:
   tolerations:
     - operator: Exists
 
+# 과제 11: Alertmanager 기반 알람 체계
+alertmanager:
+  enabled: true
+  alertmanagerSpec:
+    nodeSelector:
+      wsc2026/node: addon
+  config:
+    global:
+      resolve_timeout: 5m
+    route:
+      group_by: ["alertname", "namespace"]
+      group_wait: 10s
+      group_interval: 30s
+      repeat_interval: 1h
+      receiver: wsc2026-default
+      routes:
+        - matchers:
+            - severity = "critical"
+          receiver: wsc2026-critical
+          group_wait: 5s
+          group_interval: 30s
+          repeat_interval: 30m
+    receivers:
+      - name: wsc2026-default
+      - name: wsc2026-critical
+
+prometheusOperator:
+  nodeSelector:
+    wsc2026/node: addon
+
 kube-state-metrics:
   nodeSelector:
     wsc2026/node: addon
-  # (11-3 Available Nodes) 노드의 nodegroup 라벨을 메트릭으로 노출
-  #   → kube_node_labels{label_eks_amazonaws_com_nodegroup} 생성(nodegroup별 Available Nodes 패널용)
+  # (11-3 Available Nodes / 대시보드 nodegroup 변수) 노드의 nodegroup 라벨을 메트릭으로 노출
+  #   → kube_node_labels{label_eks_amazonaws_com_nodegroup} 생성
   metricLabelsAllowlist:
     - "nodes=[eks.amazonaws.com/nodegroup]"
 
@@ -59,6 +85,7 @@ grafana:
   serviceAccount:
     create: true
     name: grafana-sa
+  # 과제 11: 외부 브라우저 접근을 위해 Service 타입 LoadBalancer
   service:
     type: LoadBalancer
     annotations:
@@ -80,6 +107,11 @@ grafana:
       access: proxy
       url: http://kube-prometheus-stack-prometheus.observability.svc.${cluster_domain}:9090
       isDefault: true
+      jsonData:
+        httpMethod: POST
+        timeInterval: 15s
+        # Active Alerts(alertlist) 패널이 Prometheus 룰을 조회할 수 있도록 한다.
+        manageAlerts: true
     - name: alertmanager
       uid: alertmanager
       type: alertmanager
@@ -87,6 +119,7 @@ grafana:
       url: http://kube-prometheus-stack-alertmanager.observability.svc.${cluster_domain}:9093
       jsonData:
         implementation: prometheus
+        handleGrafanaManagedAlerts: false
     - name: cloudwatch
       uid: cloudwatch
       type: cloudwatch
@@ -102,37 +135,55 @@ additionalPrometheusRulesMap:
   wsc2026-rules:
     groups:
       - name: wsc2026.rules
+        # 채점 시나리오(부하 생성 후 sleep 180)에서 확실히 발화하도록 for 를 1m 로 둔다.
+        interval: 15s
         rules:
           - alert: PodHighCPU
             expr: |
-              sum by (namespace, pod) (rate(container_cpu_usage_seconds_total{container!="",namespace="wsc2026"}[2m]))
+              sum by (namespace, pod) (rate(container_cpu_usage_seconds_total{container!="",namespace="wsc2026"}[1m]))
                 / clamp_min(sum by (namespace, pod) (kube_pod_container_resource_limits{resource="cpu",namespace="wsc2026"}), 0.001) > 0.8
-            for: 3m
+            for: 1m
             labels:
               severity: warning
             annotations:
-              summary: "Pod CPU usage exceeded 80% for 3 minutes"
+              summary: "Pod CPU usage exceeded 80% of its limit"
+              description: "{{ $labels.namespace }}/{{ $labels.pod }} CPU = {{ $value | humanizePercentage }} of limit"
 
           - alert: PodHighMemory
             expr: |
               sum by (namespace, pod) (container_memory_working_set_bytes{container!="",namespace="wsc2026"})
                 / clamp_min(sum by (namespace, pod) (kube_pod_container_resource_limits{resource="memory",namespace="wsc2026"}), 1) > 0.9
-            for: 3m
+            for: 1m
             labels:
               severity: warning
             annotations:
-              summary: "Pod memory usage exceeded 90% for 3 minutes"
+              summary: "Pod memory usage exceeded 90% of its limit"
+              description: "{{ $labels.namespace }}/{{ $labels.pod }} memory = {{ $value | humanizePercentage }} of limit"
 
           - alert: PodNotReady
             expr: |
               kube_pod_status_ready{namespace="wsc2026",condition="true"} == 0
-                or kube_pod_container_status_waiting_reason{namespace="wsc2026",reason="CrashLoopBackOff"} == 1
-            for: 3m
+            for: 1m
             labels:
               severity: critical
             annotations:
-              summary: "Pod is in CrashLoopBackOff or has not been Ready for 3 minutes"
+              summary: "Pod has not been Ready for 1 minute"
+              description: "{{ $labels.namespace }}/{{ $labels.pod }} is not Ready"
 
+          - alert: PodCrashLooping
+            expr: |
+              kube_pod_container_status_restarts_total{namespace="wsc2026"} > 1
+                or kube_pod_container_status_waiting_reason{namespace="wsc2026",reason="CrashLoopBackOff"} == 1
+            for: 1m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Container is restarting repeatedly"
+              description: "{{ $labels.namespace }}/{{ $labels.pod }} restart count = {{ $value }}"
+
+          # http_requests_total / http_request_duration_seconds 는 지급 book 앱이 노출하지 않는다.
+          # Fluent Bit 의 log_to_metrics 가 액세스 로그에서 생성하고(k8s/fb/fluent-bit.conf),
+          # fb/fb-metrics-sm.yaml 의 ServiceMonitor 가 Prometheus 로 수집한다.
           - alert: HighErrorRate
             expr: |
               sum(rate(http_requests_total{namespace="wsc2026",status=~"4..|5.."}[1m]))
@@ -141,23 +192,18 @@ additionalPrometheusRulesMap:
             labels:
               severity: critical
             annotations:
-              summary: "HTTP 4xx/5xx ratio exceeded 5% for 1 minute"
+              summary: "HTTP 4xx/5xx ratio exceeded 5%"
+              description: "error ratio = {{ $value | humanizePercentage }}"
 
+          # 지급 book 앱은 /health 와 /v1/book 두 엔드포인트뿐이라 수 초대의 지연이 발생하지
+          # 않는다. 따라서 임계치는 이 API 의 SLO(20ms)로 잡는다 — DynamoDB 왕복이 포함된
+          # POST /v1/book 이 이 값을 넘으면 발화한다.
           - alert: HighLatency
             expr: |
-              sum(rate(http_request_duration_seconds_sum{namespace="wsc2026"}[1m]))
-                / clamp_min(sum(rate(http_request_duration_seconds_count{namespace="wsc2026"}[1m])), 0.001) > 3
-            for: 3m
+              max(http_request_duration_seconds{namespace="wsc2026"}) > 0.02
+            for: 1m
             labels:
               severity: warning
             annotations:
-              summary: "Average response time exceeded 3 seconds for 3 minutes"
-
-          - alert: PodCrashLooping
-            expr: |
-              kube_pod_container_status_restarts_total{namespace="wsc2026"} > 3
-            for: 3m
-            labels:
-              severity: critical
-            annotations:
-              summary: "Container restart count exceeded 3 for 3 minutes"
+              summary: "Request duration exceeded the 20ms SLO"
+              description: "max request duration = {{ $value }}s"

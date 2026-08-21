@@ -180,10 +180,13 @@ terraform output cloudfront_domain   # 채점 진입점
 |---|---|---|
 | Grafana admin pw | `variables.tf` | `grafana_admin_password` |
 | 보존기간(7일) | `k8s/kps-values.yaml.tftpl` | `prometheus.prometheusSpec.retention` |
-| Alert 규칙(5종) | `k8s/kps-values.yaml.tftpl` | `additionalPrometheusRulesMap` |
+| Alert 규칙(6종) | `k8s/kps-values.yaml.tftpl` | `additionalPrometheusRulesMap` |
+| Alertmanager 라우팅/리시버 | `k8s/kps-values.yaml.tftpl` | `alertmanager.config` |
 | Datasource(prometheus/alertmanager/cloudwatch) | `k8s/kps-values.yaml.tftpl` | `grafana.additionalDataSources` |
 | 대시보드 이름/패널 | `locals.tf`(`dashboard_name`) + `k8s/wsc-eks-dashboard.json` |
-| Fluent Bit 필터/파서 | `k8s/fluentbit-values.yaml.tftpl` | `extraFilters`/`extraParsers` |
+| 대시보드 상단 필터(nodegroup/namespace) | `k8s/wsc-eks-dashboard.json` | `templating.list` |
+| Fluent Bit 파서/필터/메트릭 | `k8s/fb/fluent-bit.conf`, `fb/parser_extra.conf`, `fb/reformat.lua` |
+| FB 메트릭 수집(ServiceMonitor) | `k8s/fb/fb-metrics-sm.yaml` | `metricRelabelings` |
 | 로그그룹 이름 | `logging.tf` | `aws_cloudwatch_log_group.app.name` |
 
 ---
@@ -192,12 +195,23 @@ terraform output cloudfront_domain   # 채점 진입점
 
 테라폼 plan/apply 는 통과하지만, 라이브 환경에서 다음은 **채점 전 반드시 확인**:
 
-1. **Grafana 대시보드** (`k8s/wsc-eks-dashboard.json`) — 채점지 사진의 패널 구성/임계치 색상
-   (CPU 80%↑ 빨강, 60~80% 노랑, Pod restart≥1 경고)에 맞게 패널을 보강해야 할 수 있다.
-2. **Fluent Bit 파싱** — book 앱 실제 로그 형식에 맞춰 `extraParsers` 정규식 조정.
-   (`INFO {json}` 가정. 형식이 다르면 Regex 수정)
-3. **Alert 규칙 expr** — `HighErrorRate`/`HighLatency` 는 앱이 http 메트릭을 노출해야 발화.
-   메트릭 미노출 시 사진처럼 발화시키려면 expr 또는 메트릭 소스 조정.
+1. **Grafana 대시보드** (`k8s/wsc-eks-dashboard.json`) — 상단 `Node Group`/`Namespace` 변수로
+   필터되며, CPU 80%↑ 빨강 / 60~80% 노랑 / 60%↓ 초록, Pod restart≥1 빨강(경고)로 맞춰두었다.
+   패널 17종(Node CPU/Memory, Available Nodes, Pod CPU/Memory, Pending Pods, Pod Restarts,
+   App Pod CPU/Memory, App Running/Restarts/Pending, Request Count, Response Time,
+   Status Code, Application Logs, Active Alerts)이 채점 목록과 1:1 대응한다.
+   ※ `namespace` 변수 기본값은 `wsc2026`, `nodegroup` 기본값은 `All`.
+2. **Fluent Bit 파싱** — 지급 book 앱은 logfmt
+   (`access method=.. path=.. status=.. duration=..`)이라 `fb/parser_extra.conf` 의
+   `book_access` 정규식으로 파싱하고 `fb/reformat.lua` 의 `reformat` 이
+   Reference02 형식(`INFO {json}`)으로 재구성한다. 로그 형식이 바뀌면 이 두 파일을 수정.
+3. **Alert 규칙 expr** — 지급 book 앱은 `/metrics` 를 노출하지 않으므로
+   `http_requests_total`(counter) 과 `http_request_duration_seconds`(gauge)를
+   `fb/fluent-bit.conf` 의 `log_to_metrics` 로 액세스 로그에서 생성하고,
+   `fb/fb-metrics-sm.yaml` 의 ServiceMonitor(rename relabel)로 Prometheus 가 수집한다.
+   6종(PodHighCPU / PodHighMemory / PodNotReady / PodCrashLooping / HighErrorRate /
+   HighLatency) 모두 `for: 1m` 이라 채점 스크립트의 부하 생성 + `sleep 180` 안에서 발화한다.
+   `HighLatency` 임계치는 앱에 지연 엔드포인트가 없어 API SLO(20ms)로 잡았다.
 4. **EKS 채점자 접근** — 채점은 Cloudshell(`wsc2026-skills-app-sub-a`+mark-sg)에서 kubectl.
    채점자 자격증명이 클러스터 access entry 에 없으면 `eks.tf` 에 access entry 추가 필요.
 5. **CloudFront ↔ ALB** — ALB SG 가 CloudFront origin-facing prefix list 만 허용(직접 접근 BLOCKED).

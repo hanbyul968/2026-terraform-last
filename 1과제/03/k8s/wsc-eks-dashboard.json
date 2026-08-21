@@ -4,133 +4,190 @@
   "tags": ["wsc2026"],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 3,
+  "version": 4,
   "refresh": "15s",
   "time": { "from": "now-30m", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "nodegroup",
+        "label": "Node Group",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "definition": "label_values(kube_node_labels, label_eks_amazonaws_com_nodegroup)",
+        "query": { "qryType": 1, "query": "label_values(kube_node_labels, label_eks_amazonaws_com_nodegroup)", "refId": "nodegroup" },
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": { "selected": true, "text": ["All"], "value": ["$__all"] },
+        "options": [],
+        "hide": 0
+      },
+      {
+        "name": "namespace",
+        "label": "Namespace",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "definition": "label_values(kube_pod_info, namespace)",
+        "query": { "qryType": 1, "query": "label_values(kube_pod_info, namespace)", "refId": "namespace" },
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": { "selected": true, "text": ["wsc2026"], "value": ["wsc2026"] },
+        "options": [],
+        "hide": 0
+      }
+    ]
+  },
   "panels": [
     { "id": 100, "title": "Node", "type": "row", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }, "panels": [] },
     {
       "id": 1, "title": "Node CPU (%)", "type": "timeseries",
+      "description": "노드그룹($nodegroup)별 노드 CPU 사용률. 80% 이상 빨강 / 60~80% 노랑 / 60% 미만 초록.",
       "gridPos": { "h": 7, "w": 12, "x": 0, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 60 }, { "color": "red", "value": 80 } ] }, "color": { "mode": "thresholds" } }, "overrides": [] },
-      "targets": [ { "refId": "A", "expr": "100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m]))) * on(instance) group_left(nodename) node_uname_info", "legendFormat": "{{nodename}}" } ]
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 60 }, { "color": "red", "value": 80 } ] }, "color": { "mode": "thresholds" }, "custom": { "thresholdsStyle": { "mode": "dashed" }, "lineWidth": 2, "fillOpacity": 5 } }, "overrides": [] },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "(100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m]))) * on(instance) group_left(nodename) node_uname_info)\nand on(nodename) label_replace(kube_node_labels{label_eks_amazonaws_com_nodegroup=~\"$nodegroup\"}, \"nodename\", \"$1\", \"node\", \"(.*)\")", "legendFormat": "{{nodename}}" } ]
     },
     {
       "id": 2, "title": "Node Memory (%)", "type": "timeseries",
+      "description": "노드그룹($nodegroup)별 노드 메모리 사용률. 80% 이상 빨강 / 60~80% 노랑 / 60% 미만 초록.",
       "gridPos": { "h": 7, "w": 12, "x": 12, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 60 }, { "color": "red", "value": 80 } ] }, "color": { "mode": "thresholds" } }, "overrides": [] },
-      "targets": [ { "refId": "A", "expr": "100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * on(instance) group_left(nodename) node_uname_info", "legendFormat": "{{nodename}}" } ]
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 60 }, { "color": "red", "value": 80 } ] }, "color": { "mode": "thresholds" }, "custom": { "thresholdsStyle": { "mode": "dashed" }, "lineWidth": 2, "fillOpacity": 5 } }, "overrides": [] },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "(100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * on(instance) group_left(nodename) node_uname_info)\nand on(nodename) label_replace(kube_node_labels{label_eks_amazonaws_com_nodegroup=~\"$nodegroup\"}, \"nodename\", \"$1\", \"node\", \"(.*)\")", "legendFormat": "{{nodename}}" } ]
     },
     {
       "id": 3, "title": "Available Nodes", "type": "stat",
+      "description": "노드그룹별 가용 노드 수.",
       "gridPos": { "h": 4, "w": 24, "x": 0, "y": 8 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] } }, "overrides": [] },
       "options": { "orientation": "horizontal", "colorMode": "value", "graphMode": "area", "textMode": "value_and_name", "reduceOptions": { "calcs": ["lastNotNull"], "values": false } },
-      "targets": [ { "refId": "A", "expr": "count by (label_eks_amazonaws_com_nodegroup) (kube_node_labels)", "legendFormat": "{{label_eks_amazonaws_com_nodegroup}}", "instant": true } ]
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "count by (label_eks_amazonaws_com_nodegroup) (kube_node_labels{label_eks_amazonaws_com_nodegroup=~\"$nodegroup\"})", "legendFormat": "{{label_eks_amazonaws_com_nodegroup}}", "instant": true } ]
     },
     { "id": 101, "title": "Pod", "type": "row", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 12 }, "panels": [] },
     {
       "id": 4, "title": "Pod CPU", "type": "timeseries",
+      "description": "네임스페이스($namespace)/노드그룹($nodegroup)별 파드 CPU 사용률(limit 대비). 80% 이상 빨강 / 60~80% 노랑 / 60% 미만 초록.",
       "gridPos": { "h": 7, "w": 12, "x": 0, "y": 13 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "min": 0, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 0.6 }, { "color": "red", "value": 0.8 } ] }, "color": { "mode": "thresholds" } }, "overrides": [] },
-      "targets": [ { "refId": "A", "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"wsc2026\",container!=\"\"}[5m])) / clamp_min(sum by (pod) (kube_pod_container_resource_limits{namespace=\"wsc2026\",resource=\"cpu\"}), 0.001)", "legendFormat": "{{pod}}" } ]
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 0.6 }, { "color": "red", "value": 0.8 } ] }, "color": { "mode": "thresholds" }, "custom": { "thresholdsStyle": { "mode": "dashed" }, "lineWidth": 2, "fillOpacity": 5 } }, "overrides": [] },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "(sum by (namespace, pod) (rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\",container!=\"\"}[5m]))\n  / clamp_min(sum by (namespace, pod) (kube_pod_container_resource_limits{namespace=~\"$namespace\",resource=\"cpu\"}), 0.001))\nand on(namespace, pod) (kube_pod_info and on(node) kube_node_labels{label_eks_amazonaws_com_nodegroup=~\"$nodegroup\"})", "legendFormat": "{{pod}}" } ]
     },
     {
       "id": 5, "title": "Pod Memory", "type": "timeseries",
+      "description": "네임스페이스($namespace)/노드그룹($nodegroup)별 파드 메모리 사용량.",
       "gridPos": { "h": 7, "w": 12, "x": 12, "y": 13 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": { "defaults": { "unit": "bytes", "min": 0, "color": { "mode": "palette-classic" } }, "overrides": [] },
-      "targets": [ { "refId": "A", "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=\"wsc2026\",container!=\"\"})", "legendFormat": "{{pod}}" } ]
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum by (namespace, pod) (container_memory_working_set_bytes{namespace=~\"$namespace\",container!=\"\"})\nand on(namespace, pod) (kube_pod_info and on(node) kube_node_labels{label_eks_amazonaws_com_nodegroup=~\"$nodegroup\"})", "legendFormat": "{{pod}}" } ]
     },
     {
       "id": 6, "title": "Pending Pods", "type": "stat",
+      "description": "네임스페이스($namespace)에서 Pending 상태인 파드 수.",
       "gridPos": { "h": 7, "w": 6, "x": 0, "y": 20 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] }, "color": { "mode": "thresholds" } }, "overrides": [] },
-      "targets": [ { "refId": "A", "expr": "sum(kube_pod_status_phase{namespace=\"wsc2026\",phase=\"Pending\"} == 1) or vector(0)", "instant": true } ]
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "values": false } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum(kube_pod_status_phase{namespace=~\"$namespace\",phase=\"Pending\"} == 1) or vector(0)", "instant": true } ]
     },
     {
       "id": 7, "title": "Pod Restarts", "type": "stat",
+      "description": "네임스페이스($namespace)/노드그룹($nodegroup)별 파드 재시작 횟수. 1회 이상이면 경고(빨강) 색상.",
       "gridPos": { "h": 7, "w": 18, "x": 6, "y": 20 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] }, "color": { "mode": "thresholds" } }, "overrides": [] },
       "options": { "orientation": "horizontal", "colorMode": "value", "graphMode": "area", "textMode": "value_and_name", "reduceOptions": { "calcs": ["lastNotNull"], "values": false } },
-      "targets": [ { "refId": "A", "expr": "sum by (pod) (kube_pod_container_status_restarts_total{namespace=\"wsc2026\"})", "legendFormat": "{{pod}}", "instant": true } ]
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "(sum by (namespace, pod) (kube_pod_container_status_restarts_total{namespace=~\"$namespace\"}))\nand on(namespace, pod) (kube_pod_info and on(node) kube_node_labels{label_eks_amazonaws_com_nodegroup=~\"$nodegroup\"})", "legendFormat": "{{pod}}", "instant": true } ]
     },
     { "id": 102, "title": "Application Pod", "type": "row", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 27 }, "panels": [] },
     {
       "id": 8, "title": "App Pod CPU", "type": "timeseries",
+      "description": "애플리케이션 파드별 CPU 사용률(limit 대비). 80% 이상 빨강 / 60~80% 노랑 / 60% 미만 초록.",
       "gridPos": { "h": 7, "w": 12, "x": 0, "y": 28 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "min": 0, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 0.6 }, { "color": "red", "value": 0.8 } ] }, "color": { "mode": "thresholds" } }, "overrides": [] },
-      "targets": [ { "refId": "A", "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"wsc2026\",pod=~\"wsc2026-book-deploy.*\",container!=\"\"}[5m])) / clamp_min(sum by (pod) (kube_pod_container_resource_limits{namespace=\"wsc2026\",pod=~\"wsc2026-book-deploy.*\",resource=\"cpu\"}), 0.001)", "legendFormat": "{{pod}}" } ]
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 0.6 }, { "color": "red", "value": 0.8 } ] }, "color": { "mode": "thresholds" }, "custom": { "thresholdsStyle": { "mode": "dashed" }, "lineWidth": 2, "fillOpacity": 5 } }, "overrides": [] },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"wsc2026\",pod=~\"wsc2026-book-deploy.*\",container!=\"\"}[5m])) / clamp_min(sum by (pod) (kube_pod_container_resource_limits{namespace=\"wsc2026\",pod=~\"wsc2026-book-deploy.*\",resource=\"cpu\"}), 0.001)", "legendFormat": "{{pod}}" } ]
     },
     {
       "id": 9, "title": "App Pod Memory", "type": "timeseries",
+      "description": "애플리케이션 파드별 메모리 사용량.",
       "gridPos": { "h": 7, "w": 12, "x": 12, "y": 28 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": { "defaults": { "unit": "bytes", "min": 0, "color": { "mode": "palette-classic" } }, "overrides": [] },
-      "targets": [ { "refId": "A", "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=\"wsc2026\",pod=~\"wsc2026-book-deploy.*\",container!=\"\"})", "legendFormat": "{{pod}}" } ]
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=\"wsc2026\",pod=~\"wsc2026-book-deploy.*\",container!=\"\"})", "legendFormat": "{{pod}}" } ]
     },
     {
       "id": 10, "title": "App Running", "type": "stat",
+      "description": "애플리케이션 파드 중 Running 상태 수.",
       "gridPos": { "h": 7, "w": 8, "x": 0, "y": 35 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] } }, "overrides": [] },
       "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "values": false } },
-      "targets": [ { "refId": "A", "expr": "sum(kube_pod_status_phase{namespace=\"wsc2026\",pod=~\"wsc2026-book-deploy.*\",phase=\"Running\"} == 1) or vector(0)" } ]
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum(kube_pod_status_phase{namespace=\"wsc2026\",pod=~\"wsc2026-book-deploy.*\",phase=\"Running\"} == 1) or vector(0)" } ]
     },
     {
       "id": 11, "title": "App Restarts", "type": "stat",
+      "description": "애플리케이션 파드 재시작 횟수. 1회 이상이면 경고(빨강) 색상.",
       "gridPos": { "h": 7, "w": 8, "x": 8, "y": 35 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] }, "color": { "mode": "thresholds" } }, "overrides": [] },
       "options": { "orientation": "horizontal", "colorMode": "value", "graphMode": "area", "textMode": "value_and_name", "reduceOptions": { "calcs": ["lastNotNull"], "values": false } },
-      "targets": [ { "refId": "A", "expr": "sum by (pod) (kube_pod_container_status_restarts_total{namespace=\"wsc2026\",pod=~\"wsc2026-book-deploy.*\"})", "legendFormat": "{{pod}}", "instant": true } ]
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum by (pod) (kube_pod_container_status_restarts_total{namespace=\"wsc2026\",pod=~\"wsc2026-book-deploy.*\"})", "legendFormat": "{{pod}}", "instant": true } ]
     },
     {
       "id": 12, "title": "App Pending", "type": "stat",
+      "description": "애플리케이션 파드 중 Pending 상태 수.",
       "gridPos": { "h": 7, "w": 8, "x": 16, "y": 35 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] }, "color": { "mode": "thresholds" } }, "overrides": [] },
-      "targets": [ { "refId": "A", "expr": "sum(kube_pod_status_phase{namespace=\"wsc2026\",pod=~\"wsc2026-book-deploy.*\",phase=\"Pending\"} == 1) or vector(0)", "instant": true } ]
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "values": false } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum(kube_pod_status_phase{namespace=\"wsc2026\",pod=~\"wsc2026-book-deploy.*\",phase=\"Pending\"} == 1) or vector(0)", "instant": true } ]
     },
     { "id": 103, "title": "Application Traffic", "type": "row", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 42 }, "panels": [] },
     {
       "id": 13, "title": "Request Count", "type": "timeseries",
+      "description": "CloudWatch Logs 기반 전체 애플리케이션 요청 수(health 제외).",
       "gridPos": { "h": 8, "w": 8, "x": 0, "y": 43 },
       "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
-      "targets": [ { "refId": "A", "queryMode": "Logs", "region": "ap-northeast-2", "logGroupNames": ["/wsc2026/app/log"], "expression": "filter @message not like /health/ | stats count(*) as requests by bin(1m)" } ]
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "bars", "fillOpacity": 60 } }, "overrides": [] },
+      "targets": [ { "refId": "A", "datasource": { "type": "cloudwatch", "uid": "cloudwatch" }, "queryMode": "Logs", "region": "ap-northeast-2", "logGroupNames": ["/wsc2026/app/log"], "expression": "filter @message not like /health/ | stats count(*) as requests by bin(1m)" } ]
     },
     {
       "id": 14, "title": "Response Time", "type": "timeseries",
+      "description": "CloudWatch Logs 기반 평균 응답 시간(health 제외).",
       "gridPos": { "h": 8, "w": 8, "x": 8, "y": 43 },
       "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
       "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
-      "targets": [ { "refId": "A", "queryMode": "Logs", "region": "ap-northeast-2", "logGroupNames": ["/wsc2026/app/log"], "expression": "parse @message /\"duration\":\"(?<d>[0-9.]+)(?<u>[a-zµ]+)\"/ | filter @message not like /health/ | fields (u=\"µs\")*d/1000000 + (u=\"ms\")*d/1000 + (u=\"s\")*d as sec | stats avg(sec) as avg_seconds by bin(1m)" } ]
+      "targets": [ { "refId": "A", "datasource": { "type": "cloudwatch", "uid": "cloudwatch" }, "queryMode": "Logs", "region": "ap-northeast-2", "logGroupNames": ["/wsc2026/app/log"], "expression": "parse @message /\"duration\":\"(?<d>[0-9.]+)(?<u>[a-zµ]+)\"/ | filter @message not like /health/ | fields (u=\"µs\")*d/1000000 + (u=\"ms\")*d/1000 + (u=\"s\")*d as sec | stats avg(sec) as avg_seconds by bin(1m)" } ]
     },
     {
-      "id": 15, "title": "Status Codes", "type": "timeseries",
+      "id": 15, "title": "Status Code", "type": "timeseries",
+      "description": "CloudWatch Logs 기반 상태 코드별 응답 수(health 제외).",
       "gridPos": { "h": 8, "w": 8, "x": 16, "y": 43 },
       "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
-      "targets": [ { "refId": "A", "queryMode": "Logs", "region": "ap-northeast-2", "logGroupNames": ["/wsc2026/app/log"], "expression": "parse @message /\"status\":\"(?<status>[0-9]+)\"/ | filter @message not like /health/ | fields concat(substr(status,0,1),\"XX\") as class | stats count(*) by class, bin(1m)" } ]
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "bars", "fillOpacity": 60 } }, "overrides": [] },
+      "targets": [ { "refId": "A", "datasource": { "type": "cloudwatch", "uid": "cloudwatch" }, "queryMode": "Logs", "region": "ap-northeast-2", "logGroupNames": ["/wsc2026/app/log"], "expression": "parse @message /\"status\":\"(?<status>[0-9]+)\"/ | filter @message not like /health/ | fields concat(substr(status,0,1),\"XX\") as class | stats count(*) by class, bin(1m)" } ]
     },
     {
       "id": 16, "title": "Application Logs", "type": "logs",
+      "description": "CloudWatch Logs(/wsc2026/app/log) 애플리케이션 액세스 로그. health 로그는 제외.",
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 51 },
       "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
-      "options": { "showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true },
-      "targets": [ { "refId": "A", "queryMode": "Logs", "region": "ap-northeast-2", "logGroupNames": ["/wsc2026/app/log"], "expression": "fields @timestamp, @message | filter @message not like /\\/health/ | sort @timestamp desc | limit 100" } ]
+      "options": { "showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true, "sortOrder": "Descending" },
+      "targets": [ { "refId": "A", "datasource": { "type": "cloudwatch", "uid": "cloudwatch" }, "queryMode": "Logs", "region": "ap-northeast-2", "logGroupNames": ["/wsc2026/app/log"], "expression": "fields @timestamp, @message | filter @message not like /\\/health/ | sort @timestamp desc | limit 100" } ]
     },
     { "id": 104, "title": "Alert", "type": "row", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 59 }, "panels": [] },
     {
       "id": 17, "title": "Active Alerts", "type": "alertlist",
+      "description": "Prometheus/Alertmanager 룰 기반 발화(Firing) 알림 목록.",
       "gridPos": { "h": 10, "w": 24, "x": 0, "y": 60 },
-      "options": { "viewMode": "list", "groupMode": "default", "maxItems": 20, "sortOrder": 3, "dashboardAlerts": false, "alertName": "", "alertInstanceLabelFilter": "", "datasource": "prometheus", "stateFilter": { "firing": true, "pending": false, "noData": false, "normal": false, "error": false } }
+      "options": { "viewMode": "list", "groupMode": "default", "maxItems": 20, "sortOrder": 3, "dashboardAlerts": false, "alertName": "", "alertInstanceLabelFilter": "", "datasource": "prometheus", "folder": "", "stateFilter": { "firing": true, "pending": false, "noData": false, "normal": false, "error": false } }
     }
   ]
 }

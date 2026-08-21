@@ -1,14 +1,17 @@
 # 2과제 (02) — Small Challenge (Workflow / Analytics / Cloud Event Handling / MSK)
 
 인천 제2과제 4개 요구사항을 **모듈별·리전별 Terraform**으로 구성한다. **과제지_v8 + 수정사항(질의답변)** 기준으로
-리소스 이름/런타임/포트/핸들러를 맞췄다. (module3는 과제지_v8의 CloudTrail 설계 기준 — §7 참고)
+리소스 이름/런타임/포트/핸들러를 맞췄다.
+
+> ⚠ **module3는 과제지_v8과 채점기준표_v8이 서로 모순된다.** 어느 쪽이 실제 채점에 쓰일지 확정되지 않아
+> **양쪽을 모두 구현**하고 apply 시 `spec` 변수로 선택하도록 했다. → **§1-1 참고 (필독)**
 
 | 모듈 | 내용 | 리전 | apply 위치 |
 |------|------|------|-----------|
 | `bastion` | 채점용 Bastion(전 리소스 접근) + `/opt/task2` 코드 번들 | (bastion VPC) | 로컬 |
 | `module1` | Workflow: S3 / Lambda / DynamoDB / Step Functions | ap-southeast-1 | 로컬 가능 |
 | `module2` | Analytics: VPC / EC2(app:5000) / ALB / Kinesis / Managed Flink | ap-northeast-2 | **Bastion** |
-| `module3` | Cloud Event Handling: EventBridge×4 / CloudTrail / Lambda×4 / SNS | eu-west-1 | 로컬/Bastion |
+| `module3` | Cloud Event Handling: EventBridge / CloudTrail / Lambda / SNS (+ AWS Config) | eu-west-1 | 로컬/Bastion |
 | `module4` | MSK(IAM) / Producer EC2 / Consumer Lambda×2 / DynamoDB / S3 / SNS | ap-northeast-1 | **Bastion** |
 
 > - `module1`(서버리스)·`module3`(순수 TF)은 Windows 로컬 `terraform apply` 가능.
@@ -34,7 +37,8 @@ terraform output -raw ssm_connect_command    # 접속 명령
 ```bash
 # 2) Bastion 접속 후 (aws ssm start-session --target <id> ...)
 until [ -f /opt/task2/READY ]; do sleep 5; done
-BIBUNHO=608 bash /opt/task2/deploy.sh
+BIBUNHO=608 bash /opt/task2/deploy.sh              # module3 기본 spec=rubric
+# BIBUNHO=608 SPEC=task bash /opt/task2/deploy.sh  # module3 를 과제지 기준으로
 ```
 `deploy.sh` 순서: module1(ap-southeast-1) → module2(ap-northeast-2) → module3(eu-west-1) → module4(ap-northeast-1).
 MSK/Flink 생성으로 **module2·4는 수십 분** 소요될 수 있다.
@@ -44,9 +48,46 @@ MSK/Flink 생성으로 **module2·4는 수십 분** 소요될 수 있다.
 cd <module 디렉터리>
 terraform init
 terraform apply -auto-approve            # module1, module4 는 -var="bibunho=608" 필요
+                                         # module3 는 -var="spec=task|rubric" (기본 rubric)
 ```
 
 ---
+
+## 1-1. module3 채점 기준 선택 (⚠ 필독)
+
+module3만 자료가 서로 모순된다.
+
+| 자료 | module3 요구사항 |
+|---|---|
+| **과제지_v8** + **배포파일 v8 `lambda.md`** | Lambda 4개(sg/role/terminate/type) + Rule 4개, AWS Config 없음 |
+| **채점기준표_v8** + **채점스크립트 `mark2-3.sh`** | `wsc2026-ec2-stop-remediation`·`wsc2026-tag-alert`, `wsc2026-ec2-stop-rule`, **AWS Config 2개 규칙**, SG 인바운드 **0건** |
+
+과제지·배포파일이 한 편, 채점기준표·채점스크립트가 다른 한 편이라 2:2다. 그래서 **둘 다 코드에 넣고 apply 시 고른다.**
+
+```bash
+cd module3
+terraform apply -var="spec=rubric"   # 채점기준표·채점스크립트 기준 (기본값)
+terraform apply -var="spec=task"     # 과제지·배포파일 기준
+```
+`deploy.sh`는 `SPEC=task|rubric` 환경변수를 받는다(기본 `rubric`).
+
+| 항목 | `spec=task` | `spec=rubric` |
+|---|---|---|
+| Lambda | sg / role / terminate / type — **4개** | 위 4개 + stop-remediation / tag-alert — **6개** |
+| EventBridge Rule | sg-change / role-change / ec2-terminate / ec2-type-change | 위 4개 + `wsc2026-ec2-stop-rule` / `wsc2026-tag-compliance-rule` / `wsc2026-event-guard-rule` |
+| AWS Config | 없음 | recorder + delivery channel + `wsc2026-sg-ssh-rule`·`wsc2026-required-tags-rule` |
+| SG `wsc2026-event-sg` 인바운드 | **tcp 80 0.0.0.0/0** (정적 웹) | **0건** (SSM 전용) |
+| `DisableApiStop` | off | **on** |
+| plan 리소스 수 | 34 | 57 |
+
+Lambda 코드는 `lambda/index.py` **하나**가 두 모드를 모두 처리하므로 모드를 바꿔도 코드 수정은 필요 없다.
+
+**rubric 모드의 설계 근거 두 가지**
+- `mark2-3.sh`는 `stop-instances` 후 **`sleep 30`** 뒤 `State=running`을 본다. 실제 stop→stopped→start→running은 60~90초라 사후 복구로는 창을 못 맞춘다. → `disable_api_stop=true`로 **중지 자체를 차단**하고, `wsc2026-ec2-stop-remediation`은 2차 방어로 유지.
+- SSH 주입 후 **인바운드 0건**을 확인하는데 CloudTrail→EventBridge 전달은 보통 수 분 걸린다. → `rate(1 minute)` guard가 **3초 간격**으로 인바운드를 회수한다(`index.py`의 `guard_security_group`).
+
+> ⚠ 두 모드는 SG 인바운드가 정반대(80 개방 ↔ 0건)라, 한쪽으로 apply하면 다른 쪽 기준에서는 그 항목이 오답이 된다. 자료가 확정되기 전에는 피할 수 없다.
+> 추천은 **`rubric`** — 실제 점수는 채점스크립트가 매기고, `mark2-3.sh`의 존재 자체가 강한 신호다.
 
 ## 2. 모듈별 리소스 & 채점 대응
 
@@ -72,17 +113,24 @@ terraform apply -auto-approve            # module1, module4 는 -var="bibunho=60
 
 ### module3 — Cloud Event Handling (eu-west-1) · 배점 7.5
 - VPC `event-vpc` 172.16.0.0/16 — `event-pub-a`(172.16.0.0/24, EC2 위치)/`event-pub-b`, IGW `event-igw`
-- EC2 `wsc2026-event-ec2` (t3.micro, event-pub-a) — **정적 웹 userdata**(httpd, `hostname`), **종료방지 ON**, 프로파일/역할 `wsc2026-event-ec2-role`
-- SG `wsc2026-event-sg` — 인바운드 **tcp 80 0.0.0.0/0**, 아웃바운드 전체(최소구성)
+- EC2 `wsc2026-event-ec2` (t3.micro, event-pub-a) — **정적 웹 userdata**(httpd, `hostname`), **종료방지 ON**, `rubric`에서는 **중지방지(DisableApiStop) ON**, 프로파일/역할 `wsc2026-event-ec2-role`
+- SG `wsc2026-event-sg` — 아웃바운드 전체. 인바운드는 **spec에 따라 다름**: `task`=tcp 80 0.0.0.0/0 / `rubric`=**0건**(§1-1)
 - SNS `wsc2026-event-alert`
 - CloudTrail `wsc2026-event-trail` (Management **Read/Write**), 로그 S3 **`wsc2026-event-s3`**
-- Lambda **4개** — 모두 **python3.12**, handler **`index.handler`**(단일 dispatcher, 소스 `lambda/index.py`), role `wsc2026-event-lambda-role`(+`iam:PassRole`)
+- Lambda — 모두 **python3.12**, handler **`index.handler`**(단일 dispatcher, 소스 `lambda/index.py`), role `wsc2026-event-lambda-role`(+`iam:PassRole`)
+  - **양쪽 공통 4개**
   - `wsc2026-sg-remediation` ← `wsc2026-sg-change-rule` (SG 인바운드 추가 → 회수)
   - `wsc2026-role-remediation` ← `wsc2026-role-change-rule` (IAM 프로파일 변경 → 원복)
   - `wsc2026-ec2-terminate-alert` ← `wsc2026-ec2-terminate-rule` (EC2 종료 감지 → 알림만, `ALERT_ONLY`)
   - `wsc2026-ec2-type-remediation` ← `wsc2026-ec2-type-change-rule` (타입 변경 → t3.micro 원복)
+  - **`spec=rubric` 추가 2개**
+    - `wsc2026-ec2-stop-remediation` ← `wsc2026-ec2-stop-rule` (EC2 중지 감지 → 재기동)
+    - `wsc2026-tag-alert` ← `wsc2026-tag-compliance-rule` (Config 필수태그 위반 → 알림)
   - 각 Lambda는 복구/알림 후 SNS 발행(로그에 `sns_publish` 마커)
-- 채점값(과제지_v8 기준): 3‑1 4 Lambda `python3.12`, trail `IsLogging=True`, S3 `wsc2026-event-s3` / 3‑2 4 rule ENABLED→대응 Lambda / 3‑3 hostname·tcp80·userdata·프로파일 `wsc2026-event-ec2-role` / 3‑4 위반 주입 후 SG·Role·Type 복구 + EC2 종료 시 알림 / 3‑5 각 Lambda 로그 `sns_publish`
+- `spec=rubric` 전용: AWS Config recorder(`AWS::EC2::Instance`,`AWS::EC2::SecurityGroup`) + `wsc2026-sg-ssh-rule`(INCOMING_SSH_DISABLED) + `wsc2026-required-tags-rule`(REQUIRED_TAGS, `Name`), 상시 guard `wsc2026-event-guard-rule`(rate 1 minute)
+- 채점 대응
+  - **과제지_v8**: 3‑1 4 Lambda `python3.12`, trail `IsLogging=True`, S3 `wsc2026-event-s3` / 3‑2 4 rule ENABLED→대응 Lambda / 3‑3 hostname·tcp80·userdata·프로파일 `wsc2026-event-ec2-role` / 3‑4 위반 주입 후 SG·Role·Type 복구 + EC2 종료 시 알림 / 3‑5 각 Lambda 로그 `sns_publish`
+  - **채점기준표_v8(`mark2-3.sh`)**: 3‑1 SNS + 4 Lambda(stop/terminate/sg/tag) `python3.12` / 3‑2 `wsc2026-ec2-stop-rule`·`wsc2026-ec2-terminate-rule` 타깃 / 3‑3 Config 2규칙 `ACTIVE` / 3‑4 EC2 `running` + SG 인바운드 `0` / 3‑5 required-tags NON_COMPLIANT `None`
 
 ### module4 — MSK (ap-northeast-1) · 배점 7.5
 - VPC `msk-vpc` 192.168.0.0/16 — pub-a/b(0/1.0/24), priv-a/b(10/11.0/24), NAT `msk-ngw`
@@ -104,7 +152,9 @@ terraform apply -auto-approve            # module1, module4 는 -var="bibunho=60
 - **공통**: `deploy.sh`로 4모듈 apply 완료 및 각 리소스 ACTIVE 확인. Bastion은 모든 리전 접근 가능해야 함.
 - **module1**: 채점 전 `processed/`·`error/`·DynamoDB를 **비우고**, 배포파일 `test.csv`를 `s3://wsc2026-student-score-bucket-608/input/`에 업로드(→워크플로 자동 실행).
 - **module2**: Flink Studio Notebook은 채점 시 **READY**(정지) 상태로 둔다(RUNNING이면 2‑4 불일치). SQL 2종은 콘솔에서 실행 확인.
-- **module3**: EC2 종료방지 ON, SG 인바운드 tcp80 유지. 위반 주입(3‑4)은 자동 복구되며 타입 복구(stop→start)는 시간이 걸리니 180초 내 확인. SNS 이메일 구독 시 Confirm.
+- **module3**: 먼저 **`spec`을 어느 기준으로 apply했는지 확인**(§1-1). SNS 이메일 구독 시 Confirm.
+  - `task`: EC2 종료방지 ON, SG 인바운드 tcp80 유지. 위반 주입(3‑4)은 자동 복구되며 타입 복구(stop→start)는 시간이 걸리니 180초 내 확인.
+  - `rubric`: SG 인바운드가 **0건**이어야 한다(추가 규칙이 남아있으면 guard가 1분 내 회수). Config 규칙 2개가 `ACTIVE`이고 required-tags NON_COMPLIANT가 없는지 확인.
 - **module4**: MSK ACTIVE 후 producer가 토픽 자동 생성·발행. SSM 접속 후 `sudo cat /var/log/module4-bootstrap.log`, `systemctl status producer-iam` 확인. 데이터는 DynamoDB/`alert/`에 쌓임.
 - **종료 전**: 진행 중인 테스트/부하 중지(과제지 유의사항).
 
@@ -115,6 +165,7 @@ terraform apply -auto-approve            # module1, module4 는 -var="bibunho=60
 ## 5. 검증 상태
 - `terraform init -backend=false && terraform validate`: **module1~4 전부 통과**.
 - Lambda 코드 문법(`py_compile`): module3 `index.py`, module4 `wsc2026.py` **통과**.
+- module3 `terraform plan`: `spec=task` **34 add**, `spec=rubric` **57 add** — 양쪽 모두 통과(계정 `640107381732`).
 - ⚠ 실제 4개 리전 apply·엔드투엔드 채점은 배포 후 직접 확인 필요(MSK/Flink 수 분, Flink SQL은 콘솔 수동).
 
 ## 6. 삭제 (destroy)
@@ -136,20 +187,21 @@ terraform destroy -auto-approve
 
 ---
 
-## 7. 채점 이름이 바뀌면 수정할 위치 (module3 = 과제지_v8 CloudTrail 설계)
+## 7. 채점 이름이 바뀌면 수정할 위치
 
-> module3는 **과제지_v8 + 배포파일 `lambda.md`** 기준으로 맞췄다.
-> (채점기준표_v8 PDF/채점스크립트는 AWS Config 설계로 과제지와 **모순**이라 채택하지 않음.)
+> module3는 과제지_v8/배포파일 설계와 채점기준표_v8/채점스크립트 설계를 **둘 다** 담고 `spec`으로 고른다(§1-1).
 > 채점 이름이 또 바뀌면 아래 위치의 **`name`/`bucket`/`tags.Name` 속성값만** 고치면 된다.
 > ⚠ terraform **리소스 라벨/`locals` 키**(예: `termination`, `termination_protection_change`)는 내부 식별자라 그대로 두고 **`name` 값만** 바꾼다(참조가 깨지지 않게).
 
 ### 7-1. module3 Lambda 이름 → `module3/main.tf`
 | 채점 이름 | 수정 위치 (main.tf) |
 |---|---|
-| `wsc2026-sg-remediation` | `locals.event_lambdas.sg.name` |
-| `wsc2026-role-remediation` | `locals.event_lambdas.role.name` |
-| `wsc2026-ec2-terminate-alert` | `locals.event_lambdas.termination.name` (내부 키 `termination` 유지) |
-| `wsc2026-ec2-type-remediation` | `locals.event_lambdas.type.name` |
+| `wsc2026-sg-remediation` | `locals.event_lambdas_common.sg.name` |
+| `wsc2026-role-remediation` | `locals.event_lambdas_common.role.name` |
+| `wsc2026-ec2-terminate-alert` | `locals.event_lambdas_common.termination.name` (내부 키 `termination` 유지) |
+| `wsc2026-ec2-type-remediation` | `locals.event_lambdas_common.type.name` |
+| `wsc2026-ec2-stop-remediation` (rubric) | `locals.event_lambdas_rubric.stop.name` |
+| `wsc2026-tag-alert` (rubric) | `locals.event_lambdas_rubric.tag.name` |
 | Runtime `python3.12` / handler `index.handler` | `resource "aws_lambda_function" "event"` 의 `runtime`/`handler` |
 | handler 파일명 `index.py` | `lambda/index.py` (handler가 `index.handler`이므로 **파일명 index.py 유지 필수**) |
 
@@ -160,8 +212,10 @@ terraform destroy -auto-approve
 | `wsc2026-role-change-rule` | `aws_cloudwatch_event_rule "role_change".name` | Associate/Replace/Disassociate IamInstanceProfile |
 | `wsc2026-ec2-terminate-rule` | `aws_cloudwatch_event_rule "termination_protection_change".name` (내부 라벨 유지) | EC2 State-change `terminated`/`shutting-down` |
 | `wsc2026-ec2-type-change-rule` | `aws_cloudwatch_event_rule "ec2_type_change".name` | ModifyInstanceAttribute + instanceType |
+| `wsc2026-ec2-stop-rule` (rubric) | `aws_cloudwatch_event_rule "ec2_stop".name` | EC2 State-change `stopping`/`stopped` |
+| `wsc2026-tag-compliance-rule` (rubric) | `aws_cloudwatch_event_rule "tag_compliance".name` | Config Rules Compliance Change |
 
-> Rule↔Lambda 연결(타깃)과 invoke 권한은 `locals.event_targets` + `aws_lambda_permission "events"`에서 위 라벨을 그대로 참조하므로, **`name` 값만** 바꾸면 자동으로 따라간다.
+> Rule↔Lambda 연결(타깃)과 invoke 권한은 `locals.event_targets_all` + `aws_lambda_permission "events"`에서 위 라벨을 그대로 참조하므로, **`name` 값만** 바꾸면 자동으로 따라간다.
 
 ### 7-3. module3 기타 리소스 이름 → `module3/main.tf`
 | 채점 이름 | 수정 위치 (main.tf) |
@@ -173,6 +227,8 @@ terraform destroy -auto-approve
 | SG `wsc2026-event-sg` | `aws_security_group "ec2".name` (+ `tags.Name`) |
 | Role/Profile `wsc2026-event-ec2-role` | `aws_iam_role "ec2".name` + `aws_iam_instance_profile "ec2".name` (동일해야 3‑3 통과) |
 | Lambda Role `wsc2026-event-lambda-role` | `aws_iam_role "lambda".name` |
+| Config 규칙 `wsc2026-sg-ssh-rule` (rubric) | `aws_config_config_rule "sg_ssh".name` |
+| Config 규칙 `wsc2026-required-tags-rule` (rubric) | `aws_config_config_rule "required_tags".name` (+ `index.py`의 `CONFIG_RULE_NAME` 환경변수, `tag_compliance` 규칙 패턴) |
 
 ### 7-4. module4 4‑5‑A (temperature) 관련
 | 항목 | 수정 위치 |

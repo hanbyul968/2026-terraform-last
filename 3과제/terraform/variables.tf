@@ -51,9 +51,30 @@ variable "node_max_pods" {
 }
 
 
+# 컴퓨팅 노드 인스턴스 타입. 관리형 노드그룹과 Karpenter가 같은 값을 쓴다.
+# 문제지가 t3.medium 을 강제하지만, 바뀌면 여기 한 곳만 고치면 전부 따라간다.
+# 튜닝 툴은 노드 CPU/메모리를 클러스터에서 실측하므로 사이징이 자동으로 맞춰지고,
+# 비용 축은 기준 타입 대비 상대 비용(t3.large = t3.medium x2)으로 환산한다.
 variable "node_instance_type" {
   type    = string
   default = "t3.medium"
+}
+
+# Karpenter가 고를 수 있는 타입 목록. 비우면 node_instance_type 하나만 쓴다.
+# 여러 개를 주면 Karpenter가 그 중에서 고르지만, 비용 채점이 타입별 단가로 계산되므로
+# 섞어 쓰면 예측이 어려워진다. 특별한 이유가 없으면 비워 둔다.
+variable "karpenter_instance_types" {
+  type        = list(string)
+  default     = []
+  description = "Karpenter NodePool이 허용할 인스턴스 타입. 비우면 [node_instance_type]."
+}
+
+# Karpenter가 띄울 수 있는 총 vCPU 상한. 비용 폭주 방지선이다.
+# 인스턴스 타입을 키우면 같은 vCPU로 뜨는 노드 수가 줄어드니 함께 검토한다.
+variable "karpenter_cpu_limit" {
+  type        = number
+  default     = 16
+  description = "Karpenter NodePool의 총 vCPU 상한 (노드 수 x 타입 vCPU)."
 }
 
 # 관리형 NG 를 2 노드로 고정한다. 1 로 두면 안 되는 이유:

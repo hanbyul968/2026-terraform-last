@@ -11,6 +11,7 @@ import csv
 import json
 import math
 import os
+import re
 import subprocess
 from dataclasses import asdict, dataclass, field
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -18,6 +19,13 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import rubric
 
 META_CSV = {"nodes", "nodecpu", "podcpu", "loadplan", "loadwindows"}
+# 비용 채점의 기준 인스턴스 타입. 문제지가 t3.medium 을 강제하므로 기본값이 그것이다.
+# 대회날 타입이 바뀌면 TUNE_NODE_REFERENCE 로 기준을 바꾸거나, 아래 node_cost_weight 가
+# 자동으로 상대 비용을 계산한다.
+NODE_COST_REFERENCE = os.environ.get("TUNE_NODE_REFERENCE", "t3.medium")
+# 같은 패밀리 안에서 AWS 온디맨드 가격은 이 '크기 단위'에 정비례한다(large = medium x 2).
+# 달러 가격표를 들고 있지 않아도 상대 비용이 정확하고, 가격이 개정돼도 틀리지 않는다.
+_SIZE_UNITS = {"nano": .25, "micro": .5, "small": 1., "medium": 2., "large": 4.}
 REQUEST_UNIT_M = 25
 REQUEST_MIN_M = 50
 TARGET_MIN = 25
@@ -38,6 +46,40 @@ REQUEST_USAGE_FLOOR_RATIO = 0.5
 # 바뀌어도 유휴 파드가 baseline 노드에 넉넉히 들어가고, 부족분은 HPA replica가 채운다.
 # 계산된 필요 request에 이 계수를 곱해 낮춘다(0.7 = 30% 낮게).
 REQUEST_HEADROOM = 0.7
+
+
+def instance_size_units(instance_type):
+    """인스턴스 타입의 상대 크기 단위. 모르는 타입이면 0."""
+    if not instance_type or "." not in str(instance_type):
+        return 0.0
+    size = str(instance_type).rsplit(".", 1)[1].strip().lower()
+    if size in _SIZE_UNITS:
+        return _SIZE_UNITS[size]
+    if size == "xlarge":
+        return 8.0
+    match = re.match(r"^(\d+)xlarge$", size)
+    return float(match.group(1)) * 8.0 if match else 0.0
+
+
+def node_cost_weight(instance_type, reference=None):
+    """기준 인스턴스 대비 노드 1대의 상대 비용.
+
+    비용 채점은 '대수'가 아니라 인스턴스 **비용**의 비율이다. t3.large 2대는 t3.medium
+    2대와 대수가 같지만 비용은 2배이므로, 타입이 바뀌면 대수를 그대로 세면 안 된다.
+    같은 패밀리면 크기 단위 비로 정확하고, 패밀리가 다르면 근사다(패밀리별 단가 차이는
+    보통 10~20%). 정확한 값을 알면 TUNE_NODE_COST_WEIGHT 로 직접 준다.
+    """
+    override = os.environ.get("TUNE_NODE_COST_WEIGHT")
+    if override:
+        try:
+            return max(float(override), 0.0)
+        except ValueError:
+            pass
+    mine = instance_size_units(instance_type)
+    base = instance_size_units(reference or NODE_COST_REFERENCE)
+    if not mine or not base:
+        return 1.0
+    return mine / base
 
 
 def clamp(value, low, high):
@@ -260,6 +302,15 @@ class ClusterSnapshot:
     baseline_node_count: int = 2
     # AZ 수. topology spread가 파드를 AZ에 흩어 노드 패킹이 AZ별로 일어난다.
     zone_count: int = 2
+    # 노드 인스턴스 타입과 기준 타입 대비 상대 비용. 타입이 바뀌어도 비용 ratio가
+    # 같은 뜻을 유지하게 한다(대수가 아니라 비용의 비율로 채점되므로).
+    instance_type: str = ""
+    node_cost_weight: float = 1.0
+
+    def cost_units(self, nodes=None):
+        """노드 수를 '기준 인스턴스 몇 대분'으로 환산한다. 비용 축의 유일한 단위다."""
+        count = self.node_average if nodes is None else float(nodes)
+        return float(count) * (self.node_cost_weight or 1.0)
 
     @property
     def daemonset_per_node_m(self):
@@ -359,7 +410,7 @@ class TuningSnapshot:
         return rubric.score(
             {name: app.performance for name, app in self.apps.items()},
             {name: app.availability for name, app in self.apps.items()},
-            self.cluster.node_average,
+            self.cluster.cost_units(),
             self.cluster.baseline_nodes,
             self.availability_gate,
         )
@@ -406,6 +457,12 @@ def _live_json(namespace="app"):
     hpas = json.loads(run(["kubectl", "-n", namespace, "get", "hpa", "-o", "json"]) or "{}")
     nodes = json.loads(run(["kubectl", "get", "nodes", "-o", "json"]) or "{}")
     return deployments, hpas, nodes
+
+
+def _dominant_type(types):
+    """클러스터에서 가장 많은 인스턴스 타입. 혼합이면 다수 타입을 대표로 쓴다."""
+    real = [t for t in types if t and t != "?"]
+    return max(set(real), key=real.count) if real else ""
 
 
 def live_state(namespace="app"):
@@ -461,6 +518,8 @@ def live_state(namespace="app"):
                                "baseline_node_count": baseline_ng or 2,
                                "zone_count": len(zones) or 2,
                                "node_types": sorted(types),
+                               "instance_type": _dominant_type(types),
+                               "node_cost_weight": node_cost_weight(_dominant_type(types)),
                                "system_reserved_m": _system_reserved_m(namespace)}
     except Exception:
         return {}
@@ -624,6 +683,8 @@ def _cluster_csv(outdir, windows, baseline_nodes, live):
         node_mem_alloc_mi=int(cluster.get("node_mem_alloc_mi") or 0),
         node_cpu_p95=int(nearest_rank(node_cpu, .95) or 0),
         node_types=tuple(cluster.get("node_types") or ()),
+        instance_type=str(cluster.get("instance_type") or ""),
+        node_cost_weight=float(cluster.get("node_cost_weight") or 1.0),
         system_reserved_m=int(cluster.get("system_reserved_m") or 0),
         baseline_node_count=int(cluster.get("baseline_node_count") or 2),
         zone_count=int(cluster.get("zone_count") or 2),
@@ -813,7 +874,8 @@ def _predicted_score(snapshot: TuningSnapshot, nodes: int, node_average=None):
         perf, avail = app.performance_at(slowdown)
         perfs[name], avails[name] = perf, avail
     return (rubric.score(perfs, avails,
-                         float(node_average if node_average is not None else nodes),
+                         snapshot.cluster.cost_units(
+                             node_average if node_average is not None else nodes),
                          snapshot.cluster.baseline_nodes, snapshot.availability_gate),
             round(max(slowdown, 0.0), 3))
 
@@ -823,7 +885,8 @@ def _robust_total(snapshot: TuningSnapshot, predicted: rubric.RubricScore,
     """B를 모를 때의 총점. 품질 24점은 B와 무관하고, 비용 12점만 B 그리드 기대값으로 잡는다."""
     quality = predicted.availability_points + predicted.performance_points
     return quality + rubric.expected_cost_points(
-        node_average, snapshot.cost_baselines, predicted.perf_gate_pass)
+        snapshot.cluster.cost_units(node_average), snapshot.cost_baselines,
+        predicted.perf_gate_pass)
 
 
 def quality_at_nodes(snapshot: TuningSnapshot, nodes: float):
@@ -857,16 +920,19 @@ def score_frontier(snapshot: TuningSnapshot, max_nodes=None, baselines=None):
     if max_nodes is None:
         # 위로는 '공급이 수요를 덮는 지점'과 현재 운영 규모를, 아래로는 하한 절벽(0.5B)을
         # 모두 포함해야 곡선의 양쪽 끝이 잘리지 않는다.
+        # 하한 절벽(ratio 0.5)은 '기준 인스턴스 대수' 단위라, 노드 수로 환산해서 훑어야 한다.
+        weight = snapshot.cluster.node_cost_weight or 1.0
         max_nodes = max(int(math.ceil(demand / alloc)) + 1,
                         int(math.ceil(snapshot.cluster.node_average)) + 1,
-                        int(math.ceil(0.5 * max(grid))) + 1)
+                        int(math.ceil(0.5 * max(grid) / weight)) + 1)
     ceiling = int(clamp(max_nodes, 2, 40))
     rows = []
     for nodes in range(1, ceiling + 1):
         perfs, avails, slowdown = quality_at_nodes(snapshot, nodes)
         quality = rubric.quality_points(perfs, avails)
         gate = rubric.perf_gate_ok(perfs)
-        cost = {f"{b:g}": rubric.cost_points_for_nodes(nodes, b, gate) for b in grid}
+        units = snapshot.cluster.cost_units(nodes)
+        cost = {f"{b:g}": rubric.cost_points_for_nodes(units, b, gate) for b in grid}
         rows.append({
             "nodes": nodes,
             "quality": round(quality, 2),
@@ -1420,7 +1486,7 @@ def generate_candidates(snapshot: TuningSnapshot, rejected=None, namespace="app"
                                     reason, 0.0, namespace)
                 if c and c.key() not in rejected:
                     candidates.append(c)
-        if snapshot.cluster.node_average / snapshot.cluster.baseline_nodes > 1.0 \
+        if snapshot.cluster.cost_units() / snapshot.cluster.baseline_nodes > 1.0 \
                 and bottleneck not in ("db-rds", "non-scalable") and current["target"] < TARGET_MAX:
             floor = rubric.band_floor(app.performance)
             margin = app.performance - floor

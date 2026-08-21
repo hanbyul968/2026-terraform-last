@@ -1,9 +1,14 @@
 # Karpenter — fast node autoscaling for traffic bursts.
 # Managed node group stays as the stable baseline (runs Karpenter itself);
-# Karpenter provisions extra t3.medium capacity on demand and consolidates
+# Karpenter provisions extra capacity on demand (same instance type as the
+# node group unless karpenter_instance_types overrides it) and consolidates
 # it away when idle (cost ratio scoring).
 
 locals {
+  # Karpenter가 고를 타입. 지정이 없으면 관리형 NG와 같은 타입을 쓴다 —
+  # 두 곳이 갈리면 노드마다 용량이 달라져 bin-packing 예측과 비용 환산이 모두 틀어진다.
+  karpenter_instance_types = length(var.karpenter_instance_types) > 0 ? var.karpenter_instance_types : [var.node_instance_type]
+
   # k8s 1.35 requires Karpenter >= 1.9 (compatibility matrix). 1.13.x covers 1.35/1.36.
   karpenter_version = "1.13.0"
 }
@@ -213,7 +218,7 @@ resource "kubectl_manifest" "karpenter_nodepool" {
             {
               key      = "node.kubernetes.io/instance-type"
               operator = "In"
-              values   = ["t3.medium"]
+              values   = local.karpenter_instance_types
             },
             {
               key      = "karpenter.sh/capacity-type"
@@ -224,7 +229,7 @@ resource "kubectl_manifest" "karpenter_nodepool" {
           expireAfter = "720h"
         }
       }
-      limits = { cpu = "16" }
+      limits = { cpu = tostring(var.karpenter_cpu_limit) }
       disruption = {
         consolidationPolicy = "WhenEmptyOrUnderutilized"
         # 30s 는 너무 공격적이었다. 실측: 부하가 잠깐 내려가면 파드가 올라가 있는 노드까지

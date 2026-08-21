@@ -238,7 +238,7 @@ resource "aws_eks_addon" "vpc_cni" {
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
 
-  # Prefix delegation: t3.medium pod cap 17 -> 110
+  # Prefix delegation: ENI 기반 Pod 상한(t3.medium 은 17)을 node_max_pods 로 해제
   configuration_values = jsonencode({
     env = {
       ENABLE_PREFIX_DELEGATION = "true"

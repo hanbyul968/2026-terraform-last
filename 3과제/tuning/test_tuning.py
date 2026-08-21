@@ -651,5 +651,61 @@ class CostBaselineUncertaintyTests(unittest.TestCase):
         self.assertEqual(result["target_nodes"], result["frontier"]["recommended_nodes"])
 
 
+class InstanceTypeFlexibilityTests(unittest.TestCase):
+    """인스턴스 타입이 바뀌어도 사이징과 비용 축이 따라가야 한다."""
+
+    def test_size_units_cover_every_aws_size_suffix(self):
+        self.assertEqual(engine.instance_size_units("t3.medium"), 2.0)
+        self.assertEqual(engine.instance_size_units("t3.large"), 4.0)
+        self.assertEqual(engine.instance_size_units("c6i.xlarge"), 8.0)
+        self.assertEqual(engine.instance_size_units("m5.2xlarge"), 16.0)
+        self.assertEqual(engine.instance_size_units("m5.24xlarge"), 192.0)
+        self.assertEqual(engine.instance_size_units("t3.nano"), .25)
+        # 모르는 형식은 0 -> 가중치 1.0(현상 유지)로 떨어진다.
+        self.assertEqual(engine.instance_size_units("weird"), 0.0)
+        self.assertEqual(engine.node_cost_weight("weird"), 1.0)
+
+    def test_cost_weight_is_relative_to_reference_type(self):
+        """비용은 '대수'가 아니라 인스턴스 비용의 비율이다. large 1대 = medium 2대분."""
+        self.assertEqual(engine.node_cost_weight("t3.medium"), 1.0)
+        self.assertEqual(engine.node_cost_weight("t3.large"), 2.0)
+        self.assertEqual(engine.node_cost_weight("t3.small"), .5)
+        self.assertEqual(engine.node_cost_weight("m5.xlarge", "m5.large"), 2.0)
+
+    def test_cost_units_convert_node_count_to_reference_instances(self):
+        cluster = engine.ClusterSnapshot(node_average=3, instance_type="t3.large",
+                                         node_cost_weight=2.0)
+        self.assertEqual(cluster.cost_units(), 6.0)
+        self.assertEqual(cluster.cost_units(2), 4.0)
+        # 가중치가 없으면 대수가 곧 단위다(기존 동작).
+        self.assertEqual(engine.ClusterSnapshot(node_average=3).cost_units(), 3.0)
+
+    def test_bigger_instances_score_as_more_expensive_at_same_node_count(self):
+        """같은 대수라도 큰 타입이면 비용 점수가 낮아야 한다."""
+        def snap(itype, weight):
+            app = engine.AppSnapshot(
+                name="a", slo_seconds=1.0, samples=2000, window_seconds=120.0,
+                availability=99.0, performance=90.0, request_m=500, target=70,
+                min_replicas=2, max_replicas=8, replicas=4, pods_p90=4, pods_max=4,
+                per_pod_p90=300, per_pod_p95=400, total_cpu_p90=1200, total_cpu_p95=1400,
+                cpu_samples=90, success_ratio=1.0, latencies=tuple([.30] * 300))
+            return engine.TuningSnapshot({"a": app}, engine.ClusterSnapshot(
+                baseline_nodes=2, node_average=4, node_count=4, node_alloc_m=1930,
+                cluster_cpu_p95_m=1400, system_reserved_m=400,
+                instance_type=itype, node_cost_weight=weight))
+        medium = snap("t3.medium", 1.0).score()
+        large = snap("t3.large", 2.0).score()
+        self.assertEqual(medium.cost_ratio * 2, large.cost_ratio)
+        self.assertGreater(medium.cost_points, large.cost_points)
+
+    def test_node_capacity_comes_from_live_cluster_not_constants(self):
+        """노드 CPU/메모리/AZ는 실측값이라 타입이 바뀌어도 사이징이 따라간다."""
+        small = engine.ClusterSnapshot(node_alloc_m=940, node_count=2, system_reserved_m=300)
+        big = engine.ClusterSnapshot(node_alloc_m=7810, node_count=2, system_reserved_m=300)
+        self.assertLess(small.usable_cpu_per_node_m, big.usable_cpu_per_node_m)
+        # 노드당 시스템 예약은 총합/노드수로 나눠 쓰므로 노드가 늘어도 부풀지 않는다.
+        self.assertEqual(small.daemonset_per_node_m, 150)
+
+
 if __name__ == "__main__":
     unittest.main()

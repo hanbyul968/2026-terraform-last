@@ -189,10 +189,36 @@ kubectl -n app rollout status deploy/stress
 
 ---
 
-## 4. API/스펙 변경 대응
+## 4. 무엇을 바꾸려면 어디를
 
-대회날 API가 바뀌는 시나리오별 대응. **대부분 변수만 바꾸면 되고**, 연쇄 수정이 필요한 것은
-아래 표에 파일까지 적어뒀다.
+바꿀 것 → 고칠 파일 한눈에. **대부분 `variables.tf`(또는 `terraform.tfvars`) 한 줄이면 되고**,
+연쇄 수정이 필요한 것만 파일을 여러 개 적었다.
+
+| 바꾸고 싶은 것 | 고칠 곳 | 비고 |
+|---|---|---|
+| **인스턴스 타입** | `variables.tf` → `node_instance_type` | NG와 Karpenter가 같은 값을 쓴다. 튜닝 툴은 노드 용량을 실측하므로 자동 추종 |
+| Karpenter 허용 타입 | `variables.tf` → `karpenter_instance_types` | 비우면 `node_instance_type` 하나. 섞으면 비용 예측이 어려워진다 |
+| Karpenter 총 vCPU 상한 | `variables.tf` → `karpenter_cpu_limit` | 비용 폭주 방지선. 타입을 키우면 함께 검토 |
+| 기본 노드 대수 | `variables.tf` → `node_desired_size` / `node_min_size` / `node_max_size` | 셋을 같게 둔다. 낮추면 파드 몰림이 재발 (변수 주석 참고) |
+| Karpenter 회수 속도 | `karpenter.tf` → `consolidateAfter`, `budgets` | 짧으면 재프로비저닝 중 `Insufficient cpu`, 길면 평균 노드↑ |
+| **API prefix** `/v1`→`/v2` | `variables.tf` → `api_prefix` | ALB 규칙·403 판정·WAF scope·CloudFront 동작이 전부 따라옴 (§4-1) |
+| 경로가 앱 이름과 불일치 | `variables.tf` → `api_paths_override` | 예: `["/v2/member","/v1/product"]` |
+| 헬스체크 경로 / 컨테이너 포트 | `variables.tf` → `healthcheck_path` / `container_port` | probe·TG·SG·리스너 규칙 공용 |
+| 이미지 경로 `/images` | `variables.tf` → `images_prefix` | CloudFront 캐시 동작 + URI rewrite 함수 |
+| **앱 추가/이름 변경** | `ecr.tf` + `build.tf` + `alb.tf` + `k8s_apps.tf` | 4곳 전부 (§4-2) |
+| 앱 환경변수 추가 | `k8s_base.tf` (Secret/ConfigMap) | 컨테이너는 `env_from`으로 통째 주입 (§4-3) |
+| DB 스키마/덤프 | `seed.tf`, `k8s_base.tf` 의 db-init Job | §4-4 |
+| **CPU/메모리 request, HPA** | `k8s_apps.tf` → `resources.requests`, HPA `min/max/average_utilization` | ⚠ 운영 중에는 여기 말고 `tuning/optimize.ps1`이 라이브로 바꾼다 |
+| WAF 차단 패턴 | `terraform.tfvars` → `waf_blocked_*` | `waf.tf` 수정 불필요. 리스트 변수는 **덮어쓰기** (§6) |
+| RDS 파라미터 | `rds.tf` → `aws_db_parameter_group.mysql8` | 인스턴스 클래스는 문제지가 고정 |
+| 리전 / EKS 버전 | `variables.tf` → `region` + `azs` / `eks_version` | |
+| 버킷 이름 충돌 | `-var bucket_prefix=...` | 전역 고유해야 함 |
+
+> ⚠ **부하·채점 트래픽 중에는 `terraform apply` 금지.** 파드 템플릿이 바뀌면 롤아웃이 일어나고
+> 롤아웃 자체가 504를 만든다. 튜닝이 적용한 라이브 값도 덮인다.
+> 부하 측정·튜닝 쪽 값은 [`../tuning/README.md`](../tuning/README.md) 의 `config.ps1` 표를 본다.
+
+### API/스펙 변경 시나리오별 상세
 
 ### 4-1. 변수만 바꾸면 되는 것
 
@@ -205,7 +231,8 @@ kubectl -n app rollout status deploy/stress
 | 헬스체크 경로                               | `healthcheck_path = "/healthz"`                                  | ALB TG 헬스체크 + 리스너 규칙 + k8s probe 6곳                                        |
 | 컨테이너 포트                               | `container_port = 9090`                                          | Deployment/probe/Service/ALB TG/SG                                                   |
 | 이미지 경로`/images`                      | `images_prefix = "/static"`                                      | CloudFront 캐시 동작 + URI rewrite 함수                                              |
-| 노드 타입/수, EKS 버전                      | `node_instance_type`, `node_*_size`, `eks_version`           |                                                                                      |
+| 노드 타입                                   | `node_instance_type`(+`karpenter_instance_types`)               | 관리형 NG + Karpenter NodePool. 용량 실측이라 튜닝 툴도 자동 추종                     |
+| 노드 수, EKS 버전                           | `node_*_size`, `karpenter_cpu_limit`, `eks_version`           |                                                                                      |
 | 리전                                        | `region` + `azs`                                               |                                                                                      |
 
 ```powershell

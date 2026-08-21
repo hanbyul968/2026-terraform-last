@@ -86,12 +86,14 @@ $APIS = @(
 if (-not $AVAIL_GATE)   { $AVAIL_GATE = 99 }
 # 노드 1대(평균) 초과당 비용 패널티 점수.
 if (-not $COST_PENALTY) { $COST_PENALTY = 6 }
-# 비용 패널티 기준선(노드 수). 이 대수까지는 패널티 0, 초과분에만 부과한다.
-# terraform 의 node_desired_size 와 맞춘다 (현재 1). 안 맞으면 autotune 이
-# 엉뚱한 조합을 우승으로 뽑는다.
-# terraform node_desired_size 와 반드시 같아야 한다(현재 2). 채점기준의 비용도
-# '평균 EC2 대수 ÷ 기준 2대' 로 계산되므로, 이 값이 틀리면 autotune 이 엉뚱한 조합을
-# 우승으로 뽑고 비용 비율도 잘못 보고된다.
+# 비용 ratio 분모의 점 추정값. 단위는 '노드 대수'가 아니라 **기준 인스턴스 대수**다
+# (TUNE_NODE_REFERENCE, 기본 t3.medium). 인스턴스 타입을 키우면 엔진이 노드 수에
+# 상대 비용을 곱해 이 단위로 환산하므로, 타입을 바꿔도 이 값은 그대로 둔다.
+#
+# 실제 분모는 비공개다. score.py / advise.py 는 이 점 추정값 하나로 보고하지만,
+# optimize.ps1 의 프론티어는 -CostBaselines 그리드(기본 2,3,4) 전체에서 평가해
+# 어떤 분모여도 손해가 가장 작은 운영점을 고른다. 즉 이 값이 조금 틀려도
+# 튜닝 결정 자체는 흔들리지 않는다 — 리포트 숫자만 그 가정 위에서 읽힌다.
 if (-not $COST_BASELINE_NODES) { $COST_BASELINE_NODES = 2 }
 # 쿠버네티스 네임스페이스.
 if (-not $NS) { $NS = 'app' }

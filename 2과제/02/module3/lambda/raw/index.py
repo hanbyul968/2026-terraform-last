@@ -1,7 +1,15 @@
+"""wsc2026-sensor-consumer (MSK raw topic consumer).
+
+배포파일 lambda.md 기준: Runtime python3.14 / Handler index.handler
+  - 정상 데이터(NORMAL) → DynamoDB(wsc2026-sensor-data) 저장
+  - 이상 데이터(ALERT)   → wsc2026-sensor-alert 토픽으로 alert_reason 추가 후 전송
+"""
+
 import base64
 import json
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import boto3
@@ -16,6 +24,8 @@ DDB_TABLE = os.environ["DDB_TABLE"]
 ALERT_TOPIC = os.environ["ALERT_TOPIC"]
 BOOTSTRAP_SERVER = os.environ["BOOTSTRAP_SERVER"]
 REGION = os.environ.get("AWS_REGION", "ap-northeast-1")
+
+KST = timezone(timedelta(hours=9))
 
 dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table(DDB_TABLE)
@@ -47,6 +57,25 @@ def _records(event):
             yield json.loads(base64.b64decode(message["value"]).decode("utf-8"))
 
 
+def kst_timestamp(value):
+    """timestamp 를 ISO 8601 KST(YYYY-MM-DDTHH:mm:ss+09:00) 로 정규화한다.
+
+    채점 3-6 은 DynamoDB 의 timestamp 가 반드시 +09:00 오프셋 형식이어야 정답으로 인정한다.
+    producer 가 UTC(Z) 나 오프셋 없는 값을 보내도 여기서 KST 로 변환해 저장한다.
+    """
+    text = (str(value) if value is not None else "").strip()
+    if text:
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            parsed = None
+        if parsed is not None:
+            if parsed.tzinfo is None:  # 오프셋이 없으면 KST 로 간주
+                parsed = parsed.replace(tzinfo=KST)
+            return parsed.astimezone(KST).isoformat(timespec="seconds")
+    return datetime.now(KST).isoformat(timespec="seconds")
+
+
 def _alert_reason(temperature, humidity):
     if temperature > 80:
         return f"Temperature exceeded threshold: {temperature}°C"
@@ -59,7 +88,7 @@ def _alert_reason(temperature, humidity):
     return None
 
 
-def consumer_handler(event, context):
+def handler(event, context):
     records = list(_records(event))
     logger.info("Processing batch: %d messages", len(records))
     alert_producer = None
@@ -70,6 +99,7 @@ def consumer_handler(event, context):
         temperature = float(record["temperature"])
         humidity = float(record["humidity"])
         reason = _alert_reason(temperature, humidity)
+        record["timestamp"] = kst_timestamp(record.get("timestamp"))
 
         if reason:
             alert_record = dict(record)
@@ -88,10 +118,11 @@ def consumer_handler(event, context):
             continue
 
         item = dict(record)
-        # 채점(4-5-A)은 temperature.S(String)로 조회하므로 문자열로 저장한다.
-        # (Decimal 로 저장하면 DynamoDB 타입이 N 이 되어 temperature.S 가 null 로 조회됨)
+        # 과제지 DynamoDB Attribute 표 + 채점 3-5 기준의 타입을 그대로 맞춘다.
+        #   temperature : String(S) — 채점이 temperature.S 로 조회
+        #   humidity    : Number(N)
         item["temperature"] = str(record["temperature"])
-        item["humidity"] = str(record["humidity"])
+        item["humidity"] = Decimal(str(record["humidity"]))
         item["status"] = "NORMAL"
         table.put_item(Item=item)
         normal_count += 1
@@ -106,3 +137,7 @@ def consumer_handler(event, context):
         alert_producer.flush()
 
     return {"processed": len(records), "normal": normal_count, "alerts": alert_count}
+
+
+# 이전 배포(handler=wsc2026.consumer_handler)와의 호환용 별칭
+consumer_handler = handler

@@ -1,7 +1,7 @@
 #!/bin/bash
-# vf module4 Go producer bootstrap (MSK IAM)
+# module3(MSK) sensor producer bootstrap (MSK IAM 인증)
 set -euxo pipefail
-exec > /var/log/module4-bootstrap.log 2>&1
+exec > /var/log/module3-bootstrap.log 2>&1
 
 REGION="${region}"
 MSK_ARN="${msk_arn}"
@@ -194,4 +194,4 @@ systemctl daemon-reload
 systemctl disable --now producer 2>/dev/null || true
 systemctl enable --now producer-iam
 systemctl is-active producer-iam
-echo "MODULE4 VF PRODUCER (IAM) READY"
+echo "MODULE3 MSK PRODUCER (IAM) READY"

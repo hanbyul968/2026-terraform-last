@@ -12,7 +12,7 @@
 ├── README.md
 ├── 1과제/                # EKS/컨테이너 중심 (단일 root + bastion)
 │   ├── 02/  ├── 03/  ├── 06/  └── 07/
-├── 2과제/                # 멀티모듈(module1~4, 리전·state 분리)
+├── 2과제/                # 멀티모듈(리전·state 분리). 02 는 module1~3(Cloud Event Handling 삭제 반영)
 │   ├── 02/  ├── 07/  └── 08/
 ├── 3과제/                # System Operation (별도 repo: hnmly/2026-0621-jaemu-task3)
 ├── 솔루션/               # AWS 콘솔 클릭 솔루션 가이드
@@ -44,9 +44,21 @@ aws configure          # Access Key / Secret / region ap-northeast-2 / json
 aws sts get-caller-identity
 
 cd C:\Users\competitor
-git clone https://github.com/hnmly/2026-terraform.git
-cd 2026-terraform
+git clone https://github.com/hanbyul968/2026-terraform-last.git
+cd 2026-terraform-last
 ```
+
+> 🔓 **자격 증명 없이 clone**: 이 저장소는 **Public** 이고 Git LFS·서브모듈을 쓰지 않으므로
+> 위 **HTTPS** 주소는 GitHub 로그인/토큰/SSH 키 없이 그대로 clone 된다.
+>
+> `git@github.com:...` (SSH) 주소를 쓰면 SSH 키가 없는 새 PC 에서
+> `git@github.com: Permission denied (publickey). fatal: Could not read from remote repository.` 가 발생한다.
+> **반드시 `https://` 주소를 사용**하고, 이미 SSH 로 설정된 clone 이면 remote 를 바꾼다.
+> ```powershell
+> git remote set-url origin https://github.com/hanbyul968/2026-terraform-last.git
+> git remote -v      # origin https://github.com/... 확인
+> ```
+> 읽기 전용이면 인증이 필요 없고, **push 할 때만** GitHub 계정(브라우저 로그인 또는 PAT)이 필요하다.
 
 > ⚠️ **이 대회 계정엔 default VPC 가 없습니다.** default VPC 를 쓰는 bastion 구성은 `Error: no matching EC2 VPC found` 로 실패하므로,
 > 해당 bastion 의 `data "aws_vpc" "default"` / `data "aws_subnets" "default"` 를 전용 VPC(예: `10.250.0.0/16` + public subnet + IGW + route)로 교체해야 합니다. (아래 ⚠️ 표시 폴더)
@@ -95,23 +107,25 @@ bash /opt/task1/run.sh        # docker build/push + EKS + helm (+ EKS private �
 
 ---
 
-## 2과제 Apply (멀티모듈 module1~4)
+## 2과제 Apply (멀티모듈)
 
 | 폴더 | 원본 | 1단계(로컬) | 접속 | 2단계(bastion) | 비고 |
 |---|---|---|---|---|---|
-| **02** ⚠️ | 구 02/2과제 | `2과제\02\bastion` apply | SSM | `BIBUNHO=<비번호> bash /opt/task2/deploy.sh` | Workflow / Kinesis-Flink / Event / MSK |
+| **02** ⚠️ | 구 02/2과제 | `2과제\02\bastion` apply | SSM | `BIBUNHO=102 bash /opt/task2/deploy.sh` | Workflow / Real-time Analytics / MSK (module1~3, 비번호 102) |
 | **07** ⚠️ | 구 06/2과제 | `2과제\07\bastion` apply | SSM | `bash /opt/task2/deploy.sh` | NoSQL / CDN / EKS / O11y (CloudShell EKS access entry 필요, README 참고) |
 | **08** | 구 07/2과제 | `2과제\08\bastion` apply | SSM | `bash /opt/task2/run.sh` (= `terraform apply`) | 단일 root, in-module4 bastion 이 k8s 자동 구성 |
 
 예시(02):
 ```powershell
-cd C:\Users\competitor\2026-terraform\2과제\02\bastion
+cd C:\Users\competitor\2026-terraform-last\2과제\02\bastion
 terraform init; terraform apply -auto-approve
 terraform output -raw ssm_connect_command
 ```
 ```bash
 until [ -f /opt/task2/READY ]; do sleep 5; done
-BIBUNHO=<비번호> bash /opt/task2/deploy.sh   # module1→module4 순차 apply
+BIBUNHO=102 bash /opt/task2/deploy.sh   # module1(Workflow)→module2(Analytics)→module3(MSK)
+number=102 bash /opt/task2/mark1.sh     # 채점표 기준 자기검증 (mark2.sh / mark3.sh 도 동일)
+BIBUNHO=102 bash /opt/task2/cleanup.sh  # 채점 전 module1 S3/DynamoDB 클렌징 (필수)
 ```
 
 ### 🟢 로컬 apply 가능 모듈 (VPC 불필요)

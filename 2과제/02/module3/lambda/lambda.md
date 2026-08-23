@@ -1,150 +1,103 @@
 # Lambda
 
-## 개요
-EventBridge Rule에 의해 호출되는 Lambda 함수 4개를 직접 개발합니다. 각 함수는 정책 위반 이벤트를 수신하여 자동 복구를 수행하고, SNS Topic에 알림 메시지를 Publish해야 합니다.
+## Sensor Consumer Lambda
 
-## Lambda Functions
+### 개요
+MSK에서 원시 센서 데이터를 수신하여 이상 여부를 판단하고 분기 처리하는 Lambda 함수입니다.
 
-| Function Name | Trigger | Action |
-|---------------|---------|--------|
-| wsc2026-sg-remediation | wsc2026-sg-change-rule (EventBridge) | 위반 인바운드 규칙 삭제 + 알림 |
-| wsc2026-role-remediation | wsc2026-role-change-rule (EventBridge) | IAM Role 원복 + 알림 |
-| wsc2026-ec2-terminate-alert | wsc2026-ec2-terminate-rule (EventBridge) | 알림 발송 |
-| wsc2026-ec2-type-remediation | wsc2026-ec2-type-change-rule (EventBridge) | 인스턴스 타입 원복 + 알림 |
-
-- Runtime: Python 3.12
+- Runtime: Python 3.14
 - Handler: index.handler
 
-## Lambda Function Environment
-다음 환경변수들을 함수에 사용해야합니다.
+### 환경 변수
 
-| Function | Environment | Value |
-|----------|-------------|-------|
-| Every Function | SNS_TOPIC_ARN | SNS Topic ARN |
-| wsc2026-sg-remediation | SECURITY_GROUP_ID | EC2 Security Group ID |
-| wsc2026-role-remediation | INSTANCE_ID | EC2 Instance ID |
-| wsc2026-role-remediation | ROLE_NAME | wsc2026-event-ec2-role |
-| wsc2026-ec2-type-remediation | INSTANCE_ID | EC2 Instance ID |
-| wsc2026-ec2-type-remediation | INSTANCE_TYPE | t3.micro |
+| Environment | Value |
+|---|---|
+| DDB_TABLE | wsc2026-sensor-data |
+| ALERT_TOPIC | wsc2026-sensor-alert |
+| BOOTSTRAP_SERVER | MSK broker endpoint |
 
-## EventBridge 이벤트 형식
+### Lambda 이상 탐지 규칙
 
-### Security Group 인바운드 규칙 추가 (wsc2026-sg-change-rule)
+| Condition | Status |
+|---|---|
+| temperature > 80 | ALERT |
+| temperature < 10 | ALERT |
+| humidity > 90 | ALERT |
+| humidity < 20 | ALERT |
+| Otherwise | NORMAL |
 
-```json
-{
-  "source": "aws.ec2",
-  "detail-type": "AWS API Call via CloudTrail",
-  "detail": {
-    "eventSource": "ec2.amazonaws.com",
-    "eventName": "AuthorizeSecurityGroupIngress",
-    "requestParameters": {
-      "groupId": "sg-0123456789abcdef0",
-      "ipPermissions": {
-        "items": [
-          {
-            "ipProtocol": "tcp",
-            "fromPort": 22,
-            "toPort": 22,
-            "ipRanges": {
-              "items": [{"cidrIp": "0.0.0.0/0"}]
-            }
-          }
-        ]
-      }
-    }
-  }
-}
-```
+### 이상 탐지 규칙
+1. MSK 토픽에서 메시지 배치 수신
+2. 각 메시지에 대해 온도/습도 임계치 확인
+3. DynamoDB에 정상 데이터(NORMAL) 저장
+4. wsc2026-sensor-alert Topic에 alert_reason 필드 추가 후 전송
 
-### EC2 IAM Role 변경 (wsc2026-role-change-rule)
+### 출력 예시
 
 ```json
 {
-  "source": "aws.ec2",
-  "detail-type": "AWS API Call via CloudTrail",
-  "detail": {
-    "eventSource": "ec2.amazonaws.com",
-    "eventName": "AssociateIamInstanceProfile",
-    "requestParameters": {
-      "AssociateIamInstanceProfileRequest": {
-        "IamInstanceProfile": {
-          "Name": "unauthorized-role"
-        },
-        "InstanceId": "i-0123456789abcdef0"
-      }
-    }
-  }
+  "sensorId": "SENSOR-001",
+  "timestamp": "2026-05-30T23:00:00+09:00",
+  "temperature": 75.5,
+  "humidity": 45.2,
+  "location": "factory-a"
 }
 ```
 
-### EC2 인스턴스 종료 (wsc2026-ec2-terminate-rule)
+### 이상 데이터 출력 예시
 
 ```json
 {
-  "source": "aws.ec2",
-  "detail-type": "EC2 Instance State-change Notification",
-  "detail": {
-    "instance-id": "i-0123456789abcdef0",
-    "state": "terminated"
-  }
+  "sensorId": "SENSOR-003",
+  "timestamp": "2026-05-30T23:00:00+09:00",
+  "temperature": 85.1,
+  "humidity": 48.7,
+  "location": "factory-a",
+  "status": "ALERT",
+  "alert_reason": "Temperature exceeded threshold: 85.1°C"
 }
 ```
 
-### EC2 인스턴스 타입 변경 (wsc2026-ec2-type-change-rule)
+### 이상 데이터 사유
 
-```json
-{
-  "source": "aws.ec2",
-  "detail-type": "AWS API Call via CloudTrail",
-  "detail": {
-    "eventSource": "ec2.amazonaws.com",
-    "eventName": "ModifyInstanceAttribute",
-    "requestParameters": {
-      "instanceId": "i-0123456789abcdef0",
-      "instanceType": {
-        "value": "t3.large"
-      }
-    }
-  }
-}
+| Condition | Reason |
+|---|---|
+| temperature > 80 | Temperature exceeded threshold: {temperature}°C |
+| temperature < 10 | Temperature below threshold: {temperature}°C |
+| humidity > 90 | Humidity exceeded threshold: {humidity}% |
+| humidity < 20 | Humidity below threshold: {humidity}% |
+
+### 로그 출력 형식
+
+```text
+2026/05/30 14:00:00 Processing batch: 5 messages
+2026/05/30 14:00:00 SENSOR-001: NORMAL - temp=75.5°C, humidity=45.2%
+2026/05/30 14:00:00 SENSOR-002: NORMAL - temp=68.2°C, humidity=52.1%
+2026/05/30 14:00:00 SENSOR-003: ALERT - temp=85.1°C (Temperature exceeded threshold)
 ```
 
-## SNS Message Form
+## Alert Consumer Lambda
 
-```json
-{
-    "event": "SG_INBOUND_ADDED",
-    "timestamp": "2026-05-26T15:30:00Z",
-    "detail": "Unauthorized inbound rule removed from sg-xxx",
-    "action": "RESTORED"
-}
+### 개요
+이상 데이터를 수신하여 SNS 알림을 발송하고 S3에 로그를 저장하는 Lambda 함수입니다.
+
+- Runtime: Python 3.14
+- Handler: index.handler
+
+### 환경 변수
+
+| Environment | Value |
+|---|---|
+| SNS_TOPIC_ARN | alert SNS ARN |
+| S3_BUCKET | S3 Bucket Name |
+
+### 처리 로직
+1. wsc2026-sensor-alert Topic에서 메시지 수신
+2. SNS 알림 발송 (센서 ID, 이상 값, 발생 시간)
+3. S3에 JSON 로그 저장
+
+### S3 저장 경로
+
+```text
+/alert/{sensorId}/{date}/{timestamp}.json
 ```
-
-| Field | Description |
-|-------|-------------|
-| event | SG_INBOUND_ADDED / ROLE_CHANGED / EC2_TERMINATED / EC2_TYPE_CHANGED |
-| timestamp | 이벤트 발생 시각 (ISO 8601) |
-| detail | 위반 상세 내용 |
-| action | RESTORED / ALERT_ONLY |
-
-## 각 함수별 처리 로직
-
-### wsc2026-sg-remediation
-1. EventBridge에서 AuthorizeSecurityGroupIngress API 호출 이벤트 수신
-2. Security Group에서 추가된 인바운드 규칙 삭제
-3. SNS 알림 발송
-
-### wsc2026-role-remediation
-1. EventBridge에서 AssociateIamInstanceProfile API 호출 이벤트 수신
-2. 변경된 IAM Instance Profile을 원래 Role(wsc2026-event-ec2-role)로 교체
-3. SNS 알림 발송
-
-### wsc2026-ec2-terminate-alert
-1. EventBridge에서 EC2 State-change 이벤트 수신 (state: terminated)
-2. SNS 알림 발송
-
-### wsc2026-ec2-type-remediation
-1. EventBridge에서 ModifyInstanceAttribute API 호출 이벤트 수신
-2. EC2 인스턴스를 중지 후 원래 타입(t3.micro)으로 변경, 재시작
-3. SNS 알림 발송

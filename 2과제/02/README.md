@@ -1,241 +1,184 @@
-# 2과제 (02) — Small Challenge (Workflow / Analytics / Cloud Event Handling / MSK)
+# 2과제 (02) — Small Challenge (Workflow / Real-time data analytics / MSK)
 
-인천 제2과제 4개 요구사항을 **모듈별·리전별 Terraform**으로 구성한다. **과제지_v8 + 수정사항(질의답변)** 기준으로
-리소스 이름/런타임/포트/핸들러를 맞췄다.
+**새 과제지 + 새 채점기준표** 기준으로 정리한 2과제 Terraform. 비번호(등번호) = **102**.
 
-> ⚠ **module3는 과제지_v8과 채점기준표_v8이 서로 모순된다.** 어느 쪽이 실제 채점에 쓰일지 확정되지 않아
-> **양쪽을 모두 구현**하고 apply 시 `spec` 변수로 선택하도록 했다. → **§1-1 참고 (필독)**
+> **과제지 유의사항 12항 / 채점기준 안내**
+> 기존 **3번 Cloud Event Handling 과제는 삭제**되었고, **4번 MSK 가 3번 채점항목**이 되었다.
+> 이 저장소도 그에 맞춰 `module3`(EventBridge/CloudTrail, eu-west-1)을 **삭제**하고 MSK 를 `module3` 으로 재번호했다.
 
-| 모듈 | 내용 | 리전 | apply 위치 |
-|------|------|------|-----------|
-| `bastion` | 채점용 Bastion(전 리소스 접근) + `/opt/task2` 코드 번들 | (bastion VPC) | 로컬 |
-| `module1` | Workflow: S3 / Lambda / DynamoDB / Step Functions | ap-southeast-1 | 로컬 가능 |
-| `module2` | Analytics: VPC / EC2(app:5000) / ALB / Kinesis / Managed Flink | ap-northeast-2 | **Bastion** |
-| `module3` | Cloud Event Handling: EventBridge / CloudTrail / Lambda / SNS (+ AWS Config) | eu-west-1 | 로컬/Bastion |
-| `module4` | MSK(IAM) / Producer EC2 / Consumer Lambda×2 / DynamoDB / S3 / SNS | ap-northeast-1 | **Bastion** |
+| 모듈 | 내용 | 리전 | 배점 | apply 위치 |
+|------|------|------|------|-----------|
+| `bastion` | 채점용 Bastion(전 리소스 접근) + `/opt/task2` 코드 번들 | (bastion VPC) | – | 로컬 |
+| `module1` | Workflow: S3 / Lambda / DynamoDB / Step Functions | ap-southeast-1 | 7.5 | Bastion 권장 |
+| `module2` | Real-time data analytics: VPC / EC2(app:5000) / ALB / Kinesis / Managed Flink | ap-northeast-2 | 7.5 | **Bastion** |
+| `module3` | MSK(IAM) / Producer EC2 / Consumer Lambda×2 / DynamoDB / S3 / SNS | ap-northeast-1 | 7.5 | **Bastion** |
 
-> - `module1`(서버리스)·`module3`(순수 TF)은 Windows 로컬 `terraform apply` 가능.
-> - `module2`(Flink Studio는 `null_resource`+aws CLI)·`module4`(MSK/토픽생성 in‑VPC)는 **Bastion(Linux)** 에서 apply.
-> - **비번호(BIBUNHO)** 는 module1·module4의 S3 접미사에 쓰인다. 본 계정 비번호 = **608**.
+합계 22.5점.
 
 ---
 
 ## 0. 사전 준비
-- Terraform ≥ 1.3, AWS 자격증명(계정 `640107381732`).
-- 각 모듈은 provider `aws ~> 6.0`. 리전은 모듈 코드에 고정(위 표).
+- Terraform ≥ 1.3, AWS 자격증명. 리전은 모듈 코드에 고정(위 표), provider `aws ~> 6.0`.
+- 비번호는 `bibunho` 변수 기본값 **102**(module1·module3 S3 접미사). 다른 값이면 `-var="bibunho=NNN"`.
 
 ## 1. 배포
 
-### (A) 권장: Bastion에서 일괄 배포
+### (A) 권장: Bastion 에서 일괄 배포
 ```powershell
 # 1) 로컬에서 Bastion 생성
-cd C:\Users\competitor\2026-terraform\2과제\02\bastion
+cd C:\Users\competitor\2026-terraform-last\2과제\02\bastion
 terraform init
 terraform apply -auto-approve
 terraform output -raw ssm_connect_command    # 접속 명령
 ```
 ```bash
-# 2) Bastion 접속 후 (aws ssm start-session --target <id> ...)
+# 2) Bastion 접속 후
 until [ -f /opt/task2/READY ]; do sleep 5; done
-BIBUNHO=608 bash /opt/task2/deploy.sh              # module3 기본 spec=rubric
-# BIBUNHO=608 SPEC=task bash /opt/task2/deploy.sh  # module3 를 과제지 기준으로
+BIBUNHO=102 bash /opt/task2/deploy.sh
 ```
-`deploy.sh` 순서: module1(ap-southeast-1) → module2(ap-northeast-2) → module3(eu-west-1) → module4(ap-northeast-1).
-MSK/Flink 생성으로 **module2·4는 수십 분** 소요될 수 있다.
+`deploy.sh` 순서: module1(ap-southeast-1) → module2(ap-northeast-2) → module3(ap-northeast-1).
+MSK/Flink 생성으로 **module2·3 은 수십 분** 소요될 수 있다.
 
-### (B) 모듈 개별 배포 (로컬/Bastion)
+### (B) 모듈 개별 배포
 ```bash
 cd <module 디렉터리>
 terraform init
-terraform apply -auto-approve            # module1, module4 는 -var="bibunho=608" 필요
-                                         # module3 는 -var="spec=task|rubric" (기본 rubric)
+terraform apply -auto-approve            # module1·module3 는 필요 시 -var="bibunho=102"
 ```
-
----
-
-## 1-1. module3 채점 기준 선택 (⚠ 필독)
-
-module3만 자료가 서로 모순된다.
-
-| 자료 | module3 요구사항 |
-|---|---|
-| **과제지_v8** + **배포파일 v8 `lambda.md`** | Lambda 4개(sg/role/terminate/type) + Rule 4개, AWS Config 없음 |
-| **채점기준표_v8** + **채점스크립트 `mark2-3.sh`** | `wsc2026-ec2-stop-remediation`·`wsc2026-tag-alert`, `wsc2026-ec2-stop-rule`, **AWS Config 2개 규칙**, SG 인바운드 **0건** |
-
-과제지·배포파일이 한 편, 채점기준표·채점스크립트가 다른 한 편이라 2:2다. 그래서 **둘 다 코드에 넣고 apply 시 고른다.**
-
-```bash
-cd module3
-terraform apply -var="spec=rubric"   # 채점기준표·채점스크립트 기준 (기본값)
-terraform apply -var="spec=task"     # 과제지·배포파일 기준
-```
-`deploy.sh`는 `SPEC=task|rubric` 환경변수를 받는다(기본 `rubric`).
-
-| 항목 | `spec=task` | `spec=rubric` |
-|---|---|---|
-| Lambda | sg / role / terminate / type — **4개** | 위 4개 + stop-remediation / tag-alert — **6개** |
-| EventBridge Rule | sg-change / role-change / ec2-terminate / ec2-type-change | 위 4개 + `wsc2026-ec2-stop-rule` / `wsc2026-tag-compliance-rule` / `wsc2026-event-guard-rule` |
-| AWS Config | 없음 | recorder + delivery channel + `wsc2026-sg-ssh-rule`·`wsc2026-required-tags-rule` |
-| SG `wsc2026-event-sg` 인바운드 | **tcp 80 0.0.0.0/0** (정적 웹) | **0건** (SSM 전용) |
-| `DisableApiStop` | off | **on** |
-| plan 리소스 수 | 34 | 57 |
-
-Lambda 코드는 `lambda/index.py` **하나**가 두 모드를 모두 처리하므로 모드를 바꿔도 코드 수정은 필요 없다.
-
-**rubric 모드의 설계 근거 두 가지**
-- `mark2-3.sh`는 `stop-instances` 후 **`sleep 30`** 뒤 `State=running`을 본다. 실제 stop→stopped→start→running은 60~90초라 사후 복구로는 창을 못 맞춘다. → `disable_api_stop=true`로 **중지 자체를 차단**하고, `wsc2026-ec2-stop-remediation`은 2차 방어로 유지.
-- SSH 주입 후 **인바운드 0건**을 확인하는데 CloudTrail→EventBridge 전달은 보통 수 분 걸린다. → `rate(1 minute)` guard가 **3초 간격**으로 인바운드를 회수한다(`index.py`의 `guard_security_group`).
-
-> ⚠ 두 모드는 SG 인바운드가 정반대(80 개방 ↔ 0건)라, 한쪽으로 apply하면 다른 쪽 기준에서는 그 항목이 오답이 된다. 자료가 확정되기 전에는 피할 수 없다.
-> 추천은 **`rubric`** — 실제 점수는 채점스크립트가 매기고, `mark2-3.sh`의 존재 자체가 강한 신호다.
+> module1 의 검증 provisioner 와 module2 의 Flink 생성은 `bash` 기반이라 Linux(Bastion/CloudShell)에서 실행해야 한다.
 
 ## 2. 모듈별 리소스 & 채점 대응
 
-### module1 — Workflow (ap-southeast-1) · 배점 7.5
-- S3 `wsc2026-student-score-bucket-608` — 폴더: `input/`(TF가 placeholder 생성), `processed/`·`error/`(워크플로가 생성)
-  - ⚠ `processed/`·`error/` placeholder는 **일부러 만들지 않는다**(1‑5‑A/1‑5‑B에서 0바이트 라인 오답 방지). `input/`만 유지 → 워크플로 후에도 1‑1의 `PRE input/` 보장.
-- DynamoDB `wsc2026-student-score` (PK `studentId`, SK `examDate`)
-- Lambda `wsc2026-student-score-function` — **python3.12**, env `S3_BUCKET`/`DDB_TABLE` (소스 `src/index.py`)
-  - 행 검증→정상행 평균·등급 DynamoDB 저장, 오류행 `error/error_<ts>_<studentId>.json`(+`unknown`)
-- Lambda `wsc2026-student-score-trigger` (S3 `input/*.csv` 업로드 → Step Functions 시작)
-- Step Functions `wsc2026-student-score-workflow` (**STANDARD**) — 검증→처리→processed/ 이동(오류 시 error/)
+### module1 — Workflow (ap-southeast-1) · 7.5점
+- S3 `wsc2026-student-score-bucket-102` — `input/` `processed/` `error/`
+- DynamoDB `wsc2026-student-score` (PK `studentId`, SK `examDate`) — 다른 KeySchema 없음
+- Lambda `wsc2026-student-score-function` — **python3.12**, handler `index.handler`, env `S3_BUCKET`/`DDB_TABLE` (소스 `src/index.py`)
+  - 행 검증 → 정상행 평균·등급 DynamoDB 저장, 오류행 `error/error_<ts>_<studentId>.json`(studentId 없으면 `unknown`)
+- Lambda `wsc2026-student-score-trigger` — S3 `input/*.csv` 업로드 이벤트 → Step Functions 시작 (과제지 "자동 실행은 트리거 Lambda 로 구현")
+- Step Functions `wsc2026-student-score-workflow` (**STANDARD**), 입력 `{"key":"input/test.csv"}`
+  - `CheckS3File → ProcessStudentData → CheckResult(Choice)` → 200 이면 `MoveToProcessed`, 그 외 `MoveToError → Fail`
+  - 이동 후 **`RestoreInputPrefix`** 로 `input/` 0바이트 마커를 복원한다 (아래 ⚠ 참고)
 - IAM: `wsc2026-lambda-student-role`, `wsc2026-stepfunction-student-role` (최소권한)
-- 채점값: 1‑1 `PRE error/ input/ processed/` / 1‑3 `python3.12` / 1‑5‑A `STU1020 96.6 A`, `processed/test.csv` / 1‑5‑B error json 4개(STU2001/2002/2004/unknown)
 
-### module2 — Real-time analytics (ap-northeast-2) · 배점 7.5
-- VPC `analytics-vpc` 10.20.0.0/16 — `analytics-pub-a/b`(10.20.0/1.0/24), `analytics-priv-a/b`(10.20.100/101.0/24), NAT `analytics-ngw`
-- EC2 `wsc2026-analytics-ec2` (t3.small, **priv-a**, SSM) — user_data가 `app.py`(port **5000**)를 systemd 서비스 `app`로 기동 → `/health`, `POST /order`(Kinesis put)
+> ⚠ **데이터 클렌징(새 채점기준표 신규 조건)**
+> "채점 시작 시 S3 버킷과 DynamoDB 데이터가 남아 있으면 **1-1·1-5·1-6 을 모두 오답**으로 간주"한다.
+> - Terraform 은 폴더 placeholder 를 만들지 않는다(0바이트 마커도 데이터로 보일 수 있음).
+> - `apply` 마지막 단계(`terraform_data.upload_test_csv`)에서 test.csv 로 워크플로를 1회 검증하고
+>   **검증 직후 S3·DynamoDB 를 자동으로 비운다.**
+> - 수동 재클렌징: `BIBUNHO=102 bash cleanup.sh`
+> - 클렌징된 빈 버킷이어도 채점위원이 `input/test.csv` 를 올리면 워크플로가 `processed/`·`error/` 를 만들고
+>   `input/` 마커를 복원하므로 1-1 의 `PRE error/ input/ processed/` 3종이 그대로 출력된다.
+
+채점 기대값: 1-1 `PRE error/ input/ processed/` / 1-2 studentId HASH·examDate RANGE / 1-3 `python3.12` + env 2개 /
+1-4 `wsc2026-student-score-workflow STANDARD` / 1-5 `STU1020 96.6 A` + `processed/test.csv` /
+1-6 error json **정확히 4개**(STU2001·STU2002·STU2004·unknown)
+
+### module2 — Real-time data analytics (ap-northeast-2) · 7.5점
+- VPC `analytics-vpc` 10.20.0.0/16 — `analytics-pub-a/b`(10.20.0/1.0/24), `analytics-priv-a/b`(10.20.100/101.0/24),
+  RTB `analytics-pub-rtb`·`analytics-priv-a-rtb`·`analytics-priv-b-rtb`, IGW `analytics-igw`, NAT `analytics-ngw`
+- EC2 `wsc2026-analytics-ec2` (**t3.small**, **priv-a**, SSM) — user_data 가 `app/app.py`(port **5000**)를 systemd 서비스 **`app`** 으로 기동 → `GET /health`, `POST /order`(Kinesis put)
 - ALB `wsc2026-analytics-alb` (HTTP **80**), TG `wsc2026-analytics-tg` (port **5000**, health `/health`)
 - Kinesis `wsc2026-order-stream` (**ON_DEMAND**)
-- Managed Flink Studio `wsc2026-analytics-flink` (**ZEPPELIN-FLINK-3_0**, `null_resource`+aws CLI)
-- IAM: `wsc2026-alaytics-ec2-role`(과제지 철자 그대로), `wsc2026-analytics-flink-role`
-- 채점값: 2‑1 `analytics-priv-a` / 2‑2 `80 HTTP`,`wsc2026-analytics-tg 5000` / 2‑3 stream ACTIVE ON_DEMAND·`/order` JSON / 2‑4 flink **READY** / 2‑5 `{"status":"healthy"}` / 2‑6 `active`,`enabled`
+- Managed Flink Studio `wsc2026-analytics-flink` (**ZEPPELIN-FLINK-3_0** = Apache Flink 1.19, `null_resource`+aws CLI, **READY** 유지)
+- IAM: `wsc2026-analytics-ec2-role`, `wsc2026-analytics-flink-role` (최소권한)
 
-### module3 — Cloud Event Handling (eu-west-1) · 배점 7.5
-- VPC `event-vpc` 172.16.0.0/16 — `event-pub-a`(172.16.0.0/24, EC2 위치)/`event-pub-b`, IGW `event-igw`
-- EC2 `wsc2026-event-ec2` (t3.micro, event-pub-a) — **정적 웹 userdata**(httpd, `hostname`), **종료방지 ON**, `rubric`에서는 **중지방지(DisableApiStop) ON**, 프로파일/역할 `wsc2026-event-ec2-role`
-- SG `wsc2026-event-sg` — 아웃바운드 전체. 인바운드는 **spec에 따라 다름**: `task`=tcp 80 0.0.0.0/0 / `rubric`=**0건**(§1-1)
-- SNS `wsc2026-event-alert`
-- CloudTrail `wsc2026-event-trail` (Management **Read/Write**), 로그 S3 **`wsc2026-event-s3`**
-- Lambda — 모두 **python3.12**, handler **`index.handler`**(단일 dispatcher, 소스 `lambda/index.py`), role `wsc2026-event-lambda-role`(+`iam:PassRole`)
-  - **양쪽 공통 4개**
-  - `wsc2026-sg-remediation` ← `wsc2026-sg-change-rule` (SG 인바운드 추가 → 회수)
-  - `wsc2026-role-remediation` ← `wsc2026-role-change-rule` (IAM 프로파일 변경 → 원복)
-  - `wsc2026-ec2-terminate-alert` ← `wsc2026-ec2-terminate-rule` (EC2 종료 감지 → 알림만, `ALERT_ONLY`)
-  - `wsc2026-ec2-type-remediation` ← `wsc2026-ec2-type-change-rule` (타입 변경 → t3.micro 원복)
-  - **`spec=rubric` 추가 2개**
-    - `wsc2026-ec2-stop-remediation` ← `wsc2026-ec2-stop-rule` (EC2 중지 감지 → 재기동)
-    - `wsc2026-tag-alert` ← `wsc2026-tag-compliance-rule` (Config 필수태그 위반 → 알림)
-  - 각 Lambda는 복구/알림 후 SNS 발행(로그에 `sns_publish` 마커)
-- `spec=rubric` 전용: AWS Config recorder(`AWS::EC2::Instance`,`AWS::EC2::SecurityGroup`) + `wsc2026-sg-ssh-rule`(INCOMING_SSH_DISABLED) + `wsc2026-required-tags-rule`(REQUIRED_TAGS, `Name`), 상시 guard `wsc2026-event-guard-rule`(rate 1 minute)
-- 채점 대응
-  - **과제지_v8**: 3‑1 4 Lambda `python3.12`, trail `IsLogging=True`, S3 `wsc2026-event-s3` / 3‑2 4 rule ENABLED→대응 Lambda / 3‑3 hostname·tcp80·userdata·프로파일 `wsc2026-event-ec2-role` / 3‑4 위반 주입 후 SG·Role·Type 복구 + EC2 종료 시 알림 / 3‑5 각 Lambda 로그 `sns_publish`
-  - **채점기준표_v8(`mark2-3.sh`)**: 3‑1 SNS + 4 Lambda(stop/terminate/sg/tag) `python3.12` / 3‑2 `wsc2026-ec2-stop-rule`·`wsc2026-ec2-terminate-rule` 타깃 / 3‑3 Config 2규칙 `ACTIVE` / 3‑4 EC2 `running` + SG 인바운드 `0` / 3‑5 required-tags NON_COMPLIANT `None`
+채점 기대값: 2-1 `analytics-priv-a` / 2-2 `80 HTTP` + `wsc2026-analytics-tg 5000` / 2-3 `ACTIVE ON_DEMAND` /
+2-4 `POST /order` JSON 5필드 / 2-5 flink **READY** `ZEPPELIN-FLINK-3_0` / 2-6 `{"status":"healthy"}` / 2-7 `active`·`enabled`
 
-### module4 — MSK (ap-northeast-1) · 배점 7.5
-- VPC `msk-vpc` 192.168.0.0/16 — pub-a/b(0/1.0/24), priv-a/b(10/11.0/24), NAT `msk-ngw`
-- MSK `wsc2026-msk-cluster` (Kafka **3.6.0**, `kafka.t3.small`, broker 2/2AZ, **IAM 인증(9098)**, private, TLS)
-- Topic(producer가 자동 생성): `wsc2026-sensor-raw`(3/2), `wsc2026-sensor-alert`(1/2)
-- Producer EC2 `wsc2026-sensor-producer` (t3.small, priv-a, role `wsc2026-msk-ec2-role`)
-  - userdata: **`kafka-python==2.2.15`** 고정 설치(→`kafka.sasl.oauth`), 토픽 생성, **IAM Python producer(`producer-iam`)만 실행** (Go `producer`는 TLS 미지원이라 미사용)
-- Consumer Lambda×2 — **python3.14**, handler **`wsc2026.consumer_handler`**(소스 `lambda/{raw,alert}/wsc2026.py`), role `wsc2026-msk-lambda-role`(최소권한), MSK 트리거
-  - `wsc2026-sensor-consumer` ← `wsc2026-sensor-raw` → 정상은 DynamoDB, 이상치는 `wsc2026-sensor-alert` 토픽으로 전달
-    - ⚠ DynamoDB 저장 시 `temperature`·`humidity`는 **문자열(String, 타입 S)** 로 저장한다 — 채점 4‑5‑A가 `temperature.S`로 조회하므로 Decimal(N)로 저장하면 `null`이 나온다. (소스 `lambda/raw/wsc2026.py`)
-  - `wsc2026-sensor-alert-consumer` ← `wsc2026-sensor-alert` → S3 `alert/<sensorId>/<date>/<ts>.json` + SNS
-- DynamoDB `wsc2026-sensor-data` (PK `sensorId`, SK `timestamp`), S3 `wsc2026-sensor-alert-bucket-608`, SNS `wsc2026-sensor-alert`
-- 이상치 기준: temp>80 / <10, humidity>90 / <20 → `status=ALERT`, `alert_reason`
-- 채점값: 4‑1 DDB 스키마·S3 / 4‑2 MSK ACTIVE 3.6.0 t3.small IAM True / 4‑3 두 ESM Enabled / 4‑4 `python3.14 wsc2026.consumer_handler` / 4‑5 DynamoDB 아이템>0, S3 `alert/` 객체>0
+> Flink Notebook 의 SQL 2종(최근 1분 주문 수, 상품별 누적 매출)은 **콘솔에서 직접 실행**해야 한다(Flink 앱 프로그래밍 금지).
+> 채점은 앱 상태가 `READY` 인지 보므로 확인 후 Notebook 은 정지 상태로 둔다.
 
----
+### module3 — MSK (ap-northeast-1) · 7.5점
+- VPC `msk-vpc` 192.168.0.0/16 — `msk-pub-a`(0.0/24)·`msk-pub-d`(1.0/24), `msk-priv-a`(10.0/24)·`msk-priv-d`(11.0/24),
+  RTB `msk-pub-rtb`·`msk-priv-a-rtb`·`msk-priv-d-rtb`, IGW `msk-igw`, NAT `msk-ngw`
+- MSK `wsc2026-msk-cluster` — Kafka **3.6.0**, `kafka.t3.small`, broker 2/2AZ, **IAM 인증만**(SASL_SSL 9098), private, TLS
+- Topic(producer 부팅 시 자동 생성): `wsc2026-sensor-raw`(**3** partitions / RF **2**), `wsc2026-sensor-alert`(**1** / RF **2**), key=`sensorId`
+- Producer EC2 `wsc2026-sensor-producer` (t3.small, priv-a, role `wsc2026-msk-ec2-role`, SSM)
+  - userdata: `kafka-python==2.2.15` + `aws-msk-iam-sasl-signer-python` 설치 → 토픽 생성 → **IAM Python producer(`producer-iam`) systemd 상시 실행**
+  - 제공 Go 바이너리(`app/app`)는 이 클러스터의 TLS/IAM 엔드포인트에 접속하지 못해(`broker appears to be expecting TLS`) 사용하지 않는다.
+  - 로그: `/var/log/module3-bootstrap.log`, `systemctl status producer-iam`
+- Consumer Lambda ×2 — **python3.14**, handler **`index.handler`**(배포파일 `lambda.md` 기준), role `wsc2026-msk-lambda-role`(최소권한), MSK 트리거
+  - `wsc2026-sensor-consumer` ← `wsc2026-sensor-raw` : 정상은 DynamoDB, 이상치는 `wsc2026-sensor-alert` 토픽으로 전달 (`lambda/raw/index.py`)
+  - `wsc2026-sensor-alert-consumer` ← `wsc2026-sensor-alert` : S3 `alert/<sensorId>/<date>/<ts>.json` + SNS (`lambda/alert/index.py`)
+- DynamoDB `wsc2026-sensor-data` (PK `sensorId`, SK `timestamp`), S3 `wsc2026-sensor-alert-bucket-102`, SNS `wsc2026-sensor-alert`
+- 이상치 기준: temp>80 / <10, humidity>90 / <20 → `status=ALERT` + `alert_reason`
 
-## 3. 채점 전 필수 체크리스트 (직접 수행)
-- **공통**: `deploy.sh`로 4모듈 apply 완료 및 각 리소스 ACTIVE 확인. Bastion은 모든 리전 접근 가능해야 함.
-- **module1**: 채점 전 `processed/`·`error/`·DynamoDB를 **비우고**, 배포파일 `test.csv`를 `s3://wsc2026-student-score-bucket-608/input/`에 업로드(→워크플로 자동 실행).
-- **module2**: Flink Studio Notebook은 채점 시 **READY**(정지) 상태로 둔다(RUNNING이면 2‑4 불일치). SQL 2종은 콘솔에서 실행 확인.
-- **module3**: 먼저 **`spec`을 어느 기준으로 apply했는지 확인**(§1-1). SNS 이메일 구독 시 Confirm.
-  - `task`: EC2 종료방지 ON, SG 인바운드 tcp80 유지. 위반 주입(3‑4)은 자동 복구되며 타입 복구(stop→start)는 시간이 걸리니 180초 내 확인.
-  - `rubric`: SG 인바운드가 **0건**이어야 한다(추가 규칙이 남아있으면 guard가 1분 내 회수). Config 규칙 2개가 `ACTIVE`이고 required-tags NON_COMPLIANT가 없는지 확인.
-- **module4**: MSK ACTIVE 후 producer가 토픽 자동 생성·발행. SSM 접속 후 `sudo cat /var/log/module4-bootstrap.log`, `systemctl status producer-iam` 확인. 데이터는 DynamoDB/`alert/`에 쌓임.
-- **종료 전**: 진행 중인 테스트/부하 중지(과제지 유의사항).
+저장 타입(과제지 Attribute 표 + 채점 3-5/3-6 기준)
+| Attribute | Type | 비고 |
+|---|---|---|
+| `sensorId` | String | PK |
+| `timestamp` | String | SK, **ISO 8601 KST `YYYY-MM-DDTHH:mm:ss+09:00`** — consumer 가 어떤 입력이 와도 KST 로 정규화(`kst_timestamp`) |
+| `temperature` | String | 채점 3-5 가 `temperature.S` 로 조회 → 반드시 문자열 |
+| `humidity` | Number | 과제지 표 기준 숫자 |
+| `location` | String | |
+| `status` | String | `NORMAL` / `ALERT` |
 
-## 4. 비번호(BIBUNHO=608) 치환 지점
-- module1 S3 `wsc2026-student-score-bucket-608`, module4 S3 `wsc2026-sensor-alert-bucket-608`
-- 주입: `deploy.sh`의 `BIBUNHO`, 또는 개별 apply 시 `-var="bibunho=608"`.
+채점 기대값: 3-1 DDB 스키마 + `head-bucket` `AccessPointAlias:false` / 3-2 두 Lambda `python3.14` /
+3-3 `ACTIVE 3.6.0 kafka.t3.small True` + 토픽 2/1·2/3 / 3-4 ESM 둘 다 `Enabled` /
+3-5 `sensorId`·`temperature`·`status` / 3-6 `timestamp` `+09:00` 형식 + Producer running
 
-## 5. 검증 상태
-- `terraform init -backend=false && terraform validate`: **module1~4 전부 통과**.
-- Lambda 코드 문법(`py_compile`): module3 `index.py`, module4 `wsc2026.py` **통과**.
-- module3 `terraform plan`: `spec=task` **34 add**, `spec=rubric` **57 add** — 양쪽 모두 통과(계정 `640107381732`).
-- ⚠ 실제 4개 리전 apply·엔드투엔드 채점은 배포 후 직접 확인 필요(MSK/Flink 수 분, Flink SQL은 콘솔 수동).
+> ⚠ **채점기준표 3번 사전준비의 오기**: `BUCKET_NAME="wsc2026-student-score-bucket-<등번호>"` 로 적혀 있으나
+> 3-1 기대 출력은 `arn:aws:s3:::wsc2026-sensor-alert-bucket-<등번호>` / `BucketRegion ap-northeast-1` 이다.
+> 같은 이름의 버킷을 두 리전에 만들 수 없으므로(1번 과제 버킷은 ap-southeast-1) **alert 버킷이 정답**이다.
+> 채점 시 이 점을 안내할 수 있게 알아두자.
+
+## 3. 자기검증 스크립트
+채점기준표 원문 명령을 그대로 실행해 기대값/실제값을 나란히 출력한다. (Bastion 또는 CloudShell)
+```bash
+number=102 bash mark1.sh                 # 1번 Workflow: 클렌징 확인 → test.csv 업로드 → 60초 후 1-1~1-6
+number=102 SKIP_UPLOAD=1 bash mark1.sh   # 업로드 없이 현재 상태만 확인
+bash mark2.sh                            # 2번 Real-time Data Analytics 2-1~2-7
+number=102 bash mark3.sh                 # 3번 MSK 3-1~3-6 + Producer Running
+BIBUNHO=102 bash cleanup.sh              # 1번 S3/DynamoDB 클렌징 (mark1 확인 후 필수)
+```
+> `cleanup.sh` 는 **module1 데이터만** 지운다. module3 의 `wsc2026-sensor-data`·alert 버킷은 채점 3-5/3-6 에서
+> 데이터가 있어야 정답이므로 지우지 않는다.
+
+## 4. 채점 전 체크리스트
+- **공통**: `deploy.sh` 로 3모듈 apply 완료, 각 리소스 ACTIVE. Bastion 이 모든 리전 접근 가능.
+- **module1**: 채점 시작 시 S3 버킷·DynamoDB **비어 있어야 함**(`cleanup.sh`). `mark1.sh` 로 확인했다면 다시 클렌징.
+- **module2**: Flink Studio 는 **READY**(정지) 상태. SQL 2종 콘솔 실행 확인. `/health`·`POST /order` 응답 확인.
+- **module3**: MSK ACTIVE + producer 실행 중 + DynamoDB `timestamp` 가 `+09:00` 형식인지 `mark3.sh` 로 확인.
+  SNS 이메일 구독을 걸었다면 Confirm.
+- **종료 전**: 실행 중인 테스트/부하 중지(과제지 유의사항 8항).
+
+## 5. 비번호(102) 치환 지점
+- `module1/main.tf` `variable "bibunho"` 기본값 → S3 `wsc2026-student-score-bucket-102`
+- `module3/main.tf` `variable "bibunho"` 기본값 → S3 `wsc2026-sensor-alert-bucket-102`
+- 스크립트: `deploy.sh` 의 `BIBUNHO`, `mark*.sh` 의 `number`, `cleanup.sh` 의 `BIBUNHO`
 
 ## 6. 삭제 (destroy)
 ```bash
 # Bastion 안에서 역순
-for m in module4 module3 module2 module1; do
-  ( cd /opt/task2/$m && terraform destroy -auto-approve )   # module1·4 는 -var="bibunho=608"
+for m in module3 module2 module1; do
+  ( cd /opt/task2/$m && terraform destroy -auto-approve )
 done
+# Flink Studio 는 CLI 생성 리소스라 별도 삭제
+bash /opt/task2/module2/zeppelin-delete.sh ap-northeast-2 wsc2026-analytics-flink
 ```
-> module3 EC2는 **종료방지(ON)** 라 destroy 전에 해제 필요:
-> `aws ec2 modify-instance-attribute --region eu-west-1 --instance-id <id> --no-disable-api-termination`
 ```powershell
 # 로컬에서 Bastion 제거(별도 state)
-cd C:\Users\competitor\2026-terraform\2과제\02\bastion
+cd C:\Users\competitor\2026-terraform-last\2과제\02\bastion
 terraform destroy -auto-approve
 ```
-> IAM 역할 등 잔여물이 남으면 `wsc2026-{lambda-student,stepfunction-student,alaytics-ec2,analytics-flink,event-ec2,event-lambda,msk-ec2,msk-lambda}-role` 및 인스턴스 프로파일을 확인해 정리.
-
-
----
+> 잔여 IAM 역할 확인: `wsc2026-{lambda-student,stepfunction-student,analytics-ec2,analytics-flink,msk-ec2,msk-lambda}-role`
 
 ## 7. 채점 이름이 바뀌면 수정할 위치
-
-> module3는 과제지_v8/배포파일 설계와 채점기준표_v8/채점스크립트 설계를 **둘 다** 담고 `spec`으로 고른다(§1-1).
-> 채점 이름이 또 바뀌면 아래 위치의 **`name`/`bucket`/`tags.Name` 속성값만** 고치면 된다.
-> ⚠ terraform **리소스 라벨/`locals` 키**(예: `termination`, `termination_protection_change`)는 내부 식별자라 그대로 두고 **`name` 값만** 바꾼다(참조가 깨지지 않게).
-
-### 7-1. module3 Lambda 이름 → `module3/main.tf`
-| 채점 이름 | 수정 위치 (main.tf) |
+| 채점 이름 | 위치 |
 |---|---|
-| `wsc2026-sg-remediation` | `locals.event_lambdas_common.sg.name` |
-| `wsc2026-role-remediation` | `locals.event_lambdas_common.role.name` |
-| `wsc2026-ec2-terminate-alert` | `locals.event_lambdas_common.termination.name` (내부 키 `termination` 유지) |
-| `wsc2026-ec2-type-remediation` | `locals.event_lambdas_common.type.name` |
-| `wsc2026-ec2-stop-remediation` (rubric) | `locals.event_lambdas_rubric.stop.name` |
-| `wsc2026-tag-alert` (rubric) | `locals.event_lambdas_rubric.tag.name` |
-| Runtime `python3.12` / handler `index.handler` | `resource "aws_lambda_function" "event"` 의 `runtime`/`handler` |
-| handler 파일명 `index.py` | `lambda/index.py` (handler가 `index.handler`이므로 **파일명 index.py 유지 필수**) |
+| S3 버킷(1번) | `module1/main.tf` `aws_s3_bucket.score.bucket` |
+| DynamoDB(1번) | `module1/main.tf` `aws_dynamodb_table.score.name` |
+| Lambda/트리거(1번) | `aws_lambda_function.score.function_name` / `.trigger.function_name` |
+| State Machine | `aws_sfn_state_machine.score.name` (상태명은 `definition` 내부) |
+| EC2/ALB/TG/Stream(2번) | `module2/main.tf` `aws_instance.ec2.tags.Name`, `aws_lb.main.name`, `aws_lb_target_group.main.name`, `aws_kinesis_stream.orders.name` |
+| Flink 앱 이름 | `module2/main.tf` `null_resource.flink` 의 `APP_NAME` + `triggers.name` |
+| MSK 클러스터/토픽 | `module3/main.tf` `aws_msk_cluster.main.cluster_name` / `userdata.sh.tpl` 의 `create_topics.py` |
+| Consumer Lambda | `module3/main.tf` `aws_lambda_function.raw|alert.function_name` (handler `index.handler` 이므로 파일명 `index.py` 유지) |
+| DynamoDB/S3/SNS(3번) | `aws_dynamodb_table.sensor.name`, `aws_s3_bucket.alert.bucket`, `aws_sns_topic.alert.name` |
 
-### 7-2. module3 EventBridge Rule 이름 → `module3/main.tf`
-| 채점 이름 | 수정 위치 (main.tf) | 탐지 대상 |
-|---|---|---|
-| `wsc2026-sg-change-rule` | `aws_cloudwatch_event_rule "sg_change".name` | AuthorizeSecurityGroupIngress |
-| `wsc2026-role-change-rule` | `aws_cloudwatch_event_rule "role_change".name` | Associate/Replace/Disassociate IamInstanceProfile |
-| `wsc2026-ec2-terminate-rule` | `aws_cloudwatch_event_rule "termination_protection_change".name` (내부 라벨 유지) | EC2 State-change `terminated`/`shutting-down` |
-| `wsc2026-ec2-type-change-rule` | `aws_cloudwatch_event_rule "ec2_type_change".name` | ModifyInstanceAttribute + instanceType |
-| `wsc2026-ec2-stop-rule` (rubric) | `aws_cloudwatch_event_rule "ec2_stop".name` | EC2 State-change `stopping`/`stopped` |
-| `wsc2026-tag-compliance-rule` (rubric) | `aws_cloudwatch_event_rule "tag_compliance".name` | Config Rules Compliance Change |
-
-> Rule↔Lambda 연결(타깃)과 invoke 권한은 `locals.event_targets_all` + `aws_lambda_permission "events"`에서 위 라벨을 그대로 참조하므로, **`name` 값만** 바꾸면 자동으로 따라간다.
-
-### 7-3. module3 기타 리소스 이름 → `module3/main.tf`
-| 채점 이름 | 수정 위치 (main.tf) |
-|---|---|
-| SNS `wsc2026-event-alert` | `aws_sns_topic "alert".name` |
-| CloudTrail `wsc2026-event-trail` | `aws_cloudtrail "main".name` |
-| S3(트레일) `wsc2026-event-s3` | `aws_s3_bucket "trail".bucket` (버킷 정책의 이름도 참조로 자동) |
-| EC2 `wsc2026-event-ec2` | `aws_instance "ec2".tags.Name` |
-| SG `wsc2026-event-sg` | `aws_security_group "ec2".name` (+ `tags.Name`) |
-| Role/Profile `wsc2026-event-ec2-role` | `aws_iam_role "ec2".name` + `aws_iam_instance_profile "ec2".name` (동일해야 3‑3 통과) |
-| Lambda Role `wsc2026-event-lambda-role` | `aws_iam_role "lambda".name` |
-| Config 규칙 `wsc2026-sg-ssh-rule` (rubric) | `aws_config_config_rule "sg_ssh".name` |
-| Config 규칙 `wsc2026-required-tags-rule` (rubric) | `aws_config_config_rule "required_tags".name` (+ `index.py`의 `CONFIG_RULE_NAME` 환경변수, `tag_compliance` 규칙 패턴) |
-
-### 7-4. module4 4‑5‑A (temperature) 관련
-| 항목 | 수정 위치 |
-|---|---|
-| DynamoDB `temperature`/`humidity`를 문자열(S)로 저장 | `module4/lambda/raw/wsc2026.py` 의 `item["temperature"]=str(...)`, `item["humidity"]=str(...)` |
-| 재배포 반영 | `module4` apply 시 `raw-consumer.zip` 재생성(`archive_file.raw_lambda`) → Lambda 코드 갱신. 기존 N타입 아이템이 남아있으면 채점 전 `wsc2026-sensor-data` 비우고 producer 재적재 |
-
-> 재배포하지 않고 라이브 Lambda만 갱신하려면: `raw/` 디렉터리를 zip으로 다시 싸서
-> `aws lambda update-function-code --function-name wsc2026-sensor-consumer --zip-file fileb://raw-consumer.zip --region ap-northeast-1`
-> (PowerShell `Compress-Archive`는 Lambda가 못 읽는 zip을 만들 수 있으니 `terraform apply`로 재패키징 권장.)
+## 8. 검증 상태
+- `terraform init -backend=false && terraform validate`: **module1·module2·module3·bastion 모두 Success** (Terraform v1.15.7)
+- `terraform fmt -recursive -check`: 차이 없음
+- Lambda 코드 문법(`py_compile`): `module1/src/{index,trigger}.py`, `module3/lambda/{raw,alert}/index.py` 통과
+- 스크립트 문법(`bash -n`): `deploy.sh`, `cleanup.sh`, `mark1~3.sh`, `module3/userdata.sh.tpl`, module1 local-exec 검증 스크립트 통과
+- ⚠ 실제 3개 리전 apply·엔드투엔드 채점은 배포 후 직접 확인 필요(MSK/Flink 수십 분, Flink SQL 은 콘솔 수동).

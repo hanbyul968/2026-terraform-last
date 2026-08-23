@@ -2,75 +2,71 @@ terraform {
   required_providers {
     aws     = { source = "hashicorp/aws", version = "~> 6.0" }
     archive = { source = "hashicorp/archive", version = "~> 2.0" }
+    time    = { source = "hashicorp/time", version = "0.13.1" }
   }
 }
 
-# 2-3 Cloud Event Handling — eu-west-1
-# 과제지/rubric: 보안·비용 위협 API 이벤트 발생 시 원래 상태로 복구하거나 관리자에게 알림.
-#   VPC(event-vpc) + EC2(정적웹,종료방지) + SNS + 단일 event_lambda.handler(4함수) +
-#   CloudTrail(Mgmt R/W, S3=wsc2026-event-s3) +
-#   EventBridge 4 rules: sg-change / role-change / termination-protection-change / ec2-type-change
+# 3) MSK — ap-northeast-1 (과제지 12항으로 기존 3번 Cloud Event Handling 삭제 → MSK 가 3번)
 provider "aws" {
-  region = "eu-west-1"
+  region = "ap-northeast-1"
 }
 
 data "aws_caller_identity" "current" {}
 
-# ── 채점 기준 선택 ───────────────────────────────────────────────────
-# 과제지_v8(=배포파일 v8 lambda.md)과 채점기준표_v8(=채점스크립트 mark2-3.sh)이
-# 모듈 3에서 서로 다른 리소스를 요구한다. 어느 쪽이 실제 채점에 쓰일지 확정되지 않아
-# apply 시점에 선택할 수 있도록 한다.
-#
-#   spec = "task"   과제지·배포파일 기준
-#                   Lambda 4개(sg/role/terminate/type) + 규칙 4개
-#                   SG 인바운드 tcp/80(정적 웹), AWS Config 없음
-#
-#   spec = "rubric" 채점기준표·채점스크립트 기준 (기본값)
-#                   위 4개에 더해 stop-remediation / tag-alert Lambda,
-#                   ec2-stop-rule / tag-compliance-rule / 상시 guard,
-#                   AWS Config 2개 규칙, SG 인바운드 0건, 중지 보호(DisableApiStop)
-#
-# 사용: terraform apply -var="spec=task"
-variable "spec" {
-  description = "채점 기준 선택: task(과제지) 또는 rubric(채점기준표)"
+variable "bibunho" {
+  description = "선수 비번호 (S3 버킷 접미사)"
   type        = string
-  default     = "rubric"
-  validation {
-    condition     = contains(["task", "rubric"], var.spec)
-    error_message = "spec 은 task 또는 rubric 이어야 합니다."
-  }
+  default     = "102"
 }
 
 locals {
-  is_rubric = var.spec == "rubric"
-  # count 용 (0/1)
-  rubric_count = local.is_rubric ? 1 : 0
+  producer_app_key     = "artifacts/module3-app"
+  producer_support_key = "artifacts/module3-topic-admin.zip"
 }
 
-# ── VPC event-vpc 172.16.0.0/16 ──────────────────────────────────────
+# ── VPC msk-vpc 192.168.0.0/16 ───────────────────────────────────────
 resource "aws_vpc" "main" {
-  cidr_block           = "172.16.0.0/16"
+  cidr_block           = "192.168.0.0/16"
   enable_dns_support   = true
   enable_dns_hostnames = true
-  tags                 = { Name = "event-vpc" }
+  tags                 = { Name = "msk-vpc" }
 }
 resource "aws_internet_gateway" "main" {
   vpc_id = aws_vpc.main.id
-  tags   = { Name = "event-igw" }
+  tags   = { Name = "msk-igw" }
 }
 resource "aws_subnet" "pub_a" {
   vpc_id                  = aws_vpc.main.id
-  cidr_block              = "172.16.0.0/24"
-  availability_zone       = "eu-west-1a"
+  cidr_block              = "192.168.0.0/24"
+  availability_zone       = "ap-northeast-1a"
   map_public_ip_on_launch = true
-  tags                    = { Name = "event-pub-a" }
+  tags                    = { Name = "msk-pub-a" }
 }
 resource "aws_subnet" "pub_b" {
   vpc_id                  = aws_vpc.main.id
-  cidr_block              = "172.16.1.0/24"
-  availability_zone       = "eu-west-1b"
+  cidr_block              = "192.168.1.0/24"
+  availability_zone       = "ap-northeast-1c"
   map_public_ip_on_launch = true
-  tags                    = { Name = "event-pub-b" }
+  tags                    = { Name = "msk-pub-d" }
+}
+resource "aws_subnet" "priv_a" {
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "192.168.10.0/24"
+  availability_zone = "ap-northeast-1a"
+  tags              = { Name = "msk-priv-a" }
+}
+resource "aws_subnet" "priv_b" {
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "192.168.11.0/24"
+  availability_zone = "ap-northeast-1c"
+  tags              = { Name = "msk-priv-d" }
+}
+resource "aws_eip" "nat" { domain = "vpc" }
+resource "aws_nat_gateway" "main" {
+  allocation_id = aws_eip.nat.id
+  subnet_id     = aws_subnet.pub_a.id
+  tags          = { Name = "msk-ngw" }
+  depends_on    = [aws_internet_gateway.main]
 }
 resource "aws_route_table" "pub" {
   vpc_id = aws_vpc.main.id
@@ -78,7 +74,23 @@ resource "aws_route_table" "pub" {
     cidr_block = "0.0.0.0/0"
     gateway_id = aws_internet_gateway.main.id
   }
-  tags = { Name = "event-pub-rtb" }
+  tags = { Name = "msk-pub-rtb" }
+}
+resource "aws_route_table" "priv_a" {
+  vpc_id = aws_vpc.main.id
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.main.id
+  }
+  tags = { Name = "msk-priv-a-rtb" }
+}
+resource "aws_route_table" "priv_b" {
+  vpc_id = aws_vpc.main.id
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.main.id
+  }
+  tags = { Name = "msk-priv-d-rtb" }
 }
 resource "aws_route_table_association" "pub_a" {
   subnet_id      = aws_subnet.pub_a.id
@@ -88,8 +100,58 @@ resource "aws_route_table_association" "pub_b" {
   subnet_id      = aws_subnet.pub_b.id
   route_table_id = aws_route_table.pub.id
 }
+resource "aws_route_table_association" "priv_a" {
+  subnet_id      = aws_subnet.priv_a.id
+  route_table_id = aws_route_table.priv_a.id
+}
+resource "aws_route_table_association" "priv_b" {
+  subnet_id      = aws_subnet.priv_b.id
+  route_table_id = aws_route_table.priv_b.id
+}
 
-# ── EC2 (monitored) — wsc2026-event-ec2, event-pub-a ─────────────────
+# ── MSK (IAM auth, private, HA) ──────────────────────────────────────
+resource "aws_security_group" "msk" {
+  name   = "wsc2026-msk-sg"
+  vpc_id = aws_vpc.main.id
+  ingress {
+    description = "kafka IAM TLS"
+    from_port   = 9098
+    to_port     = 9098
+    protocol    = "tcp"
+    cidr_blocks = ["192.168.0.0/16"]
+  }
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  tags = { Name = "wsc2026-msk-sg" }
+}
+resource "aws_msk_cluster" "main" {
+  cluster_name           = "wsc2026-msk-cluster"
+  kafka_version          = "3.6.0"
+  number_of_broker_nodes = 2
+  broker_node_group_info {
+    instance_type   = "kafka.t3.small"
+    client_subnets  = [aws_subnet.priv_a.id, aws_subnet.priv_b.id]
+    security_groups = [aws_security_group.msk.id]
+    storage_info {
+      ebs_storage_info { volume_size = 20 }
+    }
+  }
+  client_authentication {
+    sasl { iam = true }
+  }
+  encryption_info {
+    encryption_in_transit {
+      client_broker = "TLS"
+      in_cluster    = true
+    }
+  }
+}
+
+# ── Producer EC2 (private, min IAM) ──────────────────────────────────
 data "aws_ami" "al2023" {
   most_recent = true
   owners      = ["amazon"]
@@ -102,595 +164,277 @@ data "aws_ami" "al2023" {
     values = ["hvm"]
   }
 }
-resource "aws_iam_role" "ec2" {
-  name = "wsc2026-event-ec2-role"
+resource "aws_iam_role" "producer" {
+  name = "wsc2026-msk-ec2-role"
   assume_role_policy = jsonencode({
     Version   = "2012-10-17"
     Statement = [{ Action = "sts:AssumeRole", Effect = "Allow", Principal = { Service = "ec2.amazonaws.com" } }]
   })
 }
-resource "aws_iam_role_policy_attachment" "ec2_ssm" {
+resource "aws_iam_role_policy_attachment" "producer_ssm" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
-  role       = aws_iam_role.ec2.name
+  role       = aws_iam_role.producer.name
 }
-# 인스턴스 프로파일 이름을 역할명과 동일하게 둔다.
-# (3-3 채점: IamInstanceProfile.Arn 의 마지막 토큰이 wsc2026-event-ec2-role 이어야 함)
-resource "aws_iam_instance_profile" "ec2" {
-  name = "wsc2026-event-ec2-role"
-  role = aws_iam_role.ec2.name
+resource "aws_iam_role_policy" "producer_msk" {
+  name = "msk-produce"
+  role = aws_iam_role.producer.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["kafka-cluster:Connect", "kafka-cluster:WriteData", "kafka-cluster:DescribeTopic", "kafka-cluster:CreateTopic", "kafka-cluster:WriteDataIdempotently", "kafka-cluster:DescribeCluster", "kafka-cluster:AlterCluster", "kafka-cluster:DescribeGroup", "kafka-cluster:AlterGroup"]
+        Resource = ["${replace(aws_msk_cluster.main.arn, ":cluster/", ":topic/")}/*", aws_msk_cluster.main.arn, "${replace(aws_msk_cluster.main.arn, ":cluster/", ":group/")}/*"]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["kafka:DescribeClusterV2", "kafka:GetBootstrapBrokers"]
+        Resource = aws_msk_cluster.main.arn
+      },
+      {
+        Effect   = "Allow"
+        Action   = "s3:GetObject"
+        Resource = "${aws_s3_bucket.alert.arn}/artifacts/*"
+      }
+    ]
+  })
 }
-
-# SG 최소 구성.
-#   task   : 정적 웹을 위한 인바운드 tcp/80 만 허용
-#   rubric : 인바운드 0건. 채점 3-4 가 SSH 주입 후
-#            "SG Inbound Count (expect 0)" 을 확인하므로 상시 0이어야 한다.
-#            (인스턴스 접근은 SSM 으로만 수행)
-resource "aws_security_group" "ec2" {
-  name        = "wsc2026-event-sg"
-  description = local.is_rubric ? "minimal - no inbound, SSM only" : "minimal - allow http 80"
-  vpc_id      = aws_vpc.main.id
-  dynamic "ingress" {
-    for_each = local.is_rubric ? [] : [1]
-    content {
-      description = "static web"
-      from_port   = 80
-      to_port     = 80
-      protocol    = "tcp"
-      cidr_blocks = ["0.0.0.0/0"]
-    }
-  }
+resource "aws_iam_instance_profile" "producer" {
+  name = "wsc2026-msk-ec2-profile"
+  role = aws_iam_role.producer.name
+}
+resource "aws_security_group" "producer" {
+  name   = "wsc2026-sensor-producer-sg"
+  vpc_id = aws_vpc.main.id
   egress {
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
-  tags = { Name = "wsc2026-event-sg" }
+  tags = { Name = "wsc2026-sensor-producer-sg" }
+}
+resource "aws_instance" "producer" {
+  ami                         = data.aws_ami.al2023.id
+  instance_type               = "t3.small"
+  subnet_id                   = aws_subnet.priv_a.id
+  vpc_security_group_ids      = [aws_security_group.producer.id]
+  iam_instance_profile        = aws_iam_instance_profile.producer.name
+  user_data_replace_on_change = true
+  user_data = templatefile("${path.module}/userdata.sh.tpl", {
+    region      = "ap-northeast-1"
+    msk_arn     = aws_msk_cluster.main.arn
+    app_bucket  = aws_s3_bucket.alert.id
+    app_key     = local.producer_app_key
+    support_key = local.producer_support_key
+  })
+  tags = { Name = "wsc2026-sensor-producer" }
+  depends_on = [
+    aws_iam_role_policy.producer_msk,
+    aws_s3_object.producer_app,
+    aws_s3_object.producer_support
+  ]
 }
 
-# 제공된 userdata(정적 웹). 3-3 채점이 UserData base64 를 정확히 대조하므로 base64 를 그대로 지정.
-#   디코드: #!/bin/bash / dnf update / dnf install httpd -y /
-#           systemctl enable --now httpd / hostname > /var/www/html/index.html
-resource "aws_instance" "ec2" {
-  ami                    = data.aws_ami.al2023.id
-  instance_type          = "t3.micro"
-  subnet_id              = aws_subnet.pub_a.id
-  vpc_security_group_ids = [aws_security_group.ec2.id]
-  iam_instance_profile   = aws_iam_instance_profile.ec2.name
-
-  disable_api_termination = true # 지속 배포 위한 종료 방지
-  # rubric 에서만 무단 중지를 차단한다. 채점(3-4)은 stop-instances 30초 뒤 State=running 을
-  # 확인하는데 실제 stop -> stopped -> start -> running 은 60~90초가 걸려 사후 복구로는
-  # 창을 맞출 수 없다. 중지 자체를 API 레벨에서 막아 가용성을 보장하고,
-  # wsc2026-ec2-stop-remediation 은 보호가 해제된 경우를 위한 2차 방어로 유지한다.
-  disable_api_stop = local.is_rubric
-
-  user_data_base64 = "IyEvYmluL2Jhc2gKZG5mIHVwZGF0ZQpkbmYgaW5zdGFsbCBodHRwZCAteQpzeXN0ZW1jdGwgZW5hYmxlIC0tbm93IGh0dHBkCmhvc3RuYW1lID4gL3Zhci93d3cvaHRtbC9pbmRleC5odG1s"
-  tags             = { Name = "wsc2026-event-ec2" }
+# ── Storage: DynamoDB, S3, SNS ───────────────────────────────────────
+resource "aws_dynamodb_table" "sensor" {
+  name         = "wsc2026-sensor-data"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "sensorId"
+  range_key    = "timestamp"
+  attribute {
+    name = "sensorId"
+    type = "S"
+  }
+  attribute {
+    name = "timestamp"
+    type = "S"
+  }
 }
-
-# ── SNS wsc2026-event-alert ──────────────────────────────────────────
+resource "aws_s3_bucket" "alert" {
+  bucket        = "wsc2026-sensor-alert-bucket-${var.bibunho}"
+  force_destroy = true
+}
+resource "aws_s3_object" "producer_app" {
+  bucket = aws_s3_bucket.alert.id
+  key    = local.producer_app_key
+  source = "${path.module}/app/app"
+  etag   = filemd5("${path.module}/app/app")
+}
+resource "aws_s3_object" "producer_support" {
+  bucket      = aws_s3_bucket.alert.id
+  key         = local.producer_support_key
+  source      = data.archive_file.raw_lambda.output_path
+  source_hash = data.archive_file.raw_lambda.output_base64sha256
+}
 resource "aws_sns_topic" "alert" {
-  name = "wsc2026-event-alert"
+  name = "wsc2026-sensor-alert"
 }
 
-# ── Lambda 실행 역할 (최소 권한) ─────────────────────────────────────
+# ── Consumer Lambdas (MSK trigger, min IAM) ──────────────────────────
 resource "aws_iam_role" "lambda" {
-  name = "wsc2026-event-lambda-role"
+  name = "wsc2026-msk-lambda-role"
   assume_role_policy = jsonencode({
     Version   = "2012-10-17"
     Statement = [{ Action = "sts:AssumeRole", Effect = "Allow", Principal = { Service = "lambda.amazonaws.com" } }]
   })
 }
+resource "aws_iam_role_policy_attachment" "lambda_vpc" {
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+  role       = aws_iam_role.lambda.name
+}
 resource "aws_iam_role_policy" "lambda" {
-  name = "event-recover-min"
+  name = "consume-min"
   role = aws_iam_role.lambda.id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
-        Sid    = "Ec2Remediation"
+        Sid    = "DiscoverMSKCluster"
         Effect = "Allow"
         Action = [
-          "ec2:DescribeSecurityGroups",
-          "ec2:RevokeSecurityGroupIngress",
-          "ec2:DescribeInstances",
-          "ec2:DescribeIamInstanceProfileAssociations",
-          "ec2:ReplaceIamInstanceProfileAssociation",
-          "ec2:AssociateIamInstanceProfile",
-          "ec2:ModifyInstanceAttribute",
-          "ec2:StopInstances",
-          "ec2:StartInstances",
-          "ec2:DescribeTags"
+          "kafka:DescribeClusterV2",
+          "kafka:GetBootstrapBrokers"
         ]
+        Resource = aws_msk_cluster.main.arn
+      },
+      {
+        Sid    = "ConsumeFromMSKWithIAM"
+        Effect = "Allow"
+        Action = [
+          "kafka-cluster:Connect",
+          "kafka-cluster:DescribeGroup",
+          "kafka-cluster:AlterGroup",
+          "kafka-cluster:DescribeTopic",
+          "kafka-cluster:ReadData",
+          "kafka-cluster:WriteData",
+          "kafka-cluster:WriteDataIdempotently"
+        ]
+        Resource = [
+          aws_msk_cluster.main.arn,
+          "${replace(aws_msk_cluster.main.arn, ":cluster/", ":topic/")}/wsc2026-sensor-raw",
+          "${replace(aws_msk_cluster.main.arn, ":cluster/", ":topic/")}/wsc2026-sensor-alert",
+          "${replace(aws_msk_cluster.main.arn, ":cluster/", ":group/")}/wsc2026-sensor-raw-cg",
+          "${replace(aws_msk_cluster.main.arn, ":cluster/", ":group/")}/wsc2026-sensor-alert-cg"
+        ]
+      },
+      {
+        Sid      = "DiscoverMSKVpc"
+        Effect   = "Allow"
+        Action   = ["ec2:DescribeVpcs", "ec2:DescribeSubnets", "ec2:DescribeSecurityGroups"]
         Resource = "*"
       },
       {
-        # 타입 원복 중 stop-remediation 개입을 막는 마커 태그 관리
-        Sid      = "RemediationMarkerTag"
+        Sid      = "WriteSensorData"
         Effect   = "Allow"
-        Action   = ["ec2:CreateTags", "ec2:DeleteTags"]
-        Resource = "arn:aws:ec2:eu-west-1:${data.aws_caller_identity.current.account_id}:instance/*"
+        Action   = "dynamodb:PutItem"
+        Resource = aws_dynamodb_table.sensor.arn
       },
       {
-        # role 복구(프로파일 재부착)에 필요
-        Sid      = "PassEc2Role"
+        Sid      = "WriteAlertObject"
         Effect   = "Allow"
-        Action   = "iam:PassRole"
-        Resource = aws_iam_role.ec2.arn
+        Action   = "s3:PutObject"
+        Resource = "${aws_s3_bucket.alert.arn}/*"
       },
       {
         Sid      = "PublishAlert"
         Effect   = "Allow"
         Action   = "sns:Publish"
         Resource = aws_sns_topic.alert.arn
-      },
-      {
-        Sid      = "Logs"
-        Effect   = "Allow"
-        Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
-        Resource = "arn:aws:logs:eu-west-1:${data.aws_caller_identity.current.account_id}:*"
       }
     ]
   })
 }
 
-data "archive_file" "lambda" {
-  type        = "zip"
-  source_dir  = "${path.module}/lambda"
-  output_path = "${path.module}/event_lambda.zip"
-}
-
-# 모든 함수가 동일 코드(index.py) + handler=index.handler + python3.12.
-#   sg / role / termination / type : 과제지·lambda.md 가 요구하는 4개 (양쪽 공통)
-#   stop / tag                     : 채점기준표 3-1 이 이름으로 확인하는 2개 (rubric 전용)
-locals {
-  event_lambdas_common = {
-    sg = {
-      name        = "wsc2026-sg-remediation"
-      environment = { SECURITY_GROUP_ID = aws_security_group.ec2.id }
-    }
-    role = {
-      name        = "wsc2026-role-remediation"
-      environment = { INSTANCE_ID = aws_instance.ec2.id, ROLE_NAME = aws_iam_instance_profile.ec2.name }
-    }
-    termination = {
-      name        = "wsc2026-ec2-terminate-alert"
-      environment = {}
-    }
-    type = {
-      name        = "wsc2026-ec2-type-remediation"
-      environment = { INSTANCE_ID = aws_instance.ec2.id, INSTANCE_TYPE = "t3.micro" }
-    }
+# Event Source Mapping 생성 API가 갱신된 IAM 정책을 보기 전에 실행되는 것을 방지한다.
+resource "time_sleep" "lambda_iam_propagation" {
+  create_duration = "20s"
+  triggers = {
+    role_name   = aws_iam_role.lambda.name
+    policy_hash = sha256(aws_iam_role_policy.lambda.policy)
   }
-  event_lambdas_rubric = {
-    stop = {
-      name        = "wsc2026-ec2-stop-remediation"
-      environment = { INSTANCE_ID = aws_instance.ec2.id }
-    }
-    tag = {
-      name        = "wsc2026-tag-alert"
-      environment = { CONFIG_RULE_NAME = "wsc2026-required-tags-rule" }
-    }
-  }
-  event_lambdas = merge(
-    local.event_lambdas_common,
-    local.is_rubric ? local.event_lambdas_rubric : {}
-  )
-}
-
-resource "aws_lambda_function" "event" {
-  for_each         = local.event_lambdas
-  function_name    = each.value.name
-  role             = aws_iam_role.lambda.arn
-  handler          = "index.handler"
-  runtime          = "python3.12"
-  filename         = data.archive_file.lambda.output_path
-  source_code_hash = data.archive_file.lambda.output_base64sha256
-  timeout          = 300
-  environment {
-    variables = merge({ SNS_TOPIC_ARN = aws_sns_topic.alert.arn }, each.value.environment)
-  }
-  depends_on = [aws_iam_role_policy.lambda]
-}
-
-# ── CloudTrail wsc2026-event-trail (Management R/W, S3=wsc2026-event-s3) ──
-resource "aws_s3_bucket" "trail" {
-  bucket        = "wsc2026-event-s3"
-  force_destroy = true
-}
-data "aws_iam_policy_document" "trail" {
-  statement {
-    sid       = "AWSCloudTrailAclCheck"
-    actions   = ["s3:GetBucketAcl"]
-    resources = [aws_s3_bucket.trail.arn]
-    principals {
-      type        = "Service"
-      identifiers = ["cloudtrail.amazonaws.com"]
-    }
-  }
-  statement {
-    sid       = "AWSCloudTrailWrite"
-    actions   = ["s3:PutObject"]
-    resources = ["${aws_s3_bucket.trail.arn}/AWSLogs/${data.aws_caller_identity.current.account_id}/*"]
-    principals {
-      type        = "Service"
-      identifiers = ["cloudtrail.amazonaws.com"]
-    }
-    condition {
-      test     = "StringEquals"
-      variable = "s3:x-amz-acl"
-      values   = ["bucket-owner-full-control"]
-    }
-  }
-}
-resource "aws_s3_bucket_policy" "trail" {
-  bucket = aws_s3_bucket.trail.id
-  policy = data.aws_iam_policy_document.trail.json
-}
-resource "aws_cloudtrail" "main" {
-  name                          = "wsc2026-event-trail"
-  s3_bucket_name                = aws_s3_bucket.trail.id
-  include_global_service_events = true
-  is_multi_region_trail         = false
-  event_selector {
-    read_write_type           = "All"
-    include_management_events = true
-  }
-  depends_on = [aws_s3_bucket_policy.trail]
-}
-
-# ── EventBridge Rules (4개) ──────────────────────────────────────────
-# 1) SG 인바운드 규칙 추가
-resource "aws_cloudwatch_event_rule" "sg_change" {
-  name = "wsc2026-sg-change-rule"
-  event_pattern = jsonencode({
-    source      = ["aws.ec2"]
-    detail-type = ["AWS API Call via CloudTrail"]
-    detail = {
-      eventSource = ["ec2.amazonaws.com"]
-      eventName   = ["AuthorizeSecurityGroupIngress"]
-    }
-  })
-}
-resource "aws_cloudwatch_event_target" "sg_change" {
-  rule = aws_cloudwatch_event_rule.sg_change.name
-  arn  = aws_lambda_function.event["sg"].arn
-}
-
-# 2) EC2 IAM Role 변경
-resource "aws_cloudwatch_event_rule" "role_change" {
-  name = "wsc2026-role-change-rule"
-  event_pattern = jsonencode({
-    source      = ["aws.ec2"]
-    detail-type = ["AWS API Call via CloudTrail"]
-    detail = {
-      eventSource = ["ec2.amazonaws.com"]
-      eventName   = ["AssociateIamInstanceProfile", "ReplaceIamInstanceProfileAssociation", "DisassociateIamInstanceProfile"]
-    }
-  })
-}
-resource "aws_cloudwatch_event_target" "role_change" {
-  rule = aws_cloudwatch_event_rule.role_change.name
-  arn  = aws_lambda_function.event["role"].arn
-}
-
-# 3) EC2 인스턴스 종료 (EC2 Instance State-change Notification, state=terminated/shutting-down)
-#    과제지 wsc2026-ec2-terminate-rule -> wsc2026-ec2-terminate-alert (알림만 발송).
-#    CloudTrail API 이벤트가 아니라 EC2 상태변경 이벤트이므로 detail.state 로 매칭한다.
-resource "aws_cloudwatch_event_rule" "termination_protection_change" {
-  name = "wsc2026-ec2-terminate-rule"
-  event_pattern = jsonencode({
-    source      = ["aws.ec2"]
-    detail-type = ["EC2 Instance State-change Notification"]
-    detail = {
-      state = ["shutting-down", "terminated"]
-    }
-  })
-}
-resource "aws_cloudwatch_event_target" "termination_protection_change" {
-  rule = aws_cloudwatch_event_rule.termination_protection_change.name
-  arn  = aws_lambda_function.event["termination"].arn
-}
-
-# 4) EC2 인스턴스 타입 변경 (ModifyInstanceAttribute + instanceType)
-# 주의: requestParameters.instanceType = {"value":"t3.large"} 중첩 객체이므로
-#       value 리프에 exists 를 걸어야 매칭된다(위 3번과 동일한 이유).
-resource "aws_cloudwatch_event_rule" "ec2_type_change" {
-  name = "wsc2026-ec2-type-change-rule"
-  event_pattern = jsonencode({
-    source      = ["aws.ec2"]
-    detail-type = ["AWS API Call via CloudTrail"]
-    detail = {
-      eventSource = ["ec2.amazonaws.com"]
-      eventName   = ["ModifyInstanceAttribute"]
-      requestParameters = {
-        instanceType = {
-          value = [{ exists = true }]
-        }
-      }
-    }
-  })
-}
-resource "aws_cloudwatch_event_target" "ec2_type_change" {
-  rule = aws_cloudwatch_event_rule.ec2_type_change.name
-  arn  = aws_lambda_function.event["type"].arn
-}
-
-# ── 아래 3개 규칙은 rubric 전용 ──────────────────────────────────────
-# 5) EC2 인스턴스 중지 (채점 3-2: wsc2026-ec2-stop-rule -> wsc2026-ec2-stop-remediation)
-resource "aws_cloudwatch_event_rule" "ec2_stop" {
-  count = local.rubric_count
-  name  = "wsc2026-ec2-stop-rule"
-  event_pattern = jsonencode({
-    source      = ["aws.ec2"]
-    detail-type = ["EC2 Instance State-change Notification"]
-    detail = {
-      state = ["stopping", "stopped"]
-    }
-  })
-}
-resource "aws_cloudwatch_event_target" "ec2_stop" {
-  count = local.rubric_count
-  rule  = aws_cloudwatch_event_rule.ec2_stop[0].name
-  arn   = local.fn_stop.arn
-}
-
-# 6) AWS Config 필수 태그 규칙 위반 -> wsc2026-tag-alert
-resource "aws_cloudwatch_event_rule" "tag_compliance" {
-  count = local.rubric_count
-  name  = "wsc2026-tag-compliance-rule"
-  event_pattern = jsonencode({
-    source      = ["aws.config"]
-    detail-type = ["Config Rules Compliance Change"]
-    detail = {
-      configRuleName = ["wsc2026-required-tags-rule"]
-      newEvaluationResult = {
-        complianceType = ["NON_COMPLIANT"]
-      }
-    }
-  })
-}
-resource "aws_cloudwatch_event_target" "tag_compliance" {
-  count = local.rubric_count
-  rule  = aws_cloudwatch_event_rule.tag_compliance[0].name
-  arn   = local.fn_tag.arn
-}
-
-# 7) 상시 guard (rate 1 minute)
-# 채점 3-4 는 위반 주입 후 30초만 대기한다. CloudTrail -> EventBridge 전달은 보통 수 분이
-# 걸리므로 위 이벤트 기반 규칙만으로는 창을 맞출 수 없다. 각 실행이 약 55초 동안 3초 간격으로
-# 점검하여 SG 인바운드 회수 / 인스턴스 가동을 30초 내에 보장한다.
-resource "aws_cloudwatch_event_rule" "guard" {
-  count               = local.rubric_count
-  name                = "wsc2026-event-guard-rule"
-  description         = "Fast-path compliance guard for wsc2026-event-sg and wsc2026-event-ec2"
-  schedule_expression = "rate(1 minute)"
-}
-resource "aws_cloudwatch_event_target" "guard_sg" {
-  count     = local.rubric_count
-  rule      = aws_cloudwatch_event_rule.guard[0].name
-  target_id = "sg-guard"
-  arn       = aws_lambda_function.event["sg"].arn
-  input     = jsonencode({ guard = "sg" })
-}
-resource "aws_cloudwatch_event_target" "guard_ec2" {
-  count     = local.rubric_count
-  rule      = aws_cloudwatch_event_rule.guard[0].name
-  target_id = "ec2-guard"
-  arn       = local.fn_stop.arn
-  input     = jsonencode({ guard = "ec2" })
-}
-
-# ── Lambda invoke permissions (rule -> function) ─────────────────────
-locals {
-  event_targets = {
-    sg = {
-      rule_arn      = aws_cloudwatch_event_rule.sg_change.arn
-      function_name = aws_lambda_function.event["sg"].function_name
-    }
-    role = {
-      rule_arn      = aws_cloudwatch_event_rule.role_change.arn
-      function_name = aws_lambda_function.event["role"].function_name
-    }
-    termination = {
-      rule_arn      = aws_cloudwatch_event_rule.termination_protection_change.arn
-      function_name = aws_lambda_function.event["termination"].function_name
-    }
-    type = {
-      rule_arn      = aws_cloudwatch_event_rule.ec2_type_change.arn
-      function_name = aws_lambda_function.event["type"].function_name
-    }
-  }
-  # 삼항 연산자는 양쪽 가지를 모두 평가하므로, task 모드에 존재하지 않는
-  # stop/tag 함수 참조는 lookup 으로 감싼다.
-  fn_stop = lookup(aws_lambda_function.event, "stop", null)
-  fn_tag  = lookup(aws_lambda_function.event, "tag", null)
-  event_targets_rubric = {
-    stop = {
-      rule_arn      = one(aws_cloudwatch_event_rule.ec2_stop[*].arn)
-      function_name = try(local.fn_stop.function_name, null)
-    }
-    tag = {
-      rule_arn      = one(aws_cloudwatch_event_rule.tag_compliance[*].arn)
-      function_name = try(local.fn_tag.function_name, null)
-    }
-    guard_sg = {
-      rule_arn      = one(aws_cloudwatch_event_rule.guard[*].arn)
-      function_name = aws_lambda_function.event["sg"].function_name
-    }
-    guard_ec2 = {
-      rule_arn      = one(aws_cloudwatch_event_rule.guard[*].arn)
-      function_name = try(local.fn_stop.function_name, null)
-    }
-  }
-  event_targets_all = merge(
-    local.event_targets,
-    local.is_rubric ? local.event_targets_rubric : {}
-  )
-}
-resource "aws_lambda_permission" "events" {
-  for_each      = local.event_targets_all
-  statement_id  = "AllowEventBridge-${each.key}"
-  action        = "lambda:InvokeFunction"
-  function_name = each.value.function_name
-  principal     = "events.amazonaws.com"
-  source_arn    = each.value.rule_arn
-}
-
-# ── AWS Config (채점 3-3 / 3-5) ──────────────────────────────────────
-# Config Rule 은 configuration recorder 가 있어야 생성되므로 recorder + delivery channel 을
-# 함께 구성한다. 기록 대상은 규칙이 평가하는 두 리소스 타입으로 한정한다.
-resource "aws_s3_bucket" "config" {
-  count         = local.rubric_count
-  bucket        = "wsc2026-event-config-${data.aws_caller_identity.current.account_id}"
-  force_destroy = true
-}
-data "aws_iam_policy_document" "config_bucket" {
-  count = local.rubric_count
-  statement {
-    sid       = "AWSConfigBucketPermissionsCheck"
-    actions   = ["s3:GetBucketAcl", "s3:ListBucket"]
-    resources = [aws_s3_bucket.config[0].arn]
-    principals {
-      type        = "Service"
-      identifiers = ["config.amazonaws.com"]
-    }
-  }
-  statement {
-    sid       = "AWSConfigBucketDelivery"
-    actions   = ["s3:PutObject"]
-    resources = ["${aws_s3_bucket.config[0].arn}/AWSLogs/${data.aws_caller_identity.current.account_id}/Config/*"]
-    principals {
-      type        = "Service"
-      identifiers = ["config.amazonaws.com"]
-    }
-    condition {
-      test     = "StringEquals"
-      variable = "s3:x-amz-acl"
-      values   = ["bucket-owner-full-control"]
-    }
-  }
-}
-resource "aws_s3_bucket_policy" "config" {
-  count  = local.rubric_count
-  bucket = aws_s3_bucket.config[0].id
-  policy = data.aws_iam_policy_document.config_bucket[0].json
-}
-
-resource "aws_iam_role" "config" {
-  count = local.rubric_count
-  name  = "wsc2026-event-config-role"
-  assume_role_policy = jsonencode({
-    Version   = "2012-10-17"
-    Statement = [{ Action = "sts:AssumeRole", Effect = "Allow", Principal = { Service = "config.amazonaws.com" } }]
-  })
-}
-resource "aws_iam_role_policy_attachment" "config" {
-  count      = local.rubric_count
-  role       = aws_iam_role.config[0].name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AWS_ConfigRole"
-}
-resource "aws_iam_role_policy" "config_delivery" {
-  count = local.rubric_count
-  name  = "config-delivery"
-  role  = aws_iam_role.config[0].id
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect   = "Allow"
-        Action   = "s3:PutObject"
-        Resource = "${aws_s3_bucket.config[0].arn}/AWSLogs/${data.aws_caller_identity.current.account_id}/Config/*"
-        Condition = {
-          StringEquals = { "s3:x-amz-acl" = "bucket-owner-full-control" }
-        }
-      },
-      {
-        Effect   = "Allow"
-        Action   = "s3:GetBucketAcl"
-        Resource = aws_s3_bucket.config[0].arn
-      }
-    ]
-  })
-}
-
-resource "aws_config_configuration_recorder" "main" {
-  count    = local.rubric_count
-  name     = "wsc2026-event-recorder"
-  role_arn = aws_iam_role.config[0].arn
-  recording_group {
-    all_supported                 = false
-    include_global_resource_types = false
-    resource_types                = ["AWS::EC2::Instance", "AWS::EC2::SecurityGroup"]
-  }
-}
-resource "aws_config_delivery_channel" "main" {
-  count          = local.rubric_count
-  name           = "wsc2026-event-delivery"
-  s3_bucket_name = aws_s3_bucket.config[0].id
   depends_on = [
-    aws_config_configuration_recorder.main,
-    aws_s3_bucket_policy.config,
-    aws_iam_role_policy.config_delivery
+    aws_iam_role_policy.lambda,
+    aws_iam_role_policy_attachment.lambda_vpc
   ]
 }
-resource "aws_config_configuration_recorder_status" "main" {
-  count      = local.rubric_count
-  name       = aws_config_configuration_recorder.main[0].name
-  is_enabled = true
-  depends_on = [aws_config_delivery_channel.main]
+data "archive_file" "raw_lambda" {
+  type        = "zip"
+  source_dir  = "${path.module}/lambda/raw"
+  output_path = "${path.module}/raw-consumer.zip"
+}
+data "archive_file" "alert_lambda" {
+  type        = "zip"
+  source_dir  = "${path.module}/lambda/alert"
+  output_path = "${path.module}/alert-consumer.zip"
+}
+resource "aws_security_group" "lambda" {
+  name   = "wsc2026-msk-lambda-sg"
+  vpc_id = aws_vpc.main.id
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  tags = { Name = "wsc2026-msk-lambda-sg" }
+}
+resource "aws_lambda_function" "raw" {
+  function_name    = "wsc2026-sensor-consumer"
+  role             = aws_iam_role.lambda.arn
+  handler          = "index.handler" # 배포파일 lambda.md 기준
+  runtime          = "python3.14"
+  filename         = data.archive_file.raw_lambda.output_path
+  source_code_hash = data.archive_file.raw_lambda.output_base64sha256
+  timeout          = 120
+  vpc_config {
+    subnet_ids         = [aws_subnet.priv_a.id, aws_subnet.priv_b.id]
+    security_group_ids = [aws_security_group.lambda.id]
+  }
+  environment {
+    variables = {
+      DDB_TABLE        = aws_dynamodb_table.sensor.name
+      ALERT_TOPIC      = "wsc2026-sensor-alert"
+      BOOTSTRAP_SERVER = aws_msk_cluster.main.bootstrap_brokers_sasl_iam
+    }
+  }
+}
+resource "aws_lambda_function" "alert" {
+  function_name    = "wsc2026-sensor-alert-consumer"
+  role             = aws_iam_role.lambda.arn
+  handler          = "index.handler" # 배포파일 lambda.md 기준
+  runtime          = "python3.14"
+  filename         = data.archive_file.alert_lambda.output_path
+  source_code_hash = data.archive_file.alert_lambda.output_base64sha256
+  timeout          = 60
+  environment {
+    variables = {
+      SNS_TOPIC_ARN = aws_sns_topic.alert.arn
+      S3_BUCKET     = aws_s3_bucket.alert.id
+    }
+  }
+}
+resource "aws_lambda_event_source_mapping" "raw" {
+  event_source_arn  = aws_msk_cluster.main.arn
+  function_name     = aws_lambda_function.raw.arn
+  topics            = ["wsc2026-sensor-raw"]
+  starting_position = "TRIM_HORIZON"
+  depends_on        = [time_sleep.lambda_iam_propagation]
+  amazon_managed_kafka_event_source_config {
+    consumer_group_id = "wsc2026-sensor-raw-cg"
+  }
+}
+resource "aws_lambda_event_source_mapping" "alert" {
+  event_source_arn  = aws_msk_cluster.main.arn
+  function_name     = aws_lambda_function.alert.arn
+  topics            = ["wsc2026-sensor-alert"]
+  starting_position = "TRIM_HORIZON"
+  depends_on        = [time_sleep.lambda_iam_propagation]
+  amazon_managed_kafka_event_source_config {
+    consumer_group_id = "wsc2026-sensor-alert-cg"
+  }
 }
 
-# 3-3: SSH(22) 무제한 개방 탐지
-resource "aws_config_config_rule" "sg_ssh" {
-  count = local.rubric_count
-  name  = "wsc2026-sg-ssh-rule"
-  source {
-    owner             = "AWS"
-    source_identifier = "INCOMING_SSH_DISABLED"
-  }
-  scope {
-    compliance_resource_types = ["AWS::EC2::SecurityGroup"]
-  }
-  depends_on = [aws_config_configuration_recorder_status.main]
-}
-
-# 3-3 / 3-5: 필수 태그(Name) 검사. 대상 EC2 인스턴스는 Name 태그를 가지므로
-# NON_COMPLIANT 결과가 없어야 한다(3-5 기대값 None).
-resource "aws_config_config_rule" "required_tags" {
-  count = local.rubric_count
-  name  = "wsc2026-required-tags-rule"
-  source {
-    owner             = "AWS"
-    source_identifier = "REQUIRED_TAGS"
-  }
-  scope {
-    compliance_resource_types = ["AWS::EC2::Instance"]
-  }
-  input_parameters = jsonencode({ tag1Key = "Name" })
-  depends_on       = [aws_config_configuration_recorder_status.main]
-}
-
-output "sns_topic" { value = aws_sns_topic.alert.arn }
-output "trail_bucket" { value = aws_s3_bucket.trail.id }
-output "lambda_functions" {
-  value = { for key, fn in aws_lambda_function.event : key => fn.function_name }
-}
-output "event_rules" {
-  value = concat([
-    aws_cloudwatch_event_rule.sg_change.name,
-    aws_cloudwatch_event_rule.role_change.name,
-    aws_cloudwatch_event_rule.termination_protection_change.name,
-    aws_cloudwatch_event_rule.ec2_type_change.name,
-    ], aws_cloudwatch_event_rule.ec2_stop[*].name,
-    aws_cloudwatch_event_rule.tag_compliance[*].name,
-  aws_cloudwatch_event_rule.guard[*].name)
-}
-output "config_rules" {
-  value = concat(
-    aws_config_config_rule.sg_ssh[*].name,
-    aws_config_config_rule.required_tags[*].name,
-  )
-}
-output "spec" { value = var.spec }
+output "msk_arn" { value = aws_msk_cluster.main.arn }
+output "sensor_table" { value = aws_dynamodb_table.sensor.name }
+output "alert_bucket" { value = aws_s3_bucket.alert.id }

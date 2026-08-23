@@ -1,3 +1,9 @@
+"""wsc2026-sensor-alert-consumer (MSK alert topic consumer).
+
+배포파일 lambda.md 기준: Runtime python3.14 / Handler index.handler
+  - 이상 데이터 수신 → SNS 알림 발송 + S3 /alert/{sensorId}/{date}/{timestamp}.json 저장
+"""
+
 import base64
 import json
 import logging
@@ -21,7 +27,7 @@ def _records(event):
             yield json.loads(base64.b64decode(message["value"]).decode("utf-8"))
 
 
-def consumer_handler(event, context):
+def handler(event, context):
     records = list(_records(event))
     logger.info("Processing alert batch: %d messages", len(records))
 
@@ -55,3 +61,7 @@ def consumer_handler(event, context):
         logger.info("%s: alert saved to s3://%s/%s", sensor_id, S3_BUCKET, key)
 
     return {"processed": len(records)}
+
+
+# 이전 배포(handler=wsc2026.consumer_handler)와의 호환용 별칭
+consumer_handler = handler

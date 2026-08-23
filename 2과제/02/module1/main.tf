@@ -15,6 +15,7 @@ data "aws_caller_identity" "current" {}
 variable "bibunho" {
   description = "선수 비번호 (S3 버킷 접미사)"
   type        = string
+  default     = "102"
 }
 
 # ── S3 (input/ processed/ error/) ───────────────────────────────────
@@ -22,16 +23,12 @@ resource "aws_s3_bucket" "score" {
   bucket        = "wsc2026-student-score-bucket-${var.bibunho}"
   force_destroy = true
 }
-# input/ 폴더 placeholder 만 생성한다.
-#  - 1-1: 워크플로 실행 후 test.csv 는 input/->processed/ 로 이동해 input/ 이 비므로,
-#    'PRE input/' 표시를 위해 이 placeholder 가 필요하다.
-#  - processed/ · error/ 는 워크플로가 test.csv(→processed/)와 오류 json 4개(→error/)를
-#    만들어 자동으로 'PRE' 가 뜨므로 placeholder 를 두지 않는다.
-#    (placeholder 를 두면 1-5-A/1-5-B 에서 0바이트 라인이 추가로 출력돼 오답 위험)
-resource "aws_s3_object" "input_prefix" {
-  bucket = aws_s3_bucket.score.id
-  key    = "input/"
-}
+# 폴더 placeholder 는 Terraform 이 만들지 않는다.
+#  - 새 채점기준표: 채점 시작 시 버킷/테이블 데이터가 남아 있으면 1-1·1-5·1-6 을 모두 오답 처리한다.
+#    0바이트 폴더 마커도 객체이므로 남기지 않는다.
+#  - 그럼에도 1-1 은 `aws s3 ls s3://$BUCKET/` 출력에 error/ input/ processed/ 3개 PRE 를 요구한다.
+#    → 워크플로가 input/test.csv 를 processed/ 로 옮긴 뒤 input/ 마커를 복원(RestoreInputPrefix)하고,
+#      error/ 는 검증 실패 4건, processed/ 는 test.csv 로 각각 채워져 3개 PRE 가 모두 표시된다.
 
 # ── DynamoDB (PK studentId, SK examDate) ─────────────────────────────
 resource "aws_dynamodb_table" "score" {
@@ -226,6 +223,18 @@ resource "aws_sfn_state_machine" "score" {
           "Key.$" = "$.key"
         }
         ResultPath = null
+        Next       = "RestoreInputPrefix"
+      }
+      # input/ 의 마지막 객체가 processed/ 로 이동하면 'PRE input/' 이 사라진다.
+      # 채점 1-1 은 error/ input/ processed/ 3개 PRE 를 요구하므로 0바이트 마커를 복원한다.
+      RestoreInputPrefix = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::aws-sdk:s3:putObject"
+        Parameters = {
+          Bucket = aws_s3_bucket.score.id
+          Key    = "input/"
+        }
+        ResultPath = null
         End        = true
       }
       MoveToError = {
@@ -245,6 +254,16 @@ resource "aws_sfn_state_machine" "score" {
         Parameters = {
           Bucket  = aws_s3_bucket.score.id
           "Key.$" = "$.key"
+        }
+        ResultPath = null
+        Next       = "RestoreInputPrefixOnError"
+      }
+      RestoreInputPrefixOnError = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::aws-sdk:s3:putObject"
+        Parameters = {
+          Bucket = aws_s3_bucket.score.id
+          Key    = "input/"
         }
         ResultPath = null
         Next       = "WorkflowFailed"
@@ -330,12 +349,15 @@ resource "aws_s3_bucket_notification" "eb" {
 #   3) 최대 ~180초 동안 processed/test.csv 와 error/ 4개가 생성되는지 폴링
 #   4) 알림이 끝내 동작하지 않으면(전파 실패) 이미 업로드된 input/test.csv 로
 #      Step Functions 를 직접 1회 실행(재업로드 X → 중복 실행 방지)
-#   5) 최종적으로 processed/test.csv 존재 + error/ 정확히 4개를 강제 검증하고,
-#      S3 알림의 at-least-once 중복 전달로 error 파일이 초과 생성된 경우 studentId 기준
-#      1개씩만 남기고 정리하여 채점 기준(1-5-A/1-5-B) 만점을 보장한다.
+#   5) 최종적으로 processed/test.csv 존재 + error/ 정확히 4개 + 1-1 PRE 3종 + 1-5 표본값
+#      (STU1020 96.6 A)을 강제 검증한다. S3 알림의 at-least-once 중복 전달로 error 파일이
+#      초과 생성된 경우 studentId 기준 1개씩만 남기고 정리한다.
+#   6) 검증이 끝나면 S3 버킷과 DynamoDB 테이블을 비운다(새 채점기준표의 데이터 클렌징 조건).
+#      채점위원이 input/test.csv 를 다시 업로드하면 동일 경로로 워크플로가 재실행된다.
+#      수동 재클렌징은 `bash cleanup.sh` 사용.
 resource "terraform_data" "upload_test_csv" {
   triggers_replace = [
-    "v2-idempotent-event-driven", # 로직 개정: 강제 재실행용 버전 마커
+    "v3-verify-then-cleanse", # 로직 개정: 강제 재실행용 버전 마커
     filesha256("${path.module}/test.csv"),
     data.archive_file.score.output_base64sha256,
     data.archive_file.trigger.output_base64sha256,
@@ -347,6 +369,7 @@ resource "terraform_data" "upload_test_csv" {
       BUCKET = aws_s3_bucket.score.id
       REGION = "ap-southeast-1"
       SM_ARN = aws_sfn_state_machine.score.arn
+      DDB    = aws_dynamodb_table.score.name
       CSV    = "${path.module}/test.csv"
     }
     command = <<-EOT
@@ -435,7 +458,45 @@ resource "terraform_data" "upload_test_csv" {
         echo "ERROR: expected exactly 4 error objects, found $EC" >&2
         exit 1
       fi
-      echo "Verified: processed/test.csv present and exactly 4 error objects. Workflow OK."
+      PREFIXES=$(aws s3 ls "s3://$BUCKET/" --region "$REGION" | awk '{print $2}' | tr '\n' ' ' | xargs)
+      if [ "$PREFIXES" != "error/ input/ processed/" ]; then
+        echo "ERROR: 1-1 prefixes mismatch (actual: $PREFIXES)" >&2
+        exit 1
+      fi
+      ITEMS=$(aws dynamodb scan --table-name "$DDB" --region "$REGION" --select COUNT --query Count --output text)
+      if [ "$ITEMS" -lt 1 ]; then
+        echo "ERROR: DynamoDB has no processed item" >&2
+        exit 1
+      fi
+      AVG=$(aws dynamodb get-item --table-name "$DDB" --region "$REGION" \
+        --key '{"studentId":{"S":"STU1020"},"examDate":{"S":"2026-05-30"}}' \
+        --query "Item.[studentId.S,average.N,grade.S]" --output text | tr '\t' ' ' | xargs)
+      if [ "$AVG" != "STU1020 96.6 A" ]; then
+        echo "ERROR: 1-5 sample mismatch (actual: $AVG)" >&2
+        exit 1
+      fi
+      echo "Verified: 1-1 prefixes / 1-5 ($AVG, processed/test.csv) / 1-6 (error objects=$EC) OK."
+
+      # 6) 채점 전 데이터 클렌징 (새 채점기준표 필수 조건)
+      #    "채점 시작 시 S3 버킷과 DynamoDB 데이터가 남아 있으면 1-1·1-5·1-6 을 모두 오답 처리"
+      #    → 검증이 끝나면 버킷과 테이블을 비운다. 채점 시 채점위원이 input/test.csv 를
+      #      다시 업로드하면 같은 경로로 워크플로가 재실행된다.
+      echo "Cleansing S3 bucket and DynamoDB table for grading..."
+      aws s3 rm "s3://$BUCKET/" --recursive --region "$REGION" >/dev/null 2>&1 || true
+      while :; do
+        KEYS=$(aws dynamodb scan --table-name "$DDB" --region "$REGION" \
+          --projection-expression "studentId,examDate" \
+          --query 'Items[*]' --output json)
+        COUNT=$(printf '%s' "$KEYS" | jq 'length')
+        [ "$COUNT" -eq 0 ] && break
+        printf '%s' "$KEYS" | jq -c '.[]' | while read -r k; do
+          aws dynamodb delete-item --table-name "$DDB" --region "$REGION" --key "$k" >/dev/null
+        done
+      done
+      LEFT_S3=$(aws s3api list-objects-v2 --bucket "$BUCKET" --region "$REGION" --query 'length(Contents || `[]`)' --output text 2>/dev/null || echo 0)
+      LEFT_DDB=$(aws dynamodb scan --table-name "$DDB" --region "$REGION" --select COUNT --query Count --output text)
+      echo "Cleansed: S3 objects=$LEFT_S3, DynamoDB items=$LEFT_DDB (both must be 0)"
+      [ "$LEFT_S3" = "0" ] && [ "$LEFT_DDB" = "0" ]
     EOT
   }
   depends_on = [aws_s3_bucket_notification.eb]

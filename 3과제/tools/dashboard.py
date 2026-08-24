@@ -467,10 +467,11 @@ function tuneParse(text){
     var util=field(body,/(?:average_?utilization|averageUtilization|target|util)\s*=\s*(\d+)%?/i);
     var mn=field(body,/(?:min_?replicas|min)\s*=\s*(\d+)/i);
     var mx=field(body,/(?:max_?replicas|max)\s*=\s*(\d+)/i);
-    // 부분값에 임의 기본값을 채우면 기존 설정을 망칠 수 있으므로 네 값이 모두 있어야 인정한다.
-    if(cpu===null||util===null||mn===null||mx===null)return null;
-    // 네 값을 그대로 보존한다. min을 임의로 2로 덮으면 cold-start/비용 판단과 롤백이 깨진다.
-    return {app:app,cpu:cpu+'m',util:util,min:mn,max:mx};
+    // 부분값도 허용한다. tfvars 는 필드 단위 병합이라(apps.tf), 안 적은 값은 apps/
+    // app_defaults 로 자연히 채워진다. 단 아무 값도 없으면(넷 다 null) 무시한다.
+    // request 는 요약 출력(request=..m target=..%)에서 오는 핵심 두 값 중 하나다.
+    if(cpu===null&&util===null&&mn===null&&mx===null)return null;
+    return {app:app,cpu:(cpu!==null?cpu+'m':null),util:util,min:mn,max:mx};
   }
   function add(x){
     if(!x)return;
@@ -496,7 +497,7 @@ function tuneParse(text){
 
   // 3) 구형 autotune 단일값 형식은 명시적인 대상 범위가 있을 때만 허용한다.
   var one=parseFields(known[0],text);
-  if(!one)return {items:[],error:'request/min/max/average_utilization 네 값을 모두 읽지 못했습니다.'};
+  if(!one)return {items:[],error:'request/target/min/max 중 하나도 읽지 못했습니다. "product: request=100m target=90%" 같은 앱별 줄을 붙여넣어 주세요.'};
   var apps=[];
   var scope=text.match(/반영값\s*\(([^)]*)\)/i);
   if(scope){
@@ -518,40 +519,40 @@ function tuneCmds(f){
   var items=(f&&f.items)?f.items:[];
   if(!items.length){
     return '<div class="tip warn"><h3>값을 못 읽었어요</h3><div class=why>'
-      +esc((f&&f.error)||'앱별 requests.cpu, min_replicas, max_replicas, average_utilization 네 값이 있는 줄을 붙여넣어 주세요.')
+      +esc((f&&f.error)||'앱별 값이 있는 줄을 붙여넣어 주세요. 예) product: request=100m target=90%')
       +'<br>대상 앱이 없는 단일값은 안전을 위해 전체 앱에 복제하지 않습니다.</div></div>';
   }
   var out='<div class="tip good"><h3>적용 대상: '+items.map(function(x){return x.app}).join(', ')+'</h3>'
-    +'<div class=why>'+items.map(function(x){return x.app+' → cpu='+x.cpu+' util='+x.util+'% min='+x.min+' max='+x.max;}).join('\n')+'</div></div>';
+    +'<div class=why>'+items.map(function(x){
+        var p=[]; if(x.cpu!=null)p.push('cpu='+x.cpu); if(x.util!=null)p.push('util='+x.util+'%');
+        if(x.min!=null)p.push('min='+x.min); if(x.max!=null)p.push('max='+x.max);
+        return x.app+' → '+p.join(' ');
+      }).join('\n')+'</div></div>';
   var ns=(D&&D.namespace)||'app';
-  // PowerShell 대응: -p '{\"...\"}' 형태는 PowerShell 에서 백슬래시가 그대로 전달돼
-  // kubectl 이 JSON 파싱에 실패한다. 임시 파일 + --patch-file 로 우회한다
-  // (tuning/apply.ps1 과 동일한 방식). 경로는 역슬래시 이스케이프를 피해 슬래시를 쓴다.
-  function patchCmds(n,mn,mx,util){
-    var body=JSON.stringify({spec:{minReplicas:mn,maxReplicas:mx,metrics:[{type:"Resource",resource:{name:"cpu",target:{type:"Utilization",averageUtilization:util}}}]}});
-    var pf='"$env:TEMP/hpa-'+n+'.json"';
-    return ["'"+body+"' | Set-Content -Path "+pf+" -Encoding ascii",
-            'kubectl -n '+ns+' patch hpa '+n+' --type=merge --patch-file '+pf];
-  }
-  function reqCmds(dep,cpu){
-    return ['kubectl -n '+ns+' set resources deploy/'+dep+' --requests=cpu='+cpu,
-            'kubectl -n '+ns+' rollout status deploy/'+dep+' --timeout=120s'];
+  // ⚠ 클러스터를 kubectl 로 직접 고치지 않는다. tuning/apply.ps1 로 tuning.auto.tfvars.json
+  //   에 기록하고 terraform 이 반영한다(드리프트 방지). 붙여넣은 값에 없는 필드(min/max 등)는
+  //   명령에 넣지 않으므로 apps/app_defaults 값이 유지된다.
+  function applyCmd(app,x){
+    var a=[".\\apply.ps1 -App "+app];
+    if(x.cpu!=null)a.push("-Request "+String(x.cpu).replace('m',''));
+    if(x.util!=null)a.push("-Target "+x.util);
+    if(x.min!=null)a.push("-Min "+x.min);
+    if(x.max!=null)a.push("-Max "+x.max);
+    return a.join(' ');
   }
   items.forEach(function(x){
-    var n=x.app, live=(D.apps||[]).find(function(a){return a.app===n})||{}, h=hpaOf(n);
-    var deployment=live.deployment_name||n, hpaName=h.hpa_name||n;
-    var current={cpu:live.cpu_req||x.cpu,min:h.min!=null?h.min:x.min,max:h.max!=null?h.max:x.max,util:pctn(h.tgt)};
-    if(current.util==null)current.util=x.util;
-    var changedCpu=current.cpu!==x.cpu;
-    // requests 명령은 현재값과 같아도 항상 출력한다(붙여넣은 값을 그대로 확인·실행할 수 있게).
-    // 값이 동일하면 kubectl 이 변경 없음으로 처리해 롤아웃도 일어나지 않는다.
-    var apply=patchCmds(hpaName,x.min,x.max,x.util).concat(reqCmds(deployment,x.cpu));
-    var rollback=reqCmds(deployment,current.cpu).concat(patchCmds(hpaName,current.min,current.max,current.util));
-    var same=changedCpu?'':' <span class=mut>(cpu 는 현재값과 동일 — 실행해도 롤아웃 없음)</span>';
-    out+='<div class=card style="margin-bottom:12px"><div class=lbl>'+n+same+'</div>'
-      +tuneCmdBlock('① 라이브 적용 (PowerShell)',apply)+tuneCmdBlock('② 점수 미개선/오류 시 정확한 롤백',rollback)+'</div>';
+    var n=x.app;
+    var fields=[];
+    if(x.cpu!=null)fields.push('request='+x.cpu);
+    if(x.util!=null)fields.push('target='+x.util+'%');
+    if(x.min!=null)fields.push('min='+x.min);
+    if(x.max!=null)fields.push('max='+x.max);
+    out+='<div class=card style="margin-bottom:12px"><div class=lbl>'+n+' <span class=mut>('+fields.join(', ')+')</span></div>'
+      +tuneCmdBlock('① 값 기록 (tuning/ 에서 실행)',[applyCmd(n,x)])+'</div>';
   });
-  out+='<div class="tip dim"><h3>순서</h3><div class=why>한 번에 한 앱만 적용 → 120초 재측정 → 공식 소계 상승 및 availability≥99%, 모든 performance≥30%면 유지. 아니면 즉시 롤백. Terraform apply는 튜닝에 필요하지 않습니다.</div></div>';
+  out+='<div class="tip dim"><h3>반영</h3><div class=why>위 명령을 <code>tuning/</code> 에서 실행하면 tuning.auto.tfvars.json 에 기록된다. '
+    +'모아서 <code>.\\apply.ps1 -Show</code> 로 확인 후 <code>cd ..\\terraform ; terraform apply</code> 로 반영. '
+    +'되돌리기는 <code>.\\rollback.ps1</code>. Terraform 이 단일 진실 공급원이라 드리프트가 없다.</div></div>';
   return out;
 }
 function tuneRun(){

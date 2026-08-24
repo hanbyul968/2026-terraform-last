@@ -49,19 +49,11 @@ user: requests.cpu="200m", min_replicas=3, max_replicas=17, average_utilization=
         self.assertIn("stress → cpu=375m util=52% min=3 max=17", result["html"])
         self.assertIn("user → cpu=200m util=50% min=3 max=17", result["html"])
         self.assertNotIn("product →", result["html"])
-        self.assertIn("점수 미개선/오류 시 정확한 롤백", result["html"])
-        self.assertIn("requests=cpu=250m", result["html"])
-        # PowerShell 형식: 백슬래시 이스케이프(-p '{\"..\"}') 대신 임시파일 + --patch-file.
-        # 롤백 patch 의 minReplicas 는 이스케이프 없는 순수 JSON 으로 나와야 한다.
-        self.assertIn('"minReplicas":2', result["html"])
-        self.assertNotIn('minReplicas\\":2', result["html"])
-        self.assertIn("--patch-file", result["html"])
-        self.assertIn("Set-Content -Path", result["html"])
-        self.assertNotIn("--type=merge -p", result["html"])
-        # requests 명령은 현재값과 같아도 항상 나와야 한다 (apply 쪽)
-        self.assertIn("requests=cpu=375m", result["html"])
-        self.assertIn("requests=cpu=200m", result["html"])
-        self.assertIn("Terraform apply는 튜닝에 필요하지 않습니다", result["html"])
+        # 이제 kubectl 이 아니라 tuning/apply.ps1 로 tfvars 에 기록한다(드리프트 방지).
+        self.assertNotIn("kubectl", result["html"])
+        self.assertIn(".\\apply.ps1 -App stress -Request 375 -Target 52 -Min 3 -Max 17", result["html"])
+        self.assertIn(".\\apply.ps1 -App user -Request 200 -Target 50 -Min 3 -Max 17", result["html"])
+        self.assertIn("terraform apply", result["html"])
         self.assertNotIn("k8s_apps.tf", result["html"])
 
 
@@ -89,6 +81,25 @@ user: requests.cpu="200m", min_replicas=3, max_replicas=17, average_utilization=
             {"app": "user", "cpu": "200m", "util": 50, "min": 3, "max": 17},
         ])
 
+    def test_two_value_summary_format_is_accepted(self):
+        """optimize.ps1 요약 출력(request=..m target=..%)만으로도 파싱된다.
+
+        min/max 가 없어도 거부하지 않는다 — tfvars 는 필드 단위 병합이라
+        빠진 값은 apps/app_defaults 로 채워진다. (이전엔 네 값을 모두 요구해 막혔다)
+        """
+        text = ("  product: request=100m target=90%\n"
+                "  stress: request=725m target=58%\n"
+                "  user: request=350m target=29%")
+        self.assertEqual(run_parser(text)["items"], [
+            {"app": "product", "cpu": "100m", "util": 90, "min": None, "max": None},
+            {"app": "stress", "cpu": "725m", "util": 58, "min": None, "max": None},
+            {"app": "user", "cpu": "350m", "util": 29, "min": None, "max": None},
+        ])
+        html = run_parser(text, with_html=True)["html"]
+        self.assertNotIn("kubectl", html)
+        self.assertIn(".\\apply.ps1 -App product -Request 100 -Target 90", html)
+        self.assertNotIn("-Min", html.split("product")[1].split("stress")[0])  # min/max 없으면 안 붙음
+
     def test_unscoped_single_value_is_not_copied_to_all_apps(self):
         text = 'requests.cpu="375m", min_replicas=3, max_replicas=17, average_utilization=52'
         result = run_parser(text)
@@ -114,7 +125,7 @@ class SharedDashboardPlanTests(unittest.TestCase):
     def test_demo_data_contains_shared_official_plan(self):
         data = self.dashboard._add_tuning_plan(self.dashboard.demo_data())
         self.assertIn("tuning", data)
-        self.assertEqual(data["tuning"]["schema_version"], 1)
+        self.assertEqual(data["tuning"]["schema_version"], 2)
         self.assertIn("score", data["tuning"])
         for candidate in data["tuning"]["candidates"]:
             self.assertTrue(candidate["apply_commands"])

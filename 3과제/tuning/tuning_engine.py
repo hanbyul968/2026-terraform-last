@@ -42,16 +42,18 @@ MAX_EXTRAPOLATED_SLOWDOWN = 1.5
 COST_FIRST_AVAIL_FLOOR = 90.0
 COST_FIRST_PERF_FLOOR = 80.0
 COST_FIRST_MAX_SLOWDOWN = 3.0
-# request는 실측 사용량과 동떨어질 수 없다. 파드당 실사용의 이 비율 아래로는 내리지 않는다.
+# request 하한. 파드당 실사용의 이 비율 아래로는 내리지 않는다(과소예약 방지).
 #
-# 1.0 (성능 우선): 실측 사용량 아래로는 절대 내리지 않는다.
-# 0.5 였을 때 실패한 이유: request 가 실사용의 절반이면 노드에 파드가 과밀하게 들어가
-# 서로 CPU 를 다투고, HPA 사용률이 100% 를 넘겨 포화 신호가 무의미해진다.
-# 실측: product request 가 50m 으로 뽑혔고(실사용보다 낮음) 가용성이 65% 까지 떨어졌다.
-REQUEST_USAGE_FLOOR_RATIO = 1.0
-# 계산된 필요 request 에 곱하는 계수. 1.0 에 가까울수록 여유가 커진다(성능 우선).
-# 0.7 은 유휴 파드를 baseline 노드에 밀어넣기 위한 비용 우선 값이었다.
-REQUEST_HEADROOM = 0.9
+# 0.5 로 되돌린 이유(실측): 1.0(=측정 사용량 이상 강제)으로 올렸더니 발산했다.
+#   request↑ → 사용률↓ → HPA 파드 덜 늘림 → 파드당 부하↑ → 측정 사용량↑ → request 더↑
+#   (user 275→450→900, stress 500→925→1525 회차마다 폭주)
+# 0.5 는 request 를 측정 사용량 아래로 둬서 HPA 가 파드를 늘려 파드당 부하가 내려가 수렴한다.
+# (product 50m 가용성 붕괴의 진짜 원인은 request 가 아니라 CPU limit 75m 의 CFS 스로틀이었고,
+#  그건 cpu_limit_ratio=0 으로 이미 해결됐다.)
+REQUEST_USAGE_FLOOR_RATIO = 0.5
+# 계산된 필요치에 곱하는 계수. 필요치의 최대가 아니라 여유를 둔 낮은 값으로 잡는다.
+# 부족분은 HPA replica 가 채운다. (0.9 는 상한에 붙어 발산 쪽으로 기울었다)
+REQUEST_HEADROOM = 0.7
 
 
 def instance_size_units(instance_type):

@@ -108,9 +108,8 @@ class SharedEngineTests(unittest.TestCase):
 
     def test_sizing_stays_below_computed_need_with_headroom(self):
         """request는 노드를 꽉 채우는 계산 최대치가 아니라 그보다 낮게(HEADROOM) 나온다."""
-        # 성능 우선 방침: HEADROOM 0.9, USAGE_FLOOR 1.0.
-        # request 는 계산 필요치보다 크게 낮추지 않는다(계산치의 약 90% 이상).
-        self.assertLessEqual(engine.REQUEST_HEADROOM, 1.0)
+        # 비용 우선 사이징: HEADROOM 0.7 을 곱해 계산 필요치보다 낮게 잡는다.
+        self.assertLess(engine.REQUEST_HEADROOM, 1.0)
         app = self.app(name="svc", slo_seconds=1.0, samples=2000, window_seconds=120.0,
                        request_m=900, cpu_limit_m=2000, target=55, min_replicas=2,
                        max_replicas=8, replicas=4, pods_p90=4, pods_max=4,
@@ -123,9 +122,9 @@ class SharedEngineTests(unittest.TestCase):
         need_per_pod = snapshot.app_required_cpu_m("svc") / app.pods_p90
         sized = engine._usage_sized(snapshot, app, engine._current_dict(app))
         self.assertIsNotNone(sized)
-        # 계산 필요치를 넘지 않되(과대예약 금지), 실사용 아래로도 안 내려간다(성능 우선).
-        self.assertLessEqual(sized["request"], need_per_pod)
-        self.assertGreaterEqual(sized["request"], app.per_pod_p90)
+        self.assertLess(sized["request"], need_per_pod)          # 계산 필요치보다 낮다
+        self.assertGreaterEqual(sized["request"],                # 실사용 절반 이상
+                                int(app.per_pod_p90 * engine.REQUEST_USAGE_FLOOR_RATIO))
 
     def test_hpa_only_mode_excludes_request_changes(self):
         """부하 중 루프는 rollout을 일으키는 request 변경 후보를 내지 않는다."""
@@ -177,12 +176,13 @@ class SharedEngineTests(unittest.TestCase):
             {"user": app("user", 600, 2), "stress": app("stress", 600, 2),
              "product": app("product", 250, 2)}, engine.ClusterSnapshot(**cl))
         self.assertEqual(fit.idle_nodes(), 2)
-        # 성능 우선(USAGE_FLOOR=1.0): request 를 실사용 아래로 내리지 않는다.
-        # 실사용 합(1600m)이 노드 가용(1480m)을 넘으면 축소로는 못 풀고 None 을 낸다
-        # (유휴 노드를 줄이려 실사용 밑으로 깎지 않는다 — 그건 성능을 깎는 짓이다).
-        self.assertIsNone(engine._idle_fit(stuck))
-        # 실사용이 노드에 들어가는 경우엔 축소 없이도 이미 baseline 이라 presize 불필요.
-        self.assertIsNone(engine._idle_fit(fit))
+        # idle-fit이 유휴 초과 상태를 baseline로 되돌리는 request 축소 묶음을 낸다.
+        # (USAGE_FLOOR 0.5 라 실사용 절반까지 낮춰 노드에 담을 수 있다)
+        recovered = engine._idle_fit(stuck)
+        self.assertIsNotNone(recovered)
+        self.assertLessEqual(stuck.idle_nodes(recovered), 2)
+        for name, v in recovered.items():
+            self.assertLessEqual(v["request"], engine._current_dict(stuck.apps[name])["request"])
 
     def test_node_shed_surfaces_when_frontier_prefers_fewer_nodes(self):
         """프론티어가 '적은 노드 = 총점↑'이라 하면 max_replicas 를 줄이는 후보가 나온다.

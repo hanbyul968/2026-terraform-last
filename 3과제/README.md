@@ -1,40 +1,164 @@
 # 2026 전국기능경기대회 클라우드컴퓨팅 — 3과제 (System Operation)
 
-앱 3개(user/product/stress)를 EKS에 배포하고 CloudFront 단일 엔드포인트로 트래픽을 받으며,
-**가용성·성능을 지키면서 최소 비용으로 운영**하는 과제. 경기 3시간, 트래픽은 **시작 1시간 뒤** 주입.
+앱을 EKS에 배포하고 CloudFront 단일 엔드포인트로 트래픽을 받으며, **가용성·성능을 지키면서 최소 비용으로 운영**하는 과제.
+경기 3시간, 트래픽은 **시작 1시간 뒤** 주입.
 
-> 대회장에서는 아래 **대회날 순서**를 위에서부터 그대로 실행한다.
-> 환경/아키텍처/설계 설명은 문서 아래쪽 참고용이다.
+> **대회날은 아래 순서만 위에서부터 실행한다.** 설계 근거·처음 세팅·트러블슈팅은 [부록](#부록--상세-문서)에 있다.
 
 ---
 
-## 대회날 순서 (이대로 실행)
+## 대회날 순서
 
-시간은 목표치. 명령은 전부 `3과제\` 아래에서 실행한다.
+명령은 전부 `3과제\` 아래에서 실행한다.
 
-| 시각 | 할 일 | 명령 / 링크 |
+| 시각 | 할 일 | 명령 |
 |---|---|---|
-| 0:00 | **배포** (최초는 2단계 병렬) | [terraform/README "2. 배포"](terraform/README.md#2-배포) |
-| ~0:20 | 받은 **바이너리 교체** → apply | [terraform/README "3. 바이너리 교체"](terraform/README.md#3-바이너리-교체) |
-| ~0:25 | 스펙 바뀌었으면 대응 | 아래 [스펙 바뀌면](#스펙-바뀌면) |
-| ~0:35 | **응답규약 검증 → 엔드포인트 제출** | `cd tuning ; .\verify.ps1` |
-| ~0:37 | **baseline 측정** (~3분) | `.\loadtest.ps1 -Duration 120s -Label t1` |
-| ~0:40~0:58 | **라이브 자동 최적화** (18분 상한, warmup 60s + baseline/candidate 각 120s, 후보 최대 3개) | `.\optimize.ps1 -Apply` |
-| 1:00~ | 트래픽 시작. **모니터링 + WAF 추가 차단** | `cd tools ; .\dashboard.ps1` |
+| 0:00 | 배포 | [terraform/README "2. 배포"](terraform/README.md#2-배포) |
+| ~0:20 | 받은 **바이너리를 `application/binary/`에 덮어쓰기** → apply | `terraform apply` |
+| ~0:25 | 스펙 바뀌었으면 [tfvars 수정](#앱이나-스펙이-바뀌면) |  |
+| ~0:35 | 응답규약 검증 → 엔드포인트 제출 | `cd tuning ; .\verify.ps1` |
+| ~0:37 | baseline 측정 | `.\loadtest.ps1 -Duration 90s -Label t1` |
+| ~0:40 | 튜닝 권장값 산출 (20분 상한) | `.\optimize.ps1` |
+| ~0:55 | 값 확인 후 반영 | `.\apply.ps1 -Show` → `terraform apply` |
+| 1:00~ | 트래픽 시작. 모니터링 | `cd tools ; .\dashboard.ps1` |
 | 종료 | 부하 중지 / (연습계정) destroy | `terraform destroy -auto-approve` |
 
-> ⏱ **트래픽 전 1시간 = `terraform apply`(~30분) + 튜닝(~20분).** 튜닝은 워밍업 후 120초 측정 + 18분
-> 예산의 `optimize.ps1`로 끝낸다. 측정이 너무 짧으면 콜드스타트가 섞여 user perf 가 실제(80%+)보다 낮게 찍힌다.
+엔드포인트 제출 형식은 **프로토콜 + 도메인만** (`https://도메인`). 경로를 붙이면 오답.
 
-**0:00 환경이 처음이면** 먼저 아래 [처음 세팅](#처음-세팅-새-pc--새-계정)을 1회 끝내고 배포로 온다.
+### 절대 규칙
 
-### 절대 규칙 3가지
-
-1. **avail% 99% 사수.** 가용성 > 성능 > 비용. avail이 깨지면 성능 점수도 같이 죽는다.
-2. **트래픽 중 `terraform apply`/`requests` 변경 금지.** 파드 롤아웃이 그대로 504가 된다. 부하 중엔 HPA만 만진다.
-3. **한 번에 한 앱만** 바꾸고 재측정. 동시에 여러 개 바꾸면 원인을 못 찾는다.
+1. **가용성 > 성능 > 비용.** avail이 깨지면 성능 점수도 같이 죽는다.
+2. **트래픽 중 `terraform apply` 금지.** 파드 롤아웃이 그대로 504가 된다. 부하 중 바꿔야 하면 HPA만(`kubectl` 아님 — [아래](#튜닝은-terraform을-거친다) 참고).
+3. **한 번에 하나만** 바꾸고 재측정.
 
 ---
+
+## 앱이나 스펙이 바뀌면
+
+**`terraform/terraform.tfvars` 한 파일만 고친다.** terraform 코드는 손대지 않는다.
+
+### 앱이 바뀔 때
+
+앱 목록은 `application/binary/`에서 **자동 발견**된다. 바이너리를 덮어쓰면 ECR·이미지 빌드·Deployment·Service·HPA·PDB·ALB 타깃그룹·리스너 룰·WAF 경로·CloudFront 동작이 전부 자동 생성된다.
+
+앱별 특성만 `apps`에 적는다. 안 적으면 `app_defaults`로 뜬다.
+
+```hcl
+apps = {
+  user    = { cpu_request_m = 120, hpa_target_cpu = 55, min_replicas = 3, max_replicas = 10 }
+  product = { needs_s3 = true, cache_ttl = 10, cache_query_keys = ["id"] }
+  stress  = { needs_db = false, cpu_request_m = 500 }
+}
+```
+
+| 키 | 의미 |
+|---|---|
+| `cpu_request_m` / `cpu_request_pct` | 파드 CPU 예약. pct는 노드 용량 비율(타입 바뀌면 자동 조정) |
+| `cpu_limit_ratio` | limit = request × 이 값 (기본 1.5). 낮추면 격리↑ 계단흡수↓ |
+| `min_replicas` / `max_replicas` / `hpa_target_cpu` | HPA |
+| `needs_db` / `needs_s3` | DB 시크릿 / S3 쓰기 IRSA 주입 |
+| `cache_ttl` / `cache_query_keys` | CloudFront GET 캐시 |
+| `path` / `container_port` / `healthcheck_path` | 앱별 다를 때만 |
+
+**request는 실측 사용량에 맞춘다.** 과대 설정하면 HPA가 눈이 먼다(사용률 = 실사용÷request이므로 목표치에 영원히 못 닿음) — 실제로 request 425m에 실사용 40m이라 9%/90%로 확장이 안 된 적이 있다. 여유는 request가 아니라 `hpa_target_cpu`로 확보한다.
+
+### 노드 타입이 바뀔 때
+
+`node_instance_type` 한 줄만 바꾼다. 아래가 전부 자동 재계산된다.
+
+- 아키텍처 → `ami_type`, `docker build --platform`, Karpenter `kubernetes.io/arch`
+- 노드당 앱 가용 CPU, kubelet `maxPods`(Prefix Delegation 실상한)
+- Karpenter 노드 상한(앱 맵의 `max_replicas × request`에서 역산)
+
+확인은 `terraform plan`의 `sizing` / `apps` output.
+
+### 경로·포트가 바뀔 때
+
+| 바뀐 것 | 변수 |
+|---|---|
+| API prefix (`/v1`→`/v2`) | `api_prefix` (경로가 앱 이름과 다르면 `api_paths_override`) |
+| 헬스체크 / 컨테이너 포트 / 이미지 경로 | `healthcheck_path` / `container_port` / `images_prefix` |
+| DB 스키마·인덱스 | `db_schema_sql` / `db_required_indexes` |
+| WAF 차단 패턴 | `waf_blocked_*` (리스트는 덮어쓰기 — 기본값+새 값 전부 나열) |
+
+⚠ terraform 변수를 바꿔도 **`tuning/config.ps1`**의 `$APIS`·`$HC_PATH`·`$IMAGES_PREFIX`는 자동 반영되지 않는다. 부하·검증 도구가 옛 경로를 때리지 않게 같이 고친다.
+
+---
+
+## 튜닝은 Terraform을 거친다
+
+`tuning/`은 클러스터를 `kubectl`로 직접 고치지 않는다. 권장값을 `terraform/tuning.auto.tfvars.json`에 기록하고, 반영은 `terraform apply`가 한다.
+
+```powershell
+.\optimize.ps1                       # 측정 + 권장값 기록 (클러스터 안 건드림, 20분 상한)
+.\apply.ps1 -Show                    # 기록된 값 확인
+.\apply.ps1 -App user -Request 120   # 값만 기록
+.\rollback.ps1                       # 튜닝 전부 제거 → apps 값 복귀
+```
+
+반영까지 한 번에 하려면 `-RunTerraform`을 붙인다.
+
+**`kubectl patch`로 직접 고치면 안 되는 이유:** 라이브 상태가 Terraform state와 어긋나(드리프트) 무엇이 채점된 구성인지 알 수 없게 되고, 누군가 `terraform apply`를 하는 순간 튜닝이 조용히 원복된다. 실제로 채점 회차에서 라이브 값이 `.tf` 파일값과 전부 달랐던 적이 있다.
+
+변수 역할이 나뉘어 있다. `apps`는 사람이 쓰는 **구조**(경로·needs_s3·cache_ttl), `app_tuning`은 툴이 쓰는 **수치**(request·target·replicas). 우선순위는 `app_tuning > apps > app_defaults`이고, 툴은 `app_tuning`만 건드리므로 구조 설정이 지워지지 않는다.
+
+> ⚠ `tools/dashboard.py`의 "튜닝적용" 탭은 아직 `kubectl` 명령을 낸다. 그걸 쓰면 드리프트가 재발한다.
+
+---
+
+## 채점 (40점)
+
+| 항목 | 배점 | 측정 대상 | 도구 |
+|---|---|---|---|
+| 비정상 요청 처리 | 4 | 이미지 다운로드율 + 비정상 요청 403 처리율 | `tuning/verify.ps1` |
+| 고가용성·안정성 | 12 | API별 availability (5초 내 2xx) | `tuning/loadtest.ps1` |
+| 성능 효율성 | 12 | user·product ≤0.2s, stress ≤1.0s | `tuning/loadtest.ps1` |
+| 비용 최적화 | 12 | 인스턴스 비용 ratio (평균 EC2 대수 ÷ 기준 대수) | `tuning/optimize.ps1` |
+
+**성능은 비용의 전제조건이다.** 채점표 4-1~4-12는 전부 "모든 앱 성능 ≥ 30%"를 함께 요구한다. 한 앱이라도 30% 미만이면 **비용 12점이 통째로 0**이 된다. ratio가 0.5 미만이어도 0점. avail은 ≥90%면 앱당 만점.
+
+> 비용 ratio의 **분모(기준 대수)는 공개되지 않는다.** "노드 N대 = M점" 환산은 추정일 뿐이다. 확실한 것은 (1) 30% 게이트가 실재한다 (2) 노드가 적을수록 유리하다 — 방향뿐이다.
+
+---
+
+## 아키텍처
+
+```
+인터넷 → CloudFront (단일 엔드포인트, WAFv2)
+           ├─ /images/*      → S3 (OAC, 캐싱)
+           ├─ 캐시 대상 앱   → ALB (쿼리 기준 캐싱, apps.cache_ttl)
+           └─ 그 외          → ALB → EKS Pod
+                                └ 미정의 경로 → 404 / CloudFront 우회 → 403
+
+Pod → RDS Proxy → RDS MySQL 8.0 Multi-AZ (db.t3.micro)
+노드: 관리형 NG(고정 2대) + Karpenter(부하 시 증설, 종료 후 회수)
+```
+
+**비정상 요청** — 유효 경로의 공격은 WAF 403, 없는 경로는 ALB 404.
+
+**성능** — 지연 민감 앱이 CPU를 빼앗기지 않게 두 가지가 자동으로 걸린다. 앱 이름을 몰라도 동작한다.
+
+1. **CPU limit = request × 1.5.** 크게 burst하는 파드가 같은 노드 이웃의 CPU를 가져가는 것을 막는다. cgroup CPU는 비율 분배라 burst하는 쪽이 항상 이긴다. 실제로 limit/request가 3배인 앱 때문에 지연 민감 앱의 p50이 27ms → 330ms로 무너진 적이 있다.
+2. **서로 다른 앱은 같은 노드를 피한다** (pod anti-affinity, 선호). 유휴에는 노드가 적어 같이 앉고, 부하로 파드·노드가 늘면 앱마다 다른 노드로 분리된다.
+
+**비용** — NAT 없음. 유휴 노드 수는 `min_replicas × request`가 결정하고, Karpenter가 부하 종료 3분 후 통합·회수한다.
+
+---
+---
+
+# 부록 — 상세 문서
+
+> 아래는 기존 문서다. 위 내용과 겹치는 부분은 위쪽이 최신이다.
+
+## 폴더
+
+| 폴더 | 역할 |
+|---|---|
+| [`terraform/`](terraform/README.md) | **인프라 전체**. VPC·EKS·RDS·S3·ALB·CloudFront·WAF, apply로 배포 |
+| [`tuning/`](tuning/README.md) | **측정·검증·튜닝**. verify / loadtest / optimize / autotune / WAF 분석 |
+| [`tools/`](tools/README.md) | **모니터링 대시보드**. 상태와 원인 진단을 한 화면에 |
+| [`application/binary/`](application/binary) | 배포용 바이너리 + Dockerfile. 대회날 여기만 덮어쓴다 |
+| `load_user.dump` | DB 시드 덤프 (terraform이 S3 경유로 자동 적재) |
 
 ## ~0:35 — 응답규약 검증 후 엔드포인트 제출
 
@@ -46,37 +170,27 @@ cd tuning
 FAIL이면 원인별 처방이 같이 나온다. **여기서 실패하면 다른 것보다 먼저 고친다.**
 통과하면 `terraform output -raw endpoint` 값을 채점 플랫폼에 제출한다.
 
-> ⚠ 제출 형식: **프로토콜 + 도메인만** (`https://도메인`). 경로(`/v1/` 등)를 붙이면 오답.
-
----
-
 ## 트래픽 전 — 측정하고 값을 확정한다
 
 ```powershell
-.\loadtest.ps1 -Duration 120s -Label t1     # 측정 + 채점 환산 + 앱별 권장값 자동 출력 (~3분)
+.\loadtest.ps1 -Duration 90s -Label t1     # 측정 + 채점 환산 + 앱별 권장값 자동 출력
 ```
 
 리포트의 **채점 환산**(가용성/성능/비용)에서 어디서 점수가 새는지 바로 보인다.
 대시보드 계산/튜닝 탭, `advise.py`, `optimize.py`, `score.py`는 모두 `tuning/tuning_engine.py`와
-`tuning/rubric.py`를 사용한다. 따라서 후보 순서·공식 36점 소계·안전 게이트·적용/롤백 명령이 같다.
-튜닝 중 source of truth는 **라이브 Deployment/HPA**이며 Terraform과의 drift는 의도된 상태다.
+`tuning/rubric.py`를 사용한다. 따라서 후보 순서·공식 36점 소계·안전 게이트가 같다.
 
-- **자동 탐색(권장)**: `.\optimize.ps1 -Apply` — warmup 60초, baseline 120초 후 최대 3개 후보를
-  각각 120초 실측한다. 기본 목표는 **비용 우선**이며 유지선은 **가용성 ≥90% · 성능 ≥80%**다
-  (공식 채점상 가용성 90%면 앱당 만점, 성능 30% 미만이면 비용 12점이 0). 성능을 우선하려면
+- **자동 탐색(권장)**: `.\optimize.ps1` — warmup 30초, baseline 90초 후 전 앱 묶음 후보를 실측한다.
+  기본 목표는 **비용 우선**이며 유지선은 **가용성 ≥90% · 성능 ≥80%**다. 성능을 우선하려면
   `-Objective balanced`. request는 **부하량으로 정규화**해 계산한다:
   `요청당 CPU × 목표 rps ÷ 파드수`. 측정 부하가 채점 부하보다 세면 `-LoadScale 0.5`처럼 낮추거나
   `-TargetRps user=100,stress=10`으로 rps를 고정한다. 하한은 파드당 필요 CPU의 절반이고
-  한 회차에 현재값의 절반까지만 내린다. 여러 앱은 한 회차에 함께 적용해 예산을 아낀다.
-  request/HPA를 트랜잭션으로 적용하고 실패·중단 시 마지막 우승 snapshot으로
-  되돌리며, 18분 안에 롤백 시간까지 예약하고 종료한다. **튜닝 흐름에 Terraform apply는 필요 없다.**
-- **수동 1-step**: 대시보드 계산/튜닝 탭 또는 `advise.py`의 후보에서 `적용` 명령을 실행하고
-  120초 재측정한다. 개선되지 않으면 후보에 같이 표시된 **정확한 롤백 명령**을 그대로 실행한다.
+  한 회차에 현재값의 절반까지만 내린다. 각 단계 앞에서 남은 예산을 확인해 20분을 넘기지 않는다.
+- **수동 1-step**: `advise.py`의 후보에서 값을 확인하고 `apply.ps1`로 기록한 뒤 재측정한다.
+  개선되지 않으면 `rollback.ps1`로 되돌린다.
   request 변경은 Deployment rollout을 일으키므로 공식 트래픽 전에만 실행한다.
 
 자세한 사용법·주의는 [tuning/README](tuning/README.md).
-
----
 
 ## 1:00~ — 트래픽 중 운영
 
@@ -89,7 +203,7 @@ py -3 dashboard.py --namespace app --slos-ms checkout=200,search=500,worker=1000
 ```
 Deployment/HPA 이름과 `app` label은 라이브에서 발견한다. SLO는 Deployment의 `*/slo-ms` annotation,
 컨테이너 `SLO_MS`, `APP_SLOS_MS` 환경변수, `--slos-ms` 순으로 반영할 수 있다. **계산** 탭에서 공식
-36점 소계·실측 CPU 수요·예약 기준 노드 예측·후보를 확인하고, **튜닝적용** 탭의 적용/정확한 롤백 명령을 사용한다.
+36점 소계·실측 CPU 수요·예약 기준 노드 예측·후보를 확인한다.
 CloudShell이면 `python3 monitor.py --watch 10` 또는 `bash tunnel.sh`.
 
 **새 공격 차단**
@@ -98,73 +212,6 @@ python tuning\waf_header_stats.py --log-group aws-waf-logs-wsi2026 --region us-e
 ```
 "아직 안 막힌 비정상" + tfvars 제안이 나온다. `terraform/terraform.tfvars`에 넣고 apply 후
 `.\verify.ps1`로 403/404 유지 확인. ⚠ 리스트 변수는 덮어쓰기라 기본값+새 값을 전부 나열.
-
----
-
-## 채점 (40점)
-
-| 항목 | 배점 | 측정 대상 | 확인 도구 |
-|---|---|---|---|
-| 비정상 요청 처리 | 4 | 이미지 다운로드율 + 비정상 요청 403 처리율 | `tuning/verify.ps1` |
-| 고가용성·안정성 | 12 | API별 availability (5초 내 2xx) | `tuning/loadtest.ps1` |
-| 성능 효율성 | 12 | user·product ≤0.2s, stress ≤1.0s | `tuning/loadtest.ps1` |
-| 비용 최적화 | 12 | 인스턴스 비용 ratio (평균 EC2 대수 ÷ 기준 2대, 낮을수록 유리) | `tuning/optimize.ps1` |
-
-> 성능은 비용의 전제조건이다. **세 앱 중 하나라도 perf 30% 미만이면 비용 12점이 통째로 0점**,
-> 비용 ratio가 0.5 미만이어도 0점. avail은 ≥90%면 앱당 만점.
-
----
-
-## 스펙 바뀌면
-
-경로·포트·헬스체크는 **terraform 변수 하나**로 ALB·WAF·CloudFront·k8s 전 계층에 반영된다.
-
-| 바뀐 것 | 변수 |
-|---|---|
-| API prefix (`/v1`→`/v2`) | `api_prefix` (경로가 앱 이름과 다르면 `api_paths_override`) |
-| 헬스체크 경로 | `healthcheck_path` |
-| 컨테이너 포트 | `container_port` |
-| 이미지 경로 | `images_prefix` |
-| 새 WAF 차단 패턴 | `waf_blocked_user_agents` / `waf_blocked_headers` / `waf_blocked_body_patterns` 등 |
-
-⚠ terraform 변수를 바꿔도 **`tuning/config.ps1`**의 `$APIS`·`$HC_PATH`·`$IMAGES_PREFIX`는 자동
-반영되지 않는다. 부하·검증 도구가 옛 경로를 때리지 않게 같이 고친다. 앱 추가·DB 스키마 변경 등
-파일을 고쳐야 하는 경우는 [terraform/README "API/스펙 변경 대응"](terraform/README.md#4-apispec-변경-대응).
-
----
-
-## 폴더
-
-| 폴더 | 역할 |
-|---|---|
-| [`terraform/`](terraform/README.md) | **인프라 전체**. VPC·EKS·RDS·S3·ALB·CloudFront·WAF, apply로 배포 |
-| [`tuning/`](tuning/README.md) | **측정·검증·튜닝**. verify / loadtest / optimize / autotune / WAF 분석 |
-| [`tools/`](tools/README.md) | **모니터링 대시보드**. 상태와 원인 진단을 한 화면에 |
-| [`application/binary/`](application/binary) | 배포용 바이너리 + Dockerfile. 대회날 여기만 덮어쓴다 |
-| `load_user.dump` | DB 시드 덤프 (terraform이 S3 경유로 자동 적재) |
-
----
-
-## 아키텍처
-
-```
-인터넷 → CloudFront (단일 엔드포인트, WAFv2)
-           ├─ /images/*   → S3 (OAC, 캐싱)
-           ├─ /v1/product → ALB (id 쿼리 기준 캐싱)
-           └─ 그 외       → ALB → EKS Pod (user/product/stress)
-                             └ 미정의 경로 → 404 / CloudFront 우회 → 403
-
-Pod → RDS Proxy (커넥션 풀러) → RDS MySQL 8.0 Multi-AZ (db.t3.micro)
-노드: t3.medium (관리형 NG 2대 + Karpenter 증설/회수)
-```
-
-- **비정상 요청**: 유효 경로의 공격 = WAF 403 / 없는 경로(`/.env` 등) = ALB 404
-- **성능**: product GET CloudFront 캐싱, `/images/*` S3 캐싱, `user.email` 인덱스
-- **비용**: NAT 없음, t3.medium 최소 대수 + Karpenter consolidation
-
-설계 근거와 상세는 [terraform/README](terraform/README.md#1-아키텍처).
-
----
 
 ## 처음 세팅 (새 PC / 새 계정)
 
@@ -213,10 +260,13 @@ bucket_prefix = "wsi2026-608"   # 608=본인 비번호, 전역 유일값
 |---|---|
 | `BucketAlreadyExists` | 위 5번 `bucket_prefix` 미설정 |
 | build 단계에서 멈춤 | Docker Desktop 미실행 |
-| `VcpuLimitExceeded` | vCPU 쿼터. Service Quotas → EC2 → Running On-Demand Standard 증설 (t3.medium 8대=16 vCPU) |
+| `VcpuLimitExceeded` | vCPU 쿼터. Service Quotas → EC2 → Running On-Demand Standard 증설 |
 | `AccessDenied` on `iam:CreateServiceLinkedRole` | 관리자 권한 아님 |
 | CloudFront `InProgress` 지속 | 정상, 전파 15~20분 |
 | `Error acquiring the state lock` | 이전 apply 중단. `terraform` 프로세스 종료 대기 |
+| `Invalid start of value` on tfvars | JSON에 BOM. `tuning.auto.tfvars.json`을 BOM 없이 다시 쓴다 |
+| Karpenter `no subnets found` | 서브넷 `karpenter.sh/discovery` 태그 확인. apply 직후면 일시적 |
+| 노드가 안 빠짐 | 파드가 남은 노드는 `WhenEmptyOrUnderutilized` + 3분 대기 후 회수. preferred topology spread가 통합을 막을 수 있다 |
 
 state는 로컬 `terraform/terraform.tfstate`에 저장되고 git에 안 올라간다 → **다른 PC에서 이어받지 않고 새로 배포**.
 같은 계정에 배포 흔적이 있는데 state가 없으면 이름 충돌 → 연습계정은 `terraform destroy`로 정리하거나

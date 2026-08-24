@@ -87,6 +87,11 @@ locals {
       #  트래픽 75% 인 user 의 p50 이 27ms -> 330ms 로 악화, 200ms SLO 탈락)
       isolate = try(var.apps[name].isolate, local.d.isolate)
 
+      # isolate_hard=true → 전용 노드에만 뜬다(nodeSelector 하드).
+      # 유휴에도 전용 노드 1대가 남는 대가를 치르므로 기본은 false 다.
+      # 기본(false)은 toleration + 선호 affinity → 유휴엔 NG, 부하엔 전용 노드.
+      isolate_hard = try(var.apps[name].isolate_hard, local.d.isolate_hard)
+
       # CloudFront GET 캐시. 같은 응답이 반복되는 조회형 API 에 매우 효과적이다
       # (오리진 부하와 지연을 동시에 줄인다). 0 이면 캐시하지 않는다.
       cache_ttl        = try(var.apps[name].cache_ttl, local.d.cache_ttl)

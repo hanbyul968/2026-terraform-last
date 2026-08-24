@@ -75,10 +75,22 @@ resource "kubernetes_deployment" "app" {
         service_account_name             = kubernetes_service_account.app[each.key].metadata[0].name
 
         # ── 배치 전략 ────────────────────────────────────────────────
-        # isolate=true 인 앱은 전용 노드풀(taint 걸림)로만 간다.
-        # CPU 폭식 앱을 지연 민감 앱과 섞으면 폭식 앱이 CPU 를 다 먹어 민감 앱의
-        # 응답이 SLO 를 넘긴다. taint/toleration 이 커널 스케줄러 수준에서 이를 막는다.
-        node_selector = each.value.isolate ? { (local.isolated_label_key) = local.isolated_label_val } : {}
+        # isolate=true 인 앱은 전용(taint 걸린) 노드를 '선호'한다.
+        #
+        # nodeSelector(하드)로 강제하면 안 되는 이유(실측): 전용 노드에만 뜰 수 있으므로
+        # 부하가 전혀 없는 유휴 상태에서도 Karpenter 노드가 최소 1대 계속 남는다.
+        # (stress 파드가 격리 노드를 붙잡아 t3.medium 2대가 유휴에도 유지됐다)
+        # 정상 동작은 '부하 없으면 관리형 NG 최소 노드만' 이다.
+        #
+        # toleration + preferred affinity 조합이면:
+        #   유휴  → 전용 노드가 없으니 NG 노드로 내려온다 → Karpenter 노드 전부 회수(0대)
+        #   부하  → HPA 가 파드를 늘리고 NG(max_size 고정)가 꽉 차면 스케줄 불가 →
+        #           Karpenter 가 전용 노드를 띄우고, preferred 가 그쪽으로 끌어당긴다
+        # 즉 CPU 폭식 앱은 부하 구간에서만 전용 노드로 분리된다.
+        #
+        # isolate_hard=true 로 주면 예전처럼 전용 노드에만 뜬다(유휴 노드 1대는 감수).
+        # user 성능이 다시 무너지면 그 쪽으로 되돌린다.
+        node_selector = (each.value.isolate && each.value.isolate_hard) ? { (local.isolated_label_key) = local.isolated_label_val } : {}
 
         dynamic "toleration" {
           for_each = each.value.isolate ? [1] : []
@@ -90,22 +102,17 @@ resource "kubernetes_deployment" "app" {
           }
         }
 
-        # 격리 대상이 아닌 앱은 관리형 NG 노드를 '선호'한다.
-        # Karpenter 노드는 consolidation 회수 대상이라 언제든 사라지므로 베이스라인
-        # 레플리카의 정착지로는 desired 고정인 NG 노드가 맞다.
-        # required 가 아니라 preferred 인 이유: 강제하면 스케일아웃 파드가 NG 에
-        # 자리가 없을 때 Pending 이 되어 가용성을 깎는다.
-        dynamic "affinity" {
-          for_each = each.value.isolate ? [] : [1]
-          content {
-            node_affinity {
-              preferred_during_scheduling_ignored_during_execution {
-                weight = 100
-                preference {
-                  match_expressions {
-                    key      = "eks.amazonaws.com/nodegroup"
-                    operator = "Exists"
-                  }
+        # 격리 앱: 전용 노드를 강하게 선호(하드 아님) → 있으면 그쪽, 없으면 NG.
+        # 일반 앱: 관리형 NG 노드를 선호(Karpenter 노드는 회수 대상이라 베이스라인에 부적합).
+        affinity {
+          node_affinity {
+            preferred_during_scheduling_ignored_during_execution {
+              weight = 100
+              preference {
+                match_expressions {
+                  key      = each.value.isolate ? local.isolated_label_key : "eks.amazonaws.com/nodegroup"
+                  operator = each.value.isolate ? "In" : "Exists"
+                  values   = each.value.isolate ? [local.isolated_label_val] : []
                 }
               }
             }

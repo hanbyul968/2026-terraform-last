@@ -290,6 +290,13 @@ resource "kubectl_manifest" "karpenter_nodepool_isolated" {
     kind       = "NodePool"
     metadata   = { name = "isolated" }
     spec = {
+      # 이 풀을 먼저 고려하게 한다(높을수록 우선).
+      # 필요한 이유: stress 는 이제 nodeSelector 하드가 아니라 toleration + 선호 affinity 다.
+      # 그래서 default 풀도 stress 를 받을 수 있고, 그러면 격리가 무의미해진다.
+      # weight 를 주면 Karpenter 가 이 풀을 먼저 평가하므로 taint 를 tolerate 하는
+      # 파드(=격리 앱)는 여기로 온다. tolerate 하지 않는 user/product 는 taint 에
+      # 막혀 자동으로 default 풀로 흘러간다.
+      weight = 10
       template = {
         metadata = {
           labels = { (local.isolated_label_key) = local.isolated_label_val }

@@ -56,6 +56,7 @@ variable "app_defaults" {
     needs_db         = optional(bool, true)
     needs_s3         = optional(bool, false)
     isolate          = optional(bool, false)
+    isolate_hard     = optional(bool, false)
     cache_ttl        = optional(number, 0)
     cache_query_keys = optional(list(string), [])
   })

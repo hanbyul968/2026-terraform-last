@@ -28,7 +28,9 @@ NODE_COST_REFERENCE = os.environ.get("TUNE_NODE_REFERENCE", "t3.medium")
 # 달러 가격표를 들고 있지 않아도 상대 비용이 정확하고, 가격이 개정돼도 틀리지 않는다.
 _SIZE_UNITS = {"nano": .25, "micro": .5, "small": 1., "medium": 2., "large": 4.}
 REQUEST_UNIT_M = 25
-REQUEST_MIN_M = 50
+# request 하한. 50m 은 지연 민감 앱에 너무 낮았다(실측: product 가 50m 으로 뽑혀
+# 가용성 65%). 파드 하나가 요청을 처리할 최소한의 여력을 보장한다.
+REQUEST_MIN_M = 100
 TARGET_MIN = 25
 TARGET_MAX = 90
 NODE_CPU_HARD_PCT = 90
@@ -41,12 +43,15 @@ COST_FIRST_AVAIL_FLOOR = 90.0
 COST_FIRST_PERF_FLOOR = 80.0
 COST_FIRST_MAX_SLOWDOWN = 3.0
 # request는 실측 사용량과 동떨어질 수 없다. 파드당 실사용의 이 비율 아래로는 내리지 않는다.
-# (실측 1800m 쓰는 파드에 50m을 예약하는 값이 나오던 문제를 막는다.)
-REQUEST_USAGE_FLOOR_RATIO = 0.5
-# 사이징은 '노드를 꽉 채우는 최대 request'가 아니라 그보다 낮게 잡는다. 여유를 둬야 앱/트래픽이
-# 바뀌어도 유휴 파드가 baseline 노드에 넉넉히 들어가고, 부족분은 HPA replica가 채운다.
-# 계산된 필요 request에 이 계수를 곱해 낮춘다(0.7 = 30% 낮게).
-REQUEST_HEADROOM = 0.7
+#
+# 1.0 (성능 우선): 실측 사용량 아래로는 절대 내리지 않는다.
+# 0.5 였을 때 실패한 이유: request 가 실사용의 절반이면 노드에 파드가 과밀하게 들어가
+# 서로 CPU 를 다투고, HPA 사용률이 100% 를 넘겨 포화 신호가 무의미해진다.
+# 실측: product request 가 50m 으로 뽑혔고(실사용보다 낮음) 가용성이 65% 까지 떨어졌다.
+REQUEST_USAGE_FLOOR_RATIO = 1.0
+# 계산된 필요 request 에 곱하는 계수. 1.0 에 가까울수록 여유가 커진다(성능 우선).
+# 0.7 은 유휴 파드를 baseline 노드에 밀어넣기 위한 비용 우선 값이었다.
+REQUEST_HEADROOM = 0.9
 
 
 def instance_size_units(instance_type):

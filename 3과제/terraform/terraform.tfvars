@@ -18,45 +18,29 @@
 #   user 가 24.2% 인 순간 비용 12점이 통째로 0 이 됐다. 격리가 그 게이트를 살린다.
 # ===========================================================================
 apps = {
-  # ── 성능 최우선 ──────────────────────────────────────────────────
-  # 비용 ratio 는 1.0배(2대)까지 내려갔지만 성능 게이트(모든 앱 30%)에 걸려 비용 12점이
-  # 통째로 0 이었다. 그래서 노드를 더 쓰더라도 성능을 올리는 쪽이 이득이다.
+  # ── 여기에는 '구조' 만 적는다 ─────────────────────────────────────
+  # cpu_request_m / hpa_target_cpu / replicas 는 적지 않는다.
+  # 그 값은 실측 없이는 알 수 없고(앱이 바뀌면 더더욱), 튜너가 부하를 넣어
+  # tuning.auto.tfvars.json 에 뽑아 넣는다. 우선순위는 app_tuning > apps > app_defaults.
+  # 튜닝 전 시작값은 app_defaults 를 쓴다.
   #
-  # CPU limit 은 걸지 않는다(app_defaults.cpu_limit_ratio=0).
-  # 실측: product 를 request 50m / limit 75m 로 묶었더니 CFS 스로틀링으로
-  # 가용성 100%->65.1%, 성능 84.3%->51.3% 로 무너졌다. 지연 민감 앱에 limit 은 독이다.
+  # 적어야 하는 것은 '측정으로 알 수 없는 것' 뿐이다:
+  #   needs_s3  — 이미지를 S3 에 올리는 앱 (문제지에서 확인)
+  #   cache_ttl — 같은 키로 반복 조회되는 앱 (문제지에서 확인)
+  #   needs_db  — DB 를 쓰지 않는 앱은 false (불필요한 시크릿 주입 제거)
   #
-  # hpa_target 50% 는 여유를 크게 둔 값이다 — 파드를 일찍 늘려 꼬리지연을 막는다.
+  # ⚠ 대회날 앱 이름이 바뀌면 아래 키만 새 이름으로 옮긴다.
 
-  # 트래픽 비중이 가장 크고 SLO 0.2s 로 타이트하다.
-  user = {
-    cpu_request_m  = 200
-    hpa_target_cpu = 50
-    min_replicas   = 4
-    max_replicas   = 12
-  }
-
-  # 같은 id 로 반복 조회된다(문제지 명시) → CloudFront 캐시가 오리진 부하를 줄인다.
-  # 이미지 업로드 때문에 S3 쓰기 권한(IRSA) 필요.
-  # 가용성이 65% 로 무너졌던 앱이므로 request/replica 를 넉넉히 준다.
+  # 이미지 업로드 담당 + 같은 id 반복 조회(문제지 명시) → CloudFront 캐시
   product = {
-    cpu_request_m    = 200
-    hpa_target_cpu   = 50
-    min_replicas     = 4
-    max_replicas     = 12
     needs_s3         = true
     cache_ttl        = 10
     cache_query_keys = ["id"]
   }
 
-  # 요청당 CPU 소모가 큰 앱. SLO 는 1s 로 느슨하지만 30% 게이트는 넘겨야 한다.
-  # limit 이 없으므로 request 를 크게 잡아 파드당 처리 여력을 확보한다.
+  # DB 를 쓰지 않는 앱
   stress = {
-    needs_db       = false
-    cpu_request_m  = 700
-    hpa_target_cpu = 60
-    min_replicas   = 2
-    max_replicas   = 10
+    needs_db = false
   }
 }
 

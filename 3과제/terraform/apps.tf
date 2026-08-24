@@ -21,9 +21,14 @@ locals {
     if !contains(var.app_binary_exclude, f)
   ])
 
-  # var.apps 에 명시된 앱이 있으면 그 목록을 신뢰하고, 없으면 자동 발견 결과를 쓴다.
-  # (자동 발견을 끄고 싶을 때 var.apps 만으로 완전히 제어 가능)
-  app_names = length(keys(var.apps)) > 0 ? sort(keys(var.apps)) : local.discovered_apps
+  # 앱 목록은 '바이너리' 가 정한다. var.apps 는 override 용일 뿐이다.
+  #
+  # var.apps 의 키를 앱 목록으로 쓰면 안 되는 이유: tfvars 에 일부 앱만 적어두면
+  # (예: 구조 설정이 필요한 product/stress 만) 나머지 앱이 통째로 사라진다.
+  # 실측: user 를 tfvars 에서 빼자 Deployment/Service/HPA 가 전부 없어졌다.
+  # 바이너리가 진실이므로 그것을 목록으로 삼고, tfvars 는 값만 얹는다.
+  # (바이너리를 못 찾은 경우에만 var.apps 키로 대체 — 예: 이미지 태그를 직접 주는 경우)
+  app_names = length(local.discovered_apps) > 0 ? local.discovered_apps : sort(keys(var.apps))
 
   # ---------- 2. 앱별 설정 = 기본값 + 개별 override ----------
   d = var.app_defaults

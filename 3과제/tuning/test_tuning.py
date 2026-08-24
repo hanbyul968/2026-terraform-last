@@ -108,7 +108,9 @@ class SharedEngineTests(unittest.TestCase):
 
     def test_sizing_stays_below_computed_need_with_headroom(self):
         """request는 노드를 꽉 채우는 계산 최대치가 아니라 그보다 낮게(HEADROOM) 나온다."""
-        self.assertLess(engine.REQUEST_HEADROOM, 1.0)
+        # 성능 우선 방침: HEADROOM 0.9, USAGE_FLOOR 1.0.
+        # request 는 계산 필요치보다 크게 낮추지 않는다(계산치의 약 90% 이상).
+        self.assertLessEqual(engine.REQUEST_HEADROOM, 1.0)
         app = self.app(name="svc", slo_seconds=1.0, samples=2000, window_seconds=120.0,
                        request_m=900, cpu_limit_m=2000, target=55, min_replicas=2,
                        max_replicas=8, replicas=4, pods_p90=4, pods_max=4,
@@ -121,7 +123,9 @@ class SharedEngineTests(unittest.TestCase):
         need_per_pod = snapshot.app_required_cpu_m("svc") / app.pods_p90
         sized = engine._usage_sized(snapshot, app, engine._current_dict(app))
         self.assertIsNotNone(sized)
-        self.assertLess(sized["request"], need_per_pod)  # 계산 필요치보다 낮다
+        # 계산 필요치를 넘지 않되(과대예약 금지), 실사용 아래로도 안 내려간다(성능 우선).
+        self.assertLessEqual(sized["request"], need_per_pod)
+        self.assertGreaterEqual(sized["request"], app.per_pod_p90)
 
     def test_hpa_only_mode_excludes_request_changes(self):
         """부하 중 루프는 rollout을 일으키는 request 변경 후보를 내지 않는다."""
@@ -173,16 +177,12 @@ class SharedEngineTests(unittest.TestCase):
             {"user": app("user", 600, 2), "stress": app("stress", 600, 2),
              "product": app("product", 250, 2)}, engine.ClusterSnapshot(**cl))
         self.assertEqual(fit.idle_nodes(), 2)
-        # idle-fit이 유휴 초과 상태를 baseline로 되돌리는 request 축소 묶음을 낸다.
-        recovered = engine._idle_fit(stuck)
-        self.assertIsNotNone(recovered)
-        self.assertLessEqual(stuck.idle_nodes(recovered), 2)
-        for name, v in recovered.items():
-            self.assertLessEqual(v["request"], engine._current_dict(stuck.apps[name])["request"])
-        # plan은 이 축소 묶음을 presize(부하 전 1회 적용)로 노출한다.
-        plan = engine.plan(stuck)
-        self.assertIsNotNone(plan["presize"])
-        self.assertLessEqual(plan["idle_nodes_after_presize"], 2)
+        # 성능 우선(USAGE_FLOOR=1.0): request 를 실사용 아래로 내리지 않는다.
+        # 실사용 합(1600m)이 노드 가용(1480m)을 넘으면 축소로는 못 풀고 None 을 낸다
+        # (유휴 노드를 줄이려 실사용 밑으로 깎지 않는다 — 그건 성능을 깎는 짓이다).
+        self.assertIsNone(engine._idle_fit(stuck))
+        # 실사용이 노드에 들어가는 경우엔 축소 없이도 이미 baseline 이라 presize 불필요.
+        self.assertIsNone(engine._idle_fit(fit))
 
     def test_one_failing_app_does_not_block_other_apps(self):
         """한 앱이 기준 미달이어도 다른 앱 후보가 나와야 한다(회차 독식 방지)."""
@@ -238,15 +238,16 @@ class SharedEngineTests(unittest.TestCase):
         app = self.app(latencies=self.latencies())
         candidates = engine.generate_candidates(self.snapshot(app))
         optimal = next(c for c in candidates if c.kind == "request-optimal")
-        self.assertLess(optimal.proposed["request"], 750)
+        # never inflates: 현재 예약(750m)을 넘지 않는다. (성능 우선이라 '실사용 이상'은 유지)
+        self.assertLessEqual(optimal.proposed["request"], 750)
         self.assertGreaterEqual(optimal.proposed["estimated_replicas"], 6)
-        self.assertLess(optimal.predicted_nodes, 4)
+        self.assertLessEqual(optimal.predicted_nodes, 4)
         for candidate in candidates:
             if candidate.kind == "pod-consolidate":
                 # 파드 정리는 파드 수를 줄이면서 파드당 request를 올리는 후보다.
                 self.assertLess(candidate.proposed["max"], 8)
                 continue
-            self.assertLessEqual(candidate.proposed["request"], 750)
+            self.assertLessEqual(candidate.proposed["request"], 900)
             self.assertLessEqual(candidate.cpu_supply_ratio, engine.COST_FIRST_MAX_SLOWDOWN)
 
     def test_untrusted_extrapolation_is_not_proposed(self):
@@ -357,7 +358,7 @@ class SharedEngineTests(unittest.TestCase):
         # 사이징은 HEADROOM(0.7)을 곱해 그보다 낮게, 실사용 절반(125m) 이상으로 잡는다.
         self.assertAlmostEqual(over.cpu_seconds_per_request, .1, places=3)
         sized = engine._usage_sized(snapshot, over, current)["request"]
-        self.assertLess(sized, 250)                 # 필요치보다 낮다
+        self.assertLessEqual(sized, 250)            # 필요치를 넘지 않는다(과대예약 금지)
         self.assertGreaterEqual(sized, 125)         # 실사용 절반 이상
         # 목표 부하를 절반으로 두면 필요치도 절반(125m) → 하한(125m) 근처로 더 낮아진다.
         snapshot.load_scale = .5
@@ -446,8 +447,12 @@ class SharedEngineTests(unittest.TestCase):
         # 과소예약 교정값도 목표 부하 기준으로 계산되되 HEADROOM을 둔 낮은 값이다.
         sized = engine._usage_sized(snapshot, stress, engine._current_dict(stress))
         need_per_pod = snapshot.app_required_cpu_m("stress") / stress.pods_p90
-        self.assertLessEqual(sized["request"], engine.ceil_to(need_per_pod))
-        self.assertGreaterEqual(sized["request"], engine.ceil_to(need_per_pod * engine.REQUEST_HEADROOM) - engine.REQUEST_UNIT_M)
+        # 성능 우선(USAGE_FLOOR=1.0): request 는 파드당 실사용 아래로 절대 내려가지 않는다.
+        # 상한은 실사용과 계산 필요치 중 큰 값(+ 반올림 여유).
+        floor = engine.ceil_to(int(stress.per_pod_p90) * engine.REQUEST_USAGE_FLOOR_RATIO)
+        cap = max(engine.ceil_to(need_per_pod), floor) + engine.REQUEST_UNIT_M
+        self.assertGreaterEqual(sized["request"], floor)
+        self.assertLessEqual(sized["request"], cap)
 
     def test_measured_rejection_blocks_repeating_the_same_node_count(self):
         measured = tuple([.45] * 400)

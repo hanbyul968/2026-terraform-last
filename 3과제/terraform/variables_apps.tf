@@ -46,7 +46,7 @@ variable "apps" {
 # 모든 앱의 공통 기본값. 앱이 바뀌어도 대체로 이 값으로 뜬다.
 variable "app_defaults" {
   type = object({
-    cpu_request_m = optional(number, 100)
+    cpu_request_m = optional(number, 200)
     cpu_limit_m   = optional(number, null)
 
     # CPU limit = request x 이 비율. 0 이면 limit 을 걸지 않는다(기본).
@@ -63,9 +63,9 @@ variable "app_defaults" {
     cpu_limit_ratio  = optional(number, 0)
     memory_request   = optional(string, "128Mi")
     memory_limit     = optional(string, "256Mi")
-    min_replicas     = optional(number, 2)
-    max_replicas     = optional(number, 8)
-    hpa_target_cpu   = optional(number, 60)
+    min_replicas     = optional(number, 4)
+    max_replicas     = optional(number, 12)
+    hpa_target_cpu   = optional(number, 50)
     needs_db         = optional(bool, true)
     needs_s3         = optional(bool, false)
     isolate          = optional(bool, false)
@@ -76,10 +76,11 @@ variable "app_defaults" {
   default = {}
 
   description = <<-DESC
-    앱 공통 기본값.
-    cpu_request_m 기본 100m 은 의도적으로 낮다: request 는 '실측 사용량' 에 맞춰야
-    HPA 사용률이 의미를 갖고(과대 request = HPA 실명), bin-packing 이 불필요한
-    노드를 만들지 않는다(비용). 여유는 hpa_target_cpu(기본 60%)가 담당한다.
+    앱 공통 기본값 = '튜닝 전 시작값'. 실제 값은 튜너가 실측해 app_tuning 에 덮어쓴다.
+
+    성능 우선으로 넉넉하게 잡는다. 시작값이 너무 낮으면 첫 부하 구간에서 파드가
+    부족해 초반 요청을 놓치고, 그 손실은 뒤에서 회복되지 않는다(누적 % 채점).
+    CPU limit 은 걸지 않는다(cpu_limit_ratio=0) — CFS 스로틀링이 꼬리지연을 만든다.
   DESC
 }
 

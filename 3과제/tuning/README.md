@@ -22,29 +22,47 @@ installing hey...
 → **Go 설치 후 소스 빌드가 유일한 방법.** `loadtest.ps1` / `optimize.ps1` 은 `hey` 가 없으면
 바로 `exit 1` 이므로 우회할 수 없다.
 
-### 설치 (검증 완료: Go 1.26.7 → hey v0.1.5, 11.5MB)
+### 설치 — 새 PC에서 이 블록 그대로 복붙
+
+검증 완료: Go 1.26.7 → hey v0.1.5 (11.55MB). **현재 창에서 끝난다. 새 창 필요 없음.**
 
 ```powershell
-# 1) Go 설치 (관리자 권한 UAC 승인 필요)
+# 1) Go 설치 (UAC 승인 필요). 이미 있으면 "사용 가능한 업그레이드 없음" 이라 나오고 넘어간다.
 winget install --id GoLang.Go -e --source winget --accept-package-agreements --accept-source-agreements
 
-# 2) 새 PowerShell 창을 연다  ← 필수
-#    winget 이 PATH 에 C:\Program Files\Go\bin 을 넣지만 현재 창에는 반영되지 않는다.
+# 2) 현재 창의 PATH 갱신  ← 이걸 빼먹으면 다음 줄에서 "'go' 용어가 인식되지 않습니다" 가 난다.
+#    winget 이 PATH 에 C:\Program Files\Go\bin 을 넣지만 이미 열려 있는 창에는 반영되지 않는다.
+$env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
 
-# 3) hey 빌드 → %USERPROFILE%\bin 에 설치
+# 3) hey 빌드 → %USERPROFILE%\bin 에 설치 (모듈 다운로드로 30~60초)
 $env:GOBIN = "$env:USERPROFILE\bin"
+New-Item -ItemType Directory -Force -Path $env:GOBIN | Out-Null
 go install github.com/rakyll/hey@latest
 
-# 4) 확인 (Usage: hey [options...] <url> 가 나오면 성공)
+# 4) %USERPROFILE%\bin 을 사용자 PATH 에 영구 등록 (setup.ps1 도 하지만 순서상 먼저 해둔다)
+$u = [Environment]::GetEnvironmentVariable('Path','User')
+if ($u -notlike "*$env:GOBIN*") { [Environment]::SetEnvironmentVariable('Path', "$env:GOBIN;$u", 'User') }
+$env:Path = "$env:GOBIN;$env:Path"
+
+# 5) 확인 — "Usage: hey [options...] <url>" 가 나오면 성공
 hey
 ```
 
-새 창을 열기 싫으면 2번을 건너뛰고 3번에서 go 를 full path 로 부른다:
+**이미 hey 를 깔아본 PC라면** 3번을 다시 돌릴 필요 없다. 2번만 실행하면 `hey` 가 바로 잡힌다:
 
 ```powershell
-$env:GOBIN = "$env:USERPROFILE\bin"
-& 'C:\Program Files\Go\bin\go.exe' install github.com/rakyll/hey@latest
+$env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
+hey    # Usage 가 나오면 그대로 사용 가능
 ```
+
+### 자주 걸리는 곳
+
+| 증상 | 원인 / 해결 |
+|---|---|
+| `'go' 용어가 인식되지 않습니다` | 위 2번 PATH 갱신을 안 했다. 그 줄만 실행하고 재시도 |
+| `'hey' 용어가 인식되지 않습니다` | 같은 이유. 2번 실행 후 재시도 |
+| winget 이 "사용 가능한 업그레이드 없음" | Go 가 이미 깔려 있다는 뜻 — 정상, 2번으로 넘어간다 |
+| `go install` 이 프록시/네트워크 오류 | `$env:GOPROXY='direct'` 후 재시도 |
 
 ### 그 다음
 

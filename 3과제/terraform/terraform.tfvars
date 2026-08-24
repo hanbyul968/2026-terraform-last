@@ -39,18 +39,20 @@ apps = {
     cache_query_keys = ["id"]
   }
 
-  # CPU 폭식 앱. isolate=true 로 전용 taint 노드에 격리해 user/product 의 CPU 를
-  # 빼앗지 못하게 한다. cpu_limit_pct=90 은 파드 하나가 노드를 독점하는 것도 막는다.
-  # DB 를 쓰지 않으므로 needs_db=false.
+  # CPU 를 많이 쓰는 앱. 별도 노드로 격리하지 않는다(isolate 미사용).
   #
-  # ⚠ request 500m 은 확정값이 아니다. 요청당 CPU 비용을 신뢰할 만큼 측정하지 못했다
-  #   (유휴 클러스터 단건 1.6~8.2s vs 부하 중 p50 800ms 로 서로 모순).
-  #   튜너가 실측으로 찾게 두고, 첫 부하 결과를 보고 조정한다.
+  # 격리를 안 써도 되는 이유: 모든 앱이 limit = request (app_defaults.cpu_limit_ratio=1)
+  # 라서 어떤 파드도 예약분을 넘겨 이웃 CPU 를 빼앗지 못한다. 노드를 나누지 않아도
+  # 지연 민감 앱이 보호되고, 전용 노드가 없으니 유휴 시 Karpenter 노드가 0대가 된다.
+  # 부하는 HPA 가 파드 수로 흡수한다.
+  #
+  # ⚠ request 값이 이 앱의 처리량 상한을 결정한다(limit = request 이므로).
+  #   500m 은 확정값이 아니다 — 요청당 CPU 비용을 신뢰할 만큼 측정하지 못했다.
+  #   부하 결과에서 이 앱의 성능%가 낮으면 request 를 올리고(파드당 처리량↑),
+  #   그래도 부족하면 max_replicas 를 올린다.
   stress = {
-    isolate        = true
     needs_db       = false
     cpu_request_m  = 500
-    cpu_limit_pct  = 90
     hpa_target_cpu = 65
     min_replicas   = 2
     max_replicas   = 8

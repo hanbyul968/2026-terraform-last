@@ -243,19 +243,21 @@ resource "kubectl_manifest" "karpenter_nodepool" {
       }
       limits = { cpu = tostring(local.karpenter_cpu_limit_effective) }
       disruption = {
-        # 성능 우선: WhenEmpty 만 회수한다.
-        # WhenEmptyOrUnderutilized 는 파드가 올라가 있는 노드도 "덜 찼다"고 판단해 비우는데,
-        # 그 과정에서 파드가 evict -> 재스케줄 -> 새 노드 부팅(60~90s) 되는 동안 지연이 튄다.
-        # 실측: user p50 이 126ms -> 369ms 로 진동했고, Karpenter 로그에 회수/재프로비저닝이
-        # 반복됐다. WhenEmpty 는 '파드가 하나도 없는 노드'만 지우므로 부하 중 중단이 없다.
-        consolidationPolicy = "WhenEmpty"
-        consolidateAfter    = "1m"
+        # 부하가 끝나면 노드가 줄어야 한다 → Underutilized 회수를 허용한다.
+        #
+        # WhenEmpty 만 쓰면 안 되는 이유(실측): 파드가 1개라도 얹힌 노드는 영구히 남는다.
+        # 롤아웃 중 max_surge 로 잠깐 넘친 파드 때문에 노드가 하나 늘면, 그 위에 파드가
+        # 남아 있어 부하가 0 이 되어도 회수되지 않았다. "부하 없으면 최소 노드"가 깨진다.
+        #
+        # 대신 consolidateAfter 를 길게(3분) 둔다. 부하 구간에서는 사용률이 높아 통합
+        # 기회가 없고, 짧게(30s~1m) 두면 부하가 잠깐 내려갈 때 파드를 옮기다가 지연이 튄다.
+        # 3분이면 실제로 부하가 끝난 뒤에만 정리된다.
+        consolidationPolicy = "WhenEmptyOrUnderutilized"
+        consolidateAfter    = "3m"
         budgets = [
-          # 빈 노드는 지워도 중단이 없으므로 한꺼번에 회수한다.
+          # 빈 노드는 즉시 정리(중단 없음). 파드가 실린 노드는 한 번에 1대만.
           { nodes = "100%", reasons = ["Empty"] },
-          # 파드가 실린 노드는 건드리지 않는다(WhenEmpty 라 사실상 발생 안 함).
-          { nodes = "0", reasons = ["Underutilized"] },
-          { nodes = "1", reasons = ["Drifted"] },
+          { nodes = "1", reasons = ["Underutilized", "Drifted"] },
         ]
       }
     }

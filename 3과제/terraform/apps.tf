@@ -28,6 +28,23 @@ locals {
   # ---------- 2. 앱별 설정 = 기본값 + 개별 override ----------
   d = var.app_defaults
 
+  # ---------- request/limit 사전 계산 ----------
+  # apps 맵을 만들면서 자기 자신을 참조할 수 없으므로 먼저 따로 계산한다.
+  request_m_for = {
+    for name in local.app_names : name => (
+      try(var.app_tuning[name].cpu_request_m, null) != null ? var.app_tuning[name].cpu_request_m : (
+        try(var.apps[name].cpu_request_pct, null) != null ? (
+          max(ceil(local.node_app_cpu_m * var.apps[name].cpu_request_pct / 100), 10)
+        ) : try(var.apps[name].cpu_request_m, local.d.cpu_request_m)
+      )
+    )
+  }
+
+  cpu_limit_ratio_for = {
+    for name in local.app_names : name =>
+    try(var.apps[name].cpu_limit_ratio, local.d.cpu_limit_ratio)
+  }
+
   apps = {
     for idx, name in local.app_names : name => {
       # --- 라우팅 ---
@@ -56,17 +73,27 @@ locals {
       #       (실측: user 파드가 request 425m 에 실사용 40m → 9%/90% 로 확장 불가)
       #   (b) 비용이 오른다 — 스케줄러는 request 로 bin-packing 하므로 과대 request 는
       #       실제로 한가한 노드를 계속 추가하게 만든다(비용 ratio = 평균 노드 수).
-      cpu_request_m = try(var.app_tuning[name].cpu_request_m, null) != null ? var.app_tuning[name].cpu_request_m : (
-        try(var.apps[name].cpu_request_pct, null) != null ? (
-          max(ceil(local.node_app_cpu_m * var.apps[name].cpu_request_pct / 100), 10)
-        ) : try(var.apps[name].cpu_request_m, local.d.cpu_request_m)
-      )
+      cpu_request_m = local.request_m_for[name]
 
-      # CPU limit: 기본은 없음(null). 있으면 그 파드가 노드를 독점하지 못하게 막는다.
-      # cpu_limit_pct 로 "노드 용량의 몇 %" 로도 줄 수 있다.
+      # CPU limit. 기본은 request 와 같게 둔다(cpu_limit_ratio=1).
+      #
+      # 왜 limit = request 인가 (앱이 무엇이든 성립하는 규칙):
+      #   파드가 request 보다 크게 burst 할 수 있으면 그만큼을 같은 노드의 이웃에게서
+      #   빼앗는다. cgroup CPU 는 share 비율로 나뉘므로, burst 하는 파드가 항상 이긴다.
+      #   실측: request 500m / limit 1503m 인 앱이 실제로 3배까지 먹어, CPU 를 거의 안 쓰는
+      #   지연 민감 앱(request 의 9%만 사용)의 p50 이 27ms -> 330ms 로 무너졌다.
+      #   limit = request 면 어떤 파드도 예약분을 넘지 못하므로 이웃이 굶지 않는다.
+      #   부하가 늘면 '한 파드가 더 먹는' 대신 HPA 가 파드 수를 늘려 처리한다(정상 경로).
+      #
+      # 이 규칙은 앱 이름/성격을 몰라도 적용된다 — 대회날 앱이 바뀌어도 그대로 유효하다.
+      # burst 를 허용하려면 cpu_limit_ratio 를 1 보다 크게(예: 1.5) 주거나
+      # cpu_limit_m / cpu_limit_pct 로 직접 지정한다.
       cpu_limit_m = try(var.apps[name].cpu_limit_pct, null) != null ? (
         max(ceil(local.node_app_cpu_m * var.apps[name].cpu_limit_pct / 100), 10)
-      ) : try(var.apps[name].cpu_limit_m, local.d.cpu_limit_m)
+        ) : try(var.apps[name].cpu_limit_m, null) != null ? var.apps[name].cpu_limit_m : (
+        local.cpu_limit_ratio_for[name] > 0 ?
+        ceil(local.request_m_for[name] * local.cpu_limit_ratio_for[name]) : null
+      )
 
       memory_request = try(var.apps[name].memory_request, local.d.memory_request)
       memory_limit   = try(var.apps[name].memory_limit, local.d.memory_limit)

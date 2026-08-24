@@ -116,11 +116,41 @@ resource "kubernetes_deployment" "app" {
         affinity {
           node_affinity {
             preferred_during_scheduling_ignored_during_execution {
-              weight = 100
+              weight = 50
               preference {
                 match_expressions {
                   key      = "eks.amazonaws.com/nodegroup"
                   operator = "Exists"
+                }
+              }
+            }
+          }
+
+          # 서로 다른 앱은 같은 노드를 피한다 (선호, 강제 아님).
+          #
+          # 목적: 부하가 커질수록 앱이 자연히 노드 단위로 분리된다.
+          #   유휴  → 노드가 NG 2대뿐이라 3개 앱이 어쩔 수 없이 같이 앉는다(노드 최소 유지)
+          #   부하  → HPA 가 파드를 늘리고 Karpenter 가 노드를 추가하면, 이 선호가
+          #           앱마다 다른 노드로 밀어낸다 → CPU 폭식 앱이 지연 민감 앱과 분리된다
+          #
+          # 왜 이 방식인가: 전용 노드풀 + taint 로 격리하면 '어느 앱이 폭식인지' 미리
+          # 지정해야 하고(대회날 앱이 바뀌면 무용지물), 유휴에도 전용 노드가 남는다.
+          # 안티어피니티는 앱 이름을 몰라도 성립하고, 부하량에 따라 자동으로 강해진다.
+          #
+          # weight 100 vs 위 node_affinity 50: 노드 분리를 NG 선호보다 우선한다.
+          # ScheduleAnyway 성격(preferred)이라 자리가 없으면 그냥 같이 앉으므로
+          # Pending 으로 가용성을 깎지 않는다.
+          pod_anti_affinity {
+            preferred_during_scheduling_ignored_during_execution {
+              weight = 100
+              pod_affinity_term {
+                topology_key = "kubernetes.io/hostname"
+                label_selector {
+                  match_expressions {
+                    key      = "app"
+                    operator = "NotIn"
+                    values   = [each.key]
+                  }
                 }
               }
             }

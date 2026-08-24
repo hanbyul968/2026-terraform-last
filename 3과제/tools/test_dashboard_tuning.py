@@ -49,12 +49,14 @@ user: requests.cpu="200m", min_replicas=3, max_replicas=17, average_utilization=
         self.assertIn("stress → cpu=375m util=52% min=3 max=17", result["html"])
         self.assertIn("user → cpu=200m util=50% min=3 max=17", result["html"])
         self.assertNotIn("product →", result["html"])
-        # 이제 kubectl 이 아니라 tuning/apply.ps1 로 tfvars 에 기록한다(드리프트 방지).
-        self.assertNotIn("kubectl", result["html"])
-        self.assertIn(".\\apply.ps1 -App stress -Request 375 -Target 52 -Min 3 -Max 17", result["html"])
-        self.assertIn(".\\apply.ps1 -App user -Request 200 -Target 50 -Min 3 -Max 17", result["html"])
-        # 한 덩어리 블록: 마지막에 terraform apply 로 반영까지.
-        self.assertIn("terraform apply", result["html"])
+        # 라이브 직접 적용: kubectl 로 HPA patch + deploy request 를 바로 꽂는다.
+        self.assertIn("kubectl -n app patch hpa stress", result["html"])
+        self.assertIn("kubectl -n app patch hpa user", result["html"])
+        self.assertIn("set resources deploy/stress --requests=cpu=375m", result["html"])
+        self.assertIn("set resources deploy/user --requests=cpu=200m", result["html"])
+        self.assertIn('"minReplicas":3', result["html"])
+        self.assertIn('"averageUtilization":52', result["html"])
+        self.assertIn("--patch-file", result["html"])
         self.assertNotIn("k8s_apps.tf", result["html"])
 
 
@@ -97,11 +99,12 @@ user: requests.cpu="200m", min_replicas=3, max_replicas=17, average_utilization=
             {"app": "user", "cpu": "350m", "util": 29, "min": None, "max": None},
         ])
         html = run_parser(text, with_html=True)["html"]
-        self.assertNotIn("kubectl", html)
-        self.assertIn(".\\apply.ps1 -App product -Request 100 -Target 90", html)
-        # min/max 가 없으면 -Min/-Max 플래그가 붙지 않는다(apps/app_defaults 유지).
-        self.assertNotIn("-Min", html)
-        self.assertNotIn("-Max", html)
+        # 2값(request+target)만으로도 라이브 kubectl 명령이 나온다.
+        self.assertIn("set resources deploy/product --requests=cpu=100m", html)
+        self.assertIn('"averageUtilization":90', html)
+        # min/max 를 안 줬으면 patch spec 에 minReplicas/maxReplicas 가 없다.
+        self.assertNotIn("minReplicas", html)
+        self.assertNotIn("maxReplicas", html)
 
     def test_unscoped_single_value_is_not_copied_to_all_apps(self):
         text = 'requests.cpu="375m", min_replicas=3, max_replicas=17, average_utilization=52'

@@ -529,26 +529,37 @@ function tuneCmds(f){
         return x.app+' → '+p.join(' ');
       }).join('\n')+'</div></div>';
   var ns=(D&&D.namespace)||'app';
-  // ⚠ 클러스터를 kubectl 로 직접 고치지 않는다. tuning/apply.ps1 로 tuning.auto.tfvars.json
-  //   에 기록하고 terraform 이 반영한다(드리프트 방지). 붙여넣은 값에 없는 필드(min/max 등)는
-  //   명령에 넣지 않으므로 apps/app_defaults 값이 유지된다.
-  function applyCmd(app,x){
-    var a=[".\\apply.ps1 -App "+app];
-    if(x.cpu!=null)a.push("-Request "+String(x.cpu).replace('m',''));
-    if(x.util!=null)a.push("-Target "+x.util);
-    if(x.min!=null)a.push("-Min "+x.min);
-    if(x.max!=null)a.push("-Max "+x.max);
-    return a.join(' ');
+  // 라이브 직접 적용: kubectl 로 HPA(target/min/max)와 Deployment(request)를 바로 꽂는다.
+  // 빠른 반영용. request 변경은 rollout 을 일으키므로 공식 트래픽 전에 실행할 것.
+  // (영구 반영은 tfvars 경유 apply.ps1 이 별도로 있다 — 이건 즉시 반영용)
+  function liveCmds(x){
+    var n=x.app, live=(D.apps||[]).find(function(a){return a.app===n})||{}, h=hpaOf(n);
+    var dep=live.deployment_name||n, hpa=h.hpa_name||n, cmds=[];
+    // HPA: min/max/target 중 준 값만 patch (JSON 은 임시파일 + --patch-file, PowerShell 안전)
+    var spec={};
+    if(x.min!=null)spec.minReplicas=x.min;
+    if(x.max!=null)spec.maxReplicas=x.max;
+    if(x.util!=null)spec.metrics=[{type:"Resource",resource:{name:"cpu",target:{type:"Utilization",averageUtilization:x.util}}}];
+    if(Object.keys(spec).length){
+      var body=JSON.stringify({spec:spec});
+      var pf='"$env:TEMP/hpa-'+n+'.json"';
+      cmds.push("'"+body+"' | Set-Content -Path "+pf+" -Encoding ascii");
+      cmds.push('kubectl -n '+ns+' patch hpa '+hpa+' --type=merge --patch-file '+pf);
+    }
+    if(x.cpu!=null){
+      cmds.push('kubectl -n '+ns+' set resources deploy/'+dep+' --requests=cpu='+x.cpu);
+      cmds.push('kubectl -n '+ns+' rollout status deploy/'+dep+' --timeout=120s');
+    }
+    return cmds;
   }
-  // 한 덩어리로: tuning 에서 값 기록 → terraform 으로 반영까지 그대로 붙여넣어 실행.
-  var lines=['cd ..\\tuning'];
-  items.forEach(function(x){ lines.push(applyCmd(x.app,x)); });
-  lines.push('cd ..\\terraform ; terraform apply -target kubernetes_deployment.app -target kubernetes_horizontal_pod_autoscaler_v2.app');
-  out+=tuneCmdBlock('복사해서 그대로 실행 (기록 → 반영)', lines);
+  var lines=[];
+  items.forEach(function(x){ lines=lines.concat(liveCmds(x)); });
+  out+=tuneCmdBlock('라이브 적용 (복사해서 그대로 실행)', lines);
   out+='<div class="tip dim"><h3>참고</h3><div class=why>'
-    +'apply.ps1 은 tuning.auto.tfvars.json 에 값을 기록만 하고, 실제 반영은 마지막 terraform apply 가 한다. '
-    +'되돌리기는 <code>.\\rollback.ps1</code> (기록 제거 → apps 기본값 복귀). '
-    +'Terraform 이 단일 진실 공급원이라 드리프트가 없다.</div></div>';
+    +'kubectl 로 라이브에 즉시 반영한다. request 변경은 rollout 을 일으키니 공식 트래픽 전에 실행. '
+    +'점수가 안 오르면 이전 값으로 같은 명령을 다시 실행해 되돌린다. '
+    +'<b>영구 반영/재현이 필요하면</b> 같은 값을 <code>terraform.tfvars</code> 또는 '
+    +'<code>tuning/apply.ps1</code> 에도 넣어야 terraform apply 때 원복되지 않는다.</div></div>';
   return out;
 }
 function tuneRun(){

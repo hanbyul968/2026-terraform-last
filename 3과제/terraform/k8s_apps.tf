@@ -102,17 +102,25 @@ resource "kubernetes_deployment" "app" {
           }
         }
 
-        # 격리 앱: 전용 노드를 강하게 선호(하드 아님) → 있으면 그쪽, 없으면 NG.
-        # 일반 앱: 관리형 NG 노드를 선호(Karpenter 노드는 회수 대상이라 베이스라인에 부적합).
+        # 모든 앱이 관리형 NG 노드를 '선호'한다 (격리 앱도 포함).
+        #
+        # 격리 앱이 전용 노드를 선호하게 만들면 안 된다(실측): 전용 노드가 한 번 뜨면
+        # 유휴 상태에서도 파드가 계속 그 노드를 고르므로 노드가 비워지지 않고,
+        # 결국 Karpenter 가 회수하지 못해 유휴에도 격리 노드가 남는다(자기 유지 상태).
+        #
+        # NG 를 선호하게 두면:
+        #   유휴 → NG 에 자리가 있으니 stress 도 NG 로 → 격리 노드 비워짐 → 회수(0대)
+        #   부하 → NG(max_size 고정)가 꽉 차 Pending → Karpenter 가 전용 노드 생성
+        #          (격리 풀 weight=10 이라 taint 를 tolerate 하는 격리 앱이 그쪽으로 간다)
+        # 즉 '전용 노드로 유도'는 affinity 가 아니라 NodePool weight + taint 가 담당한다.
         affinity {
           node_affinity {
             preferred_during_scheduling_ignored_during_execution {
               weight = 100
               preference {
                 match_expressions {
-                  key      = each.value.isolate ? local.isolated_label_key : "eks.amazonaws.com/nodegroup"
-                  operator = each.value.isolate ? "In" : "Exists"
-                  values   = each.value.isolate ? [local.isolated_label_val] : []
+                  key      = "eks.amazonaws.com/nodegroup"
+                  operator = "Exists"
                 }
               }
             }

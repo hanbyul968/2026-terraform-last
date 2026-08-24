@@ -51,7 +51,16 @@ user: requests.cpu="200m", min_replicas=3, max_replicas=17, average_utilization=
         self.assertNotIn("product →", result["html"])
         self.assertIn("점수 미개선/오류 시 정확한 롤백", result["html"])
         self.assertIn("requests=cpu=250m", result["html"])
-        self.assertIn("minReplicas\\\":2", result["html"])
+        # PowerShell 형식: 백슬래시 이스케이프(-p '{\"..\"}') 대신 임시파일 + --patch-file.
+        # 롤백 patch 의 minReplicas 는 이스케이프 없는 순수 JSON 으로 나와야 한다.
+        self.assertIn('"minReplicas":2', result["html"])
+        self.assertNotIn('minReplicas\\":2', result["html"])
+        self.assertIn("--patch-file", result["html"])
+        self.assertIn("Set-Content -Path", result["html"])
+        self.assertNotIn("--type=merge -p", result["html"])
+        # requests 명령은 현재값과 같아도 항상 나와야 한다 (apply 쪽)
+        self.assertIn("requests=cpu=375m", result["html"])
+        self.assertIn("requests=cpu=200m", result["html"])
         self.assertIn("Terraform apply는 튜닝에 필요하지 않습니다", result["html"])
         self.assertNotIn("k8s_apps.tf", result["html"])
 

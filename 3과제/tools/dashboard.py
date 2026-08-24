@@ -314,11 +314,16 @@ function vCalc(){if(D.tuning&&D.tuning.schema_version)return vEnginePlan(D.tunin
   var cmds='';
   if(ch.length){
    var patch=JSON.stringify({spec:{minReplicas:rmn,maxReplicas:rmx,metrics:[{type:"Resource",resource:{name:"cpu",target:{type:"Utilization",averageUtilization:rutil}}}]}});
-   var c='';
-   if(rcpu!==req)c+='kubectl -n app set resources deploy/'+n+' --requests=cpu='+rcpu+'m\n';
-   c+='kubectl -n app patch hpa '+n+' --type=merge -p \''+patch.replace(/"/g,'\\"')+'\'';
-   if(rcpu!==req)c+='\nkubectl -n app rollout status deploy/'+n;
-   cmds='<div class=lbl style="margin-top:9px;margin-bottom:4px">임시 적용 (apply 하면 사라짐 · 부하 중 requests 변경은 롤아웃=504 주의)</div>'
+   // PowerShell 에서 -p '{\"..\"}' 는 백슬래시가 그대로 전달돼 kubectl JSON 파싱이 깨진다.
+   // 임시 파일 + --patch-file 로 우회한다(경로는 역슬래시 이스케이프를 피해 슬래시 사용).
+   var pf='"$env:TEMP/hpa-'+n+'.json"';
+   var L=[];
+   L.push('kubectl -n app set resources deploy/'+n+' --requests=cpu='+rcpu+'m');
+   L.push("'"+patch+"' | Set-Content -Path "+pf+" -Encoding ascii");
+   L.push('kubectl -n app patch hpa '+n+' --type=merge --patch-file '+pf);
+   L.push('kubectl -n app rollout status deploy/'+n+' --timeout=120s');
+   var c=L.join('\n');
+   cmds='<div class=lbl style="margin-top:9px;margin-bottom:4px">임시 적용 — PowerShell (apply 하면 사라짐 · 부하 중 requests 변경은 롤아웃=504 주의)</div>'
     +'<pre style="margin:0;background:#f6f7f9;border:1px solid var(--line);border-radius:8px;padding:9px 11px;font-size:11.5px;white-space:pre-wrap;color:#1a1d23;overflow-x:auto">'+esc(c)+'</pre>';
   }
   return '<div class=card><div class=lbl>'+n+' &nbsp;<span class='+cls+' style="font-weight:700">'+dir+'</span> &nbsp;<span class=mut>'+cause+'</span></div>'
@@ -519,9 +524,18 @@ function tuneCmds(f){
   var out='<div class="tip good"><h3>적용 대상: '+items.map(function(x){return x.app}).join(', ')+'</h3>'
     +'<div class=why>'+items.map(function(x){return x.app+' → cpu='+x.cpu+' util='+x.util+'% min='+x.min+' max='+x.max;}).join('\n')+'</div></div>';
   var ns=(D&&D.namespace)||'app';
-  function patch(n,mn,mx,util){
+  // PowerShell 대응: -p '{\"...\"}' 형태는 PowerShell 에서 백슬래시가 그대로 전달돼
+  // kubectl 이 JSON 파싱에 실패한다. 임시 파일 + --patch-file 로 우회한다
+  // (tuning/apply.ps1 과 동일한 방식). 경로는 역슬래시 이스케이프를 피해 슬래시를 쓴다.
+  function patchCmds(n,mn,mx,util){
     var body=JSON.stringify({spec:{minReplicas:mn,maxReplicas:mx,metrics:[{type:"Resource",resource:{name:"cpu",target:{type:"Utilization",averageUtilization:util}}}]}});
-    return 'kubectl -n '+ns+' patch hpa '+n+' --type=merge -p \''+body.replace(/"/g,'\\"')+'\'';
+    var pf='"$env:TEMP/hpa-'+n+'.json"';
+    return ["'"+body+"' | Set-Content -Path "+pf+" -Encoding ascii",
+            'kubectl -n '+ns+' patch hpa '+n+' --type=merge --patch-file '+pf];
+  }
+  function reqCmds(dep,cpu){
+    return ['kubectl -n '+ns+' set resources deploy/'+dep+' --requests=cpu='+cpu,
+            'kubectl -n '+ns+' rollout status deploy/'+dep+' --timeout=120s'];
   }
   items.forEach(function(x){
     var n=x.app, live=(D.apps||[]).find(function(a){return a.app===n})||{}, h=hpaOf(n);
@@ -529,15 +543,13 @@ function tuneCmds(f){
     var current={cpu:live.cpu_req||x.cpu,min:h.min!=null?h.min:x.min,max:h.max!=null?h.max:x.max,util:pctn(h.tgt)};
     if(current.util==null)current.util=x.util;
     var changedCpu=current.cpu!==x.cpu;
-    var apply=[patch(hpaName,x.min,x.max,x.util)];
-    if(changedCpu)apply.push('kubectl -n '+ns+' set resources deploy/'+deployment+' --requests=cpu='+x.cpu,
-                             'kubectl -n '+ns+' rollout status deploy/'+deployment+' --timeout=120s');
-    var rollback=[];
-    if(changedCpu)rollback.push('kubectl -n '+ns+' set resources deploy/'+deployment+' --requests=cpu='+current.cpu,
-                                'kubectl -n '+ns+' rollout status deploy/'+deployment+' --timeout=120s');
-    rollback.push(patch(hpaName,current.min,current.max,current.util));
-    out+='<div class=card style="margin-bottom:12px"><div class=lbl>'+n+'</div>'
-      +tuneCmdBlock('① 라이브 적용',apply)+tuneCmdBlock('② 점수 미개선/오류 시 정확한 롤백',rollback)+'</div>';
+    // requests 명령은 현재값과 같아도 항상 출력한다(붙여넣은 값을 그대로 확인·실행할 수 있게).
+    // 값이 동일하면 kubectl 이 변경 없음으로 처리해 롤아웃도 일어나지 않는다.
+    var apply=patchCmds(hpaName,x.min,x.max,x.util).concat(reqCmds(deployment,x.cpu));
+    var rollback=reqCmds(deployment,current.cpu).concat(patchCmds(hpaName,current.min,current.max,current.util));
+    var same=changedCpu?'':' <span class=mut>(cpu 는 현재값과 동일 — 실행해도 롤아웃 없음)</span>';
+    out+='<div class=card style="margin-bottom:12px"><div class=lbl>'+n+same+'</div>'
+      +tuneCmdBlock('① 라이브 적용 (PowerShell)',apply)+tuneCmdBlock('② 점수 미개선/오류 시 정확한 롤백',rollback)+'</div>';
   });
   out+='<div class="tip dim"><h3>순서</h3><div class=why>한 번에 한 앱만 적용 → 120초 재측정 → 공식 소계 상승 및 availability≥99%, 모든 performance≥30%면 유지. 아니면 즉시 롤백. Terraform apply는 튜닝에 필요하지 않습니다.</div></div>';
   return out;

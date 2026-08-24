@@ -24,16 +24,17 @@ data "aws_ec2_instance_type" "karpenter" {
 }
 
 locals {
-  # ---------- 아키텍처 (인스턴스 타입에서 파생) ----------
-  # 하드코딩하면 안 되는 이유: 타입이 Graviton(t4g/m7g/c7g...)으로 바뀌면
-  # ami_type(x86_64 고정)과 docker --platform(amd64 고정)이 조용히 어긋나
-  # 노드가 안 뜨거나 이미지가 실행되지 않는다.
-  node_arch = contains(data.aws_ec2_instance_type.node.supported_architectures, "x86_64") ? "x86_64" : "arm64"
-
-  ng_ami_type     = local.node_arch == "x86_64" ? "AL2023_x86_64_STANDARD" : "AL2023_ARM_64_STANDARD"
-  docker_platform = local.node_arch == "x86_64" ? "linux/amd64" : "linux/arm64"
-  # Karpenter NodePool 이 다른 아키텍처를 고르지 못하게 요구조건으로 넣는다.
-  karpenter_arch = local.node_arch
+  # ---------- 아키텍처 ----------
+  # 고정한다(x86_64). 파생시키지 않는 이유:
+  #  - 문제지가 t3.medium 을 강제하고, 제공되는 바이너리도 x86 기반 AL2023 빌드다.
+  #    (문제지: "제공된 binary는 x86기반 EC2의 Amazon Linux 2023에서 빌드")
+  #    즉 arm 노드로 바꾸면 바이너리 자체가 실행되지 않으므로 파생할 실익이 없다.
+  #  - ami_type 이 바뀌면 관리형 노드그룹이 '교체'된다. 파생값으로 두면 변수 하나를
+  #    잘못 건드렸을 때 노드그룹이 통째로 재생성되는 위험이 생긴다.
+  node_arch       = "x86_64"
+  ng_ami_type     = "AL2023_x86_64_STANDARD"
+  docker_platform = "linux/amd64"
+  karpenter_arch  = "x86_64"
 
   # ---------- 노드 물리 용량 ----------
   node_vcpu    = data.aws_ec2_instance_type.node.default_vcpus

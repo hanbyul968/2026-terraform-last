@@ -83,8 +83,8 @@ variable "karpenter_cpu_limit" {
 # vCPU 대신 '노드 수'로 상한을 표현하면 인스턴스 타입이 바뀌어도 의도가 보존된다.
 variable "karpenter_max_nodes" {
   type        = number
-  default     = 6
-  description = "Karpenter가 추가로 띄울 수 있는 최대 노드 수. karpenter_cpu_limit=0 일 때 vCPU 상한으로 환산된다."
+  default     = 0
+  description = "Karpenter 최대 노드 수. 0이면 앱 맵(max_replicas x request)에서 자동 계산 — 앱이 바뀌면 자동으로 따라간다."
 
   validation {
     condition     = var.karpenter_max_nodes >= 0 && var.karpenter_max_nodes <= 50

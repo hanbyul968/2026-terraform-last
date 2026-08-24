@@ -24,7 +24,7 @@ locals {
   # one "build + push" pair per app, fully interpolated (no shell vars)
   build_lines = join("\n", flatten([
     for app in sort(keys(local.apps)) : [
-      "docker build --platform linux/amd64 --build-arg APP=${app} -t ${local.ecr_registry}/${local.name}/${app}:${local.app_image_tags[app]} .",
+      "docker build --platform ${local.docker_platform} --build-arg APP=${app} -t ${local.ecr_registry}/${local.name}/${app}:${local.app_image_tags[app]} .",
       "docker push ${local.ecr_registry}/${local.name}/${app}:${local.app_image_tags[app]}",
     ]
   ]))

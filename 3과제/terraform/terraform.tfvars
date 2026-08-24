@@ -59,8 +59,9 @@ apps = {
   }
 }
 
-# 일반 노드풀(user/product) 상한. 두 앱은 CPU 를 거의 안 쓰므로 NG 2대 + 여기 몇 대로 충분.
-karpenter_max_nodes = 3
+# Karpenter 상한은 지정하지 않는다 — 앱 맵에서 자동 계산된다(sizing.tf).
+# 앱이 추가/삭제되거나 max_replicas 가 바뀌면 상한도 따라 움직인다.
+# 굳이 고정하려면 karpenter_max_nodes 또는 karpenter_cpu_limit 을 준다.
 
 # 격리 노드풀(stress) 상한.
 #

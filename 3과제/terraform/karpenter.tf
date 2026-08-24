@@ -236,6 +236,13 @@ resource "kubectl_manifest" "karpenter_nodepool" {
               key      = "karpenter.sh/capacity-type"
               operator = "In"
               values   = ["on-demand"]
+            },
+            {
+              # 아키텍처 고정 (sizing.tf 에서 인스턴스 타입 기준 파생).
+              # 없으면 Karpenter 가 다른 아키텍처 노드를 골라 이미지가 실행되지 않는다.
+              key      = "kubernetes.io/arch"
+              operator = "In"
+              values   = [local.karpenter_arch]
             }
           ]
           expireAfter = "720h"
@@ -325,6 +332,11 @@ resource "kubectl_manifest" "karpenter_nodepool_isolated" {
               key      = "karpenter.sh/capacity-type"
               operator = "In"
               values   = ["on-demand"]
+            },
+            {
+              key      = "kubernetes.io/arch"
+              operator = "In"
+              values   = [local.karpenter_arch]
             }
           ]
           expireAfter = "720h"

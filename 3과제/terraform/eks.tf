@@ -188,7 +188,8 @@ resource "aws_eks_node_group" "main" {
 
   instance_types = [var.node_instance_type]
   capacity_type  = "ON_DEMAND"
-  ami_type       = "AL2023_x86_64_STANDARD"
+  # 아키텍처는 인스턴스 타입에서 파생한다(sizing.tf). Graviton 으로 바꿔도 자동 대응.
+  ami_type = local.ng_ami_type
 
   launch_template {
     id      = aws_launch_template.eks_node.id

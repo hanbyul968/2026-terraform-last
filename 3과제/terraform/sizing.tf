@@ -24,6 +24,17 @@ data "aws_ec2_instance_type" "karpenter" {
 }
 
 locals {
+  # ---------- 아키텍처 (인스턴스 타입에서 파생) ----------
+  # 하드코딩하면 안 되는 이유: 타입이 Graviton(t4g/m7g/c7g...)으로 바뀌면
+  # ami_type(x86_64 고정)과 docker --platform(amd64 고정)이 조용히 어긋나
+  # 노드가 안 뜨거나 이미지가 실행되지 않는다.
+  node_arch = contains(data.aws_ec2_instance_type.node.supported_architectures, "x86_64") ? "x86_64" : "arm64"
+
+  ng_ami_type     = local.node_arch == "x86_64" ? "AL2023_x86_64_STANDARD" : "AL2023_ARM_64_STANDARD"
+  docker_platform = local.node_arch == "x86_64" ? "linux/amd64" : "linux/arm64"
+  # Karpenter NodePool 이 다른 아키텍처를 고르지 못하게 요구조건으로 넣는다.
+  karpenter_arch = local.node_arch
+
   # ---------- 노드 물리 용량 ----------
   node_vcpu    = data.aws_ec2_instance_type.node.default_vcpus
   node_cpu_m   = local.node_vcpu * 1000
@@ -57,11 +68,25 @@ locals {
   node_max_pods_effective = min(var.node_max_pods, 110, local.prefix_max_pods)
 
   # ---------- Karpenter 총 vCPU 상한 ----------
-  # "최대 몇 대까지 띄울지"를 노드 수로 정하고 vCPU 로 환산한다.
-  # 타입이 커지면 같은 노드 수라도 vCPU 상한이 자동으로 커진다.
-  # (karpenter_cpu_limit 을 직접 주면 그 값이 우선한다)
+  # 앱 맵에서 자동 계산한다. 앱이 추가/삭제되거나 max_replicas/request 가 바뀌면
+  # 상한도 같이 움직이므로, 대회날 앱이 바뀌어도 손댈 필요가 없다.
+  #
+  # 필요량 = 모든 앱의 (max_replicas x request) 합  ← HPA 가 최대로 늘었을 때의 예약량
+  # 그 중 관리형 NG 가 감당하는 몫을 빼고, 나머지를 Karpenter 가 채운다. +1 은 여유.
+  #
+  # 상한이 낮으면 부하 시 파드가 Pending 으로 남아 순손실이 된다(실측: 상한 6 vCPU 에서
+  # 파드 2개가 4분 넘게 Pending). 상한은 유휴 노드 수와 무관하다 — 유휴는
+  # min_replicas x request 가 결정하므로 상한을 넉넉히 잡아도 비용이 늘지 않는다.
+  peak_cpu_request_m = sum(concat([0], [
+    for name, a in local.apps : a.cpu_request_m * a.max_replicas
+  ]))
+  peak_nodes_needed    = ceil(local.peak_cpu_request_m / local.node_app_cpu_m)
+  karpenter_nodes_auto = max(local.peak_nodes_needed - var.node_desired_size, 0) + 1
+
+  # 우선순위: karpenter_cpu_limit(직접 vCPU) > karpenter_max_nodes(직접 노드 수) > 자동
   karpenter_cpu_limit_effective = var.karpenter_cpu_limit > 0 ? var.karpenter_cpu_limit : (
-    var.karpenter_max_nodes * local.karpenter_min_vcpu
+    var.karpenter_max_nodes > 0 ? var.karpenter_max_nodes * local.karpenter_min_vcpu
+    : local.karpenter_nodes_auto * local.karpenter_min_vcpu
   )
 
   # 격리 노드풀의 vCPU 상한. 여기서 비용 vs 폭식앱 성능 트레이드오프를 조절한다.

@@ -2,6 +2,17 @@
 # 부하/채점 대상 정의. loadtest.ps1 / autotune.ps1 / autotune-hc.ps1 이 이 파일을 dot-source 한다:
 #     . .\config.ps1
 
+# ---------------------------------------------------------------------------
+# 콘솔 출력 인코딩을 UTF-8 로 맞춘다.
+# 스크립트는 한글을 UTF-8 로 출력하는데, PowerShell 콘솔 코드페이지가 949(한글 완성형)이면
+# 글자가 깨져 보인다("기록" -> "湲곕줉"). 표시만의 문제지만 읽기 나쁘므로 세션 인코딩을 맞춘다.
+# 파일 쓰기(tuning.auto.tfvars.json)는 이미 BOM 없는 UTF-8 로 별도 처리하므로 영향 없다.
+try {
+  [Console]::OutputEncoding = [Text.UTF8Encoding]::new()
+  $OutputEncoding = [Text.UTF8Encoding]::new()
+  $PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'
+} catch {}
+
 # 엔드포인트 해석 — 우선순위: $env:ENDPOINT > `terraform output endpoint`.
 # ⚠ 매 실행마다 새로 계산한다(세션에 옛 주소가 캐시돼 죽은 도메인을 계속 쓰던 버그 방지).
 #   - 다른 주소 강제: 스크립트에 -Url http://... (최우선), 또는  $env:ENDPOINT = 'http://...'

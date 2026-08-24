@@ -184,6 +184,35 @@ class SharedEngineTests(unittest.TestCase):
         # 실사용이 노드에 들어가는 경우엔 축소 없이도 이미 baseline 이라 presize 불필요.
         self.assertIsNone(engine._idle_fit(fit))
 
+    def test_node_shed_surfaces_when_frontier_prefers_fewer_nodes(self):
+        """프론티어가 '적은 노드 = 총점↑'이라 하면 max_replicas 를 줄이는 후보가 나온다.
+
+        request 로는 수요를 못 줄이는 상황(cost_locked)에서, 이전엔 '개선 후보 없음'으로
+        멈췄다. 이제 파드 수를 줄여 노드를 회수하는 node-shed 후보를 낸다.
+        """
+        def app(name, req, mx, cpu, perf):
+            return engine.AppSnapshot(
+                name=name, slo_seconds=1.0, samples=2000, window_seconds=120.0,
+                availability=100, performance=perf, request_m=req, memory_request_mi=128,
+                cpu_limit_m=None, target=50, min_replicas=2, max_replicas=mx, replicas=mx,
+                pods_p90=mx, pods_max=mx, per_pod_p90=int(cpu / mx), per_pod_p95=int(cpu / mx),
+                total_cpu_p90=cpu, total_cpu_p95=cpu, cpu_samples=60,
+                latencies=tuple([.05] * 400))  # 여유로운 지연 → 노드 줄여도 게이트 유지
+        snap = engine.TuningSnapshot(
+            {"user": app("user", 200, 12, 2400, 95),
+             "product": app("product", 200, 12, 2400, 95),
+             "stress": app("stress", 200, 10, 2000, 95)},
+            engine.ClusterSnapshot(node_alloc_m=1930, node_mem_alloc_mi=3292,
+                                   cluster_cpu_p95_m=6800, system_reserved_m=250,
+                                   baseline_node_count=2, zone_count=2, node_average=7))
+        result = engine.plan(snap)
+        kinds = [c["kind"] for c in result["candidates"]]
+        self.assertIn("node-shed", kinds)
+        shed = next(c for c in result["candidates"] if c["kind"] == "node-shed")
+        # 파드 수(max)를 실제로 낮춘다.
+        self.assertTrue(any(v["max"] < snap.apps[n].max_replicas
+                            for n, v in shed["knobs"].items()))
+
     def test_one_failing_app_does_not_block_other_apps(self):
         """한 앱이 기준 미달이어도 다른 앱 후보가 나와야 한다(회차 독식 방지)."""
         def app(name, perf, avail, req, tgt, pods, cpu, mx):

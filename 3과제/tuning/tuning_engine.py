@@ -1631,6 +1631,56 @@ def generate_candidates(snapshot: TuningSnapshot, rejected=None, namespace="app"
     return ordered + spare
 
 
+def _node_shed(snapshot: TuningSnapshot):
+    """프론티어가 '지금보다 적은 노드가 총점이 높다'고 판정하면, max_replicas 를 낮춰
+    노드를 한 단계 줄이는 묶음을 만든다.
+
+    왜 필요한가: 부하가 실측 수요만큼 크면 request 를 아무리 낮춰도 총 CPU 수요가 안 줄어
+    노드 수가 그대로다(cost_locked). 이때 비용 12점을 회수하는 유일한 방법은 파드 수를
+    줄이는 것(= max_replicas 하향)이다. 프론티어는 그 대가로 품질이 얼마나 깎이는지까지
+    계산해 두고도 '적은 노드가 총점이 높다'고 판단했다. 그 판단을 실행하는 후보다.
+
+    안전장치:
+      - 프론티어 목표(target_nodes)로 한 번에 점프하지 않고 '한 노드'씩만 줄인다.
+        모델(선형 지연 외삽)이 틀리면 다음 회차 측정에서 성능 게이트가 깨지는 걸 보고 멈춘다.
+      - 목표 노드 수에서 성능 게이트(모든 앱 >=30%)가 깨진다고 예측되면 아예 만들지 않는다.
+        게이트가 깨지면 비용 12점이 0 이라 노드를 줄인 의미가 없다.
+    """
+    target = snapshot.target_nodes
+    if not target:
+        return None
+    # 현재 예약 기준 노드 수(peak). 목표보다 많을 때만 줄인다.
+    usable = snapshot.cluster.usable_cpu_per_node_m
+    if usable <= 0:
+        return None
+    peaks = {n: (a.max_replicas or 1) * (a.request_m or 0) for n, a in snapshot.apps.items()}
+    total_peak = sum(peaks.values())
+    cur_nodes = max(1, int(math.ceil(total_peak / usable)))
+    if cur_nodes <= target:
+        return None
+    # 한 단계 = 노드 1대 줄이기. 목표가 더 낮아도 이번엔 (cur_nodes-1)까지만.
+    step_nodes = cur_nodes - 1
+    # 그 노드 수에서 게이트가 유지되는지 모델로 확인(선형 외삽).
+    perfs, _avails, _sd = quality_at_nodes(snapshot, step_nodes)
+    if not rubric.perf_gate_ok(perfs):
+        return None
+    budget = step_nodes * usable
+    if total_peak <= budget:
+        return None
+    scale = budget / total_peak
+    knobs = {}
+    for name, app in snapshot.apps.items():
+        cur = _current_dict(app)
+        # peak 예약을 예산 안으로: max_replicas 를 비례 축소(min 아래로는 안 내림).
+        new_max = max(cur["min"], int(math.floor((app.max_replicas or 1) * scale)))
+        if new_max >= (app.max_replicas or 1):
+            continue
+        p = dict(cur)
+        p["max"] = new_max
+        knobs[name] = p
+    return knobs or None
+
+
 def plan(snapshot: TuningSnapshot, rejected=None, namespace="app", rejected_nodes=None,
          hpa_only=False):
     score = snapshot.score()
@@ -1640,6 +1690,23 @@ def plan(snapshot: TuningSnapshot, rejected=None, namespace="app", rejected_node
     if frontier.get("recommended_nodes"):
         snapshot.target_nodes = int(frontier["recommended_nodes"])
     candidates = generate_candidates(snapshot, rejected, namespace, rejected_nodes, hpa_only)
+
+    # 프론티어가 '적은 노드가 총점이 높다'고 하면 노드를 한 단계 줄이는 후보를 추가한다.
+    # (request 조정으로는 못 줄이는 상황 — cost_locked 와 짝을 이룬다)
+    shed = _node_shed(snapshot)
+    if shed and not hpa_only:
+        _rej = set(rejected or ())
+        lead = max(shed, key=lambda n: snapshot.apps[n].max_replicas or 0)
+        detail = ", ".join(f"{n} max {snapshot.apps[n].max_replicas}→{v['max']}"
+                           for n, v in sorted(shed.items()))
+        c = _make_candidate(
+            snapshot, snapshot.apps[lead], "node-shed", shed[lead],
+            f"프론티어 추천 {snapshot.target_nodes}대로 접근: 파드 수를 줄여 노드 1대 회수 "
+            f"(비용 12점 회수 > 품질 손실, 게이트 유지 예측). {detail}",
+            2.0, namespace, knobs=shed)
+        if c and c.key() not in _rej:
+            candidates.insert(0, c)
+
     fit = deterministic_reservation(snapshot)
     cost_locked = ""
     if fit:
@@ -1647,7 +1714,9 @@ def plan(snapshot: TuningSnapshot, rejected=None, namespace="app", rejected_node
             cost_locked = (f"실측 동시 CPU 수요 {fit['demand_m']}m ÷ 노드당 가용 "
                            f"{snapshot.cluster.usable_cpu_per_node_m}m = {fit['nodes']}대가 필요하고 "
                            f"관측 평균은 {snapshot.cluster.node_average:.1f}대다. "
-                           f"request/파드수 조정으로 비용을 더 줄일 수 없다 — 수요를 줄이거나 성능을 내주는 선택만 남는다.")
+                           f"request 조정으로는 노드를 못 줄인다 — "
+                           + ("파드 수(max_replicas)를 줄이는 node-shed 후보로 비용을 회수한다."
+                              if shed else "수요를 줄이거나 성능을 내주는 선택만 남는다."))
     apps = []
     for name, app in sorted(snapshot.apps.items()):
         apps.append({
@@ -1669,9 +1738,11 @@ def plan(snapshot: TuningSnapshot, rejected=None, namespace="app", rejected_node
             "total_cpu_p90": app.total_cpu_p90, "bottleneck": classify_bottleneck(app, snapshot.cluster, snapshot.history),
         })
     if cost_locked:
-        # 비용을 더 줄일 수 없으면 노드 감소를 노린 후보는 시험 자체가 시간 낭비다.
+        # 비용을 request 로는 못 줄이므로, 남길 후보는 (a) 게이트 복구 (b) 실측 역산
+        # (c) 성능을 실제로 올리는 후보 (d) 파드 수를 줄여 노드를 회수하는 node-shed 뿐이다.
         candidates = [c for c in candidates
-                      if c.kind in ("gate-recovery", "usage-sized") or c.predicted_delta > 0]
+                      if c.kind in ("gate-recovery", "usage-sized", "node-shed")
+                      or c.predicted_delta > 0]
     # 트래픽 전 1회 적용할 request 사이징(rollout 동반). 유휴 노드가 baseline를 넘으면 idle-fit,
     # 아니면 실측 과소/과대 예약 교정(usage-sized). HPA-only 루프와 별개로 runner가 먼저 적용한다.
     presize = _idle_fit(snapshot)

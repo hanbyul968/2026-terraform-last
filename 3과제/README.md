@@ -45,32 +45,32 @@
 
 ```hcl
 apps = {
-  user    = { cpu_request_m = 120, hpa_target_cpu = 55, min_replicas = 3, max_replicas = 10 }
+  # 측정으로 알 수 없는 '구조'만 적는다. request/target/replicas 는 튜너가 뽑는다.
   product = { needs_s3 = true, cache_ttl = 10, cache_query_keys = ["id"] }
-  stress  = { needs_db = false, cpu_request_m = 500 }
+  stress  = { needs_db = false }
 }
 ```
 
-| 키 | 의미 |
-|---|---|
-| `cpu_request_m` / `cpu_request_pct` | 파드 CPU 예약. pct는 노드 용량 비율(타입 바뀌면 자동 조정) |
-| `cpu_limit_ratio` | limit = request × 이 값 (기본 1.5). 낮추면 격리↑ 계단흡수↓ |
-| `min_replicas` / `max_replicas` / `hpa_target_cpu` | HPA |
-| `needs_db` / `needs_s3` | DB 시크릿 / S3 쓰기 IRSA 주입 |
-| `cache_ttl` / `cache_query_keys` | CloudFront GET 캐시 |
-| `path` / `container_port` / `healthcheck_path` | 앱별 다를 때만 |
+| 키 | 의미 | 누가 정하나 |
+|---|---|---|
+| `needs_db` / `needs_s3` | DB 시크릿 / S3 쓰기 IRSA 주입 | **사람** (문제지 보고) |
+| `cache_ttl` / `cache_query_keys` | CloudFront GET 캐시 (반복 조회 앱) | **사람** (문제지 보고) |
+| `path` / `container_port` / `healthcheck_path` | 앱별 다를 때만 | 사람 |
+| `cpu_request_m` / `hpa_target_cpu` / `min·max_replicas` | 파드 CPU·오토스케일 | **튜너** (`optimize.ps1`) |
+| `cpu_limit_ratio` | limit = request × 이 값 (기본 0 = 무제한) | 보통 안 건드림 |
 
-**request는 실측 사용량에 맞춘다.** 과대 설정하면 HPA가 눈이 먼다(사용률 = 실사용÷request이므로 목표치에 영원히 못 닿음) — 실제로 request 425m에 실사용 40m이라 9%/90%로 확장이 안 된 적이 있다. 여유는 request가 아니라 `hpa_target_cpu`로 확보한다.
+**request/target/replicas는 tfvars에 적지 않는다.** 측정 없이는 알 수 없고, 앱이 바뀌면 더더욱 모른다. 튜너가 부하를 넣어 `tuning.auto.tfvars.json`에 뽑아 넣는다(우선순위 `app_tuning > apps > app_defaults`). 튜닝 전 시작값은 `app_defaults`(request 200m, target 50%, 4-12).
+
+**CPU limit은 기본으로 걸지 않는다** (`cpu_limit_ratio = 0`). limit을 걸면 CFS가 100ms 주기마다 쿼터를 끊어 지연 민감 앱의 꼬리지연이 폭증한다 — 실제로 product를 limit 75m로 묶었다가 가용성이 100%→65%로 무너졌다. 이웃 CPU 갈취는 limit이 아니라 request 정상화 + 파드 안티어피니티로 푼다.
 
 ### 노드 타입이 바뀔 때
 
-`node_instance_type` 한 줄만 바꾼다. 아래가 전부 자동 재계산된다.
+`node_instance_type` 한 줄만 바꾼다. 아래가 자동 재계산된다.
 
-- 아키텍처 → `ami_type`, `docker build --platform`, Karpenter `kubernetes.io/arch`
 - 노드당 앱 가용 CPU, kubelet `maxPods`(Prefix Delegation 실상한)
 - Karpenter 노드 상한(앱 맵의 `max_replicas × request`에서 역산)
 
-확인은 `terraform plan`의 `sizing` / `apps` output.
+아키텍처는 x86_64로 **고정**이다(파생 아님). 문제지가 t3.medium을 강제하고 제공 바이너리가 x86이라 arm으로 바꾸면 실행되지 않으며, `ami_type`을 파생시키면 변수 하나로 노드그룹이 교체되는 위험이 있다. 확인은 `terraform plan`의 `sizing` output.
 
 ### 경로·포트가 바뀔 때
 

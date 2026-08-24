@@ -1,5 +1,65 @@
 # tuning/ — 공식 채점 · 라이브 Kubernetes 자동 튜닝
 
+## ⚠ 먼저: `hey` 설치 (setup.ps1 이 403 으로 실패할 때)
+
+`setup.ps1` 이 아래처럼 실패하면 **Go 로 직접 빌드**해야 한다.
+
+```
+installing hey...
+  S3 download failed: 원격 서버에서 (403) 사용할 수 없음 오류를 반환했습니다.
+  hey.exe 깨짐/실패 → Go 빌드로 폴백...
+  Go 미설치 → winget install --id GoLang.Go -e 후 재실행하거나
+```
+
+배포 바이너리를 받을 방법이 **하나도 없다**(2026-08 확인):
+
+| 경로 | 상태 |
+|---|---|
+| `hey-release.s3.us-east-2.amazonaws.com` (setup.ps1 기본) | **403** — 버킷 공개 중단 |
+| GitHub `rakyll/hey` releases | 릴리스 5개 전부 **바이너리 자산 없음** |
+| `winget install hey` | **패키지 없음** (검색 결과 무관한 앱만) |
+
+→ **Go 설치 후 소스 빌드가 유일한 방법.** `loadtest.ps1` / `optimize.ps1` 은 `hey` 가 없으면
+바로 `exit 1` 이므로 우회할 수 없다.
+
+### 설치 (검증 완료: Go 1.26.7 → hey v0.1.5, 11.5MB)
+
+```powershell
+# 1) Go 설치 (관리자 권한 UAC 승인 필요)
+winget install --id GoLang.Go -e --source winget --accept-package-agreements --accept-source-agreements
+
+# 2) 새 PowerShell 창을 연다  ← 필수
+#    winget 이 PATH 에 C:\Program Files\Go\bin 을 넣지만 현재 창에는 반영되지 않는다.
+
+# 3) hey 빌드 → %USERPROFILE%\bin 에 설치
+$env:GOBIN = "$env:USERPROFILE\bin"
+go install github.com/rakyll/hey@latest
+
+# 4) 확인 (Usage: hey [options...] <url> 가 나오면 성공)
+hey
+```
+
+새 창을 열기 싫으면 2번을 건너뛰고 3번에서 go 를 full path 로 부른다:
+
+```powershell
+$env:GOBIN = "$env:USERPROFILE\bin"
+& 'C:\Program Files\Go\bin\go.exe' install github.com/rakyll/hey@latest
+```
+
+### 그 다음
+
+```powershell
+.\setup.ps1 -Cluster wsi2026-cluster -Region ap-northeast-2
+```
+
+`hey` 가 이미 있으면 setup.ps1 은 다운로드를 건너뛰고 kubectl + kubeconfig 만 처리한다.
+`%USERPROFILE%\bin` 은 setup.ps1 이 사용자 PATH 에 영구 등록하므로 새 창부터 `hey` 가 바로 잡힌다.
+
+> **정말 Go 를 못 깔면**: `../../부하/` 의 웹 도구(`python server.py`)로 부하는 줄 수 있지만,
+> `loadtest.ps1` 의 채점 환산·`optimize.ps1` 의 자동 튜닝은 쓸 수 없다. 되도록 Go 를 깐다.
+
+---
+
 3과제 40점은 **전부 부하 테스트 결과**로 매겨진다. `advise.py`, `optimize.py`, `score.py`,
 대시보드는 모두 **`rubric.py` + `tuning_engine.py` 한 엔진**을 쓴다.
 

@@ -34,7 +34,11 @@ locals {
   node_arch       = "x86_64"
   ng_ami_type     = "AL2023_x86_64_STANDARD"
   docker_platform = "linux/amd64"
-  karpenter_arch  = "x86_64"
+
+  # ⚠ kubernetes.io/arch 라벨 값은 Go 표기(amd64/arm64)다. "x86_64" 를 넣으면
+  #   어떤 노드도 매칭되지 않아 Karpenter 가 노드를 하나도 못 띄운다(NodeClaim 0).
+  #   실측: 이 오타로 Pending 파드가 쌓이는 동안 노드가 전혀 생성되지 않았다.
+  karpenter_arch = "amd64"
 
   # ---------- 노드 물리 용량 ----------
   node_vcpu    = data.aws_ec2_instance_type.node.default_vcpus

@@ -49,22 +49,18 @@ variable "app_defaults" {
     cpu_request_m = optional(number, 100)
     cpu_limit_m   = optional(number, null)
 
-    # CPU limit = request x 이 비율.
+    # CPU limit = request x 이 비율. 0 이면 limit 을 걸지 않는다(기본).
     #
-    # 1.5 인 이유 (실측 근거):
-    #   문제가 된 조합은 limit/request = 3.0 (500m/1503m) 인 앱이 CPU limit 이 없는
-    #   지연 민감 앱과 같은 노드에 있던 경우다. cgroup CPU 는 비율 분배라 크게 burst 하는
-    #   쪽이 이기고, 실제로 민감 앱의 p50 이 27ms -> 330ms 로 무너졌다.
-    #   비율을 조이면 이웃을 굶기는 정도가 그만큼 줄고, 부하는 HPA 가 파드 수로 흡수한다.
+    # ⚠ 기본을 0(무제한)으로 두는 이유 — 실측으로 크게 실패했다:
+    #   limit 을 걸면 CFS 가 100ms 주기마다 쿼터를 끊는다. 지연 민감 앱은 쿼터를 다 쓴
+    #   순간부터 다음 주기까지 강제로 멈추므로 꼬리지연이 폭증한다.
+    #   실측: product 를 request 50m / limit 75m 로 묶었더니 가용성이 100% -> 65.1%,
+    #   성능이 84.3% -> 51.3% 로 무너졌다(타임아웃). 이웃 CPU 보호보다 손해가 훨씬 컸다.
     #
-    #   1.0(= limit 고정)이 격리는 가장 확실하지만, 계단식 부하가 들어온 순간 기존 파드가
-    #   바로 스로틀되어 HPA 가 파드를 늘리는 15~30초 동안 지연이 튄다.
-    #   1.5 는 그 계단을 흡수할 여유를 남기면서 갈취를 1.5배로 제한한다.
-    #
-    # 이 규칙은 앱 이름/성격을 몰라도 모든 앱에 자동 적용된다 — 대회날 앱이 바뀌어도
-    # 손댈 필요가 없고, '어느 앱이 CPU 폭식인지' 미리 알아야 하는 문제도 사라진다.
-    # 더 강한 격리가 필요하면 1 로, burst 를 허용하려면 2 이상으로 조정한다.
-    cpu_limit_ratio  = optional(number, 1.5)
+    # 이웃을 굶기는 문제는 limit 이 아니라 (a) request 를 실사용에 맞추기
+    # (b) 서로 다른 앱을 다른 노드로 분산(pod anti-affinity) 로 푼다.
+    # 꼭 상한이 필요하면 1.5~2 정도를 주되, 지연 민감 앱에는 걸지 않는다.
+    cpu_limit_ratio  = optional(number, 0)
     memory_request   = optional(string, "128Mi")
     memory_limit     = optional(string, "256Mi")
     min_replicas     = optional(number, 2)

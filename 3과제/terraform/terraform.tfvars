@@ -18,44 +18,45 @@
 #   user 가 24.2% 인 순간 비용 12점이 통째로 0 이 됐다. 격리가 그 게이트를 살린다.
 # ===========================================================================
 apps = {
-  # 조회/생성 API. DB I/O 바운드라 CPU 를 거의 쓰지 않는다 → request 를 낮게 잡아야
-  # HPA 가 부하를 감지할 수 있다. 지연 민감(0.2s) → 절대 격리 노드로 보내지 않는다.
+  # ── 성능 최우선 ──────────────────────────────────────────────────
+  # 비용 ratio 는 1.0배(2대)까지 내려갔지만 성능 게이트(모든 앱 30%)에 걸려 비용 12점이
+  # 통째로 0 이었다. 그래서 노드를 더 쓰더라도 성능을 올리는 쪽이 이득이다.
+  #
+  # CPU limit 은 걸지 않는다(app_defaults.cpu_limit_ratio=0).
+  # 실측: product 를 request 50m / limit 75m 로 묶었더니 CFS 스로틀링으로
+  # 가용성 100%->65.1%, 성능 84.3%->51.3% 로 무너졌다. 지연 민감 앱에 limit 은 독이다.
+  #
+  # hpa_target 50% 는 여유를 크게 둔 값이다 — 파드를 일찍 늘려 꼬리지연을 막는다.
+
+  # 트래픽 비중이 가장 크고 SLO 0.2s 로 타이트하다.
   user = {
-    cpu_request_m  = 120
-    hpa_target_cpu = 55
-    min_replicas   = 3
-    max_replicas   = 10
+    cpu_request_m  = 200
+    hpa_target_cpu = 50
+    min_replicas   = 4
+    max_replicas   = 12
   }
 
-  # 같은 id 로 반복 조회된다(문제지 명시) → CloudFront 캐시가 오리진 부하와 지연을
-  # 동시에 줄인다. 이미지 업로드 때문에 S3 쓰기 권한(IRSA) 필요.
+  # 같은 id 로 반복 조회된다(문제지 명시) → CloudFront 캐시가 오리진 부하를 줄인다.
+  # 이미지 업로드 때문에 S3 쓰기 권한(IRSA) 필요.
+  # 가용성이 65% 로 무너졌던 앱이므로 request/replica 를 넉넉히 준다.
   product = {
-    cpu_request_m    = 100
-    hpa_target_cpu   = 55
-    min_replicas     = 3
-    max_replicas     = 10
+    cpu_request_m    = 200
+    hpa_target_cpu   = 50
+    min_replicas     = 4
+    max_replicas     = 12
     needs_s3         = true
     cache_ttl        = 10
     cache_query_keys = ["id"]
   }
 
-  # CPU 를 많이 쓰는 앱. 별도 노드로 격리하지 않는다(isolate 미사용).
-  #
-  # 격리를 안 써도 되는 이유: 모든 앱이 limit = request (app_defaults.cpu_limit_ratio=1)
-  # 라서 어떤 파드도 예약분을 넘겨 이웃 CPU 를 빼앗지 못한다. 노드를 나누지 않아도
-  # 지연 민감 앱이 보호되고, 전용 노드가 없으니 유휴 시 Karpenter 노드가 0대가 된다.
-  # 부하는 HPA 가 파드 수로 흡수한다.
-  #
-  # ⚠ request 값이 이 앱의 처리량 상한을 결정한다(limit = request 이므로).
-  #   500m 은 확정값이 아니다 — 요청당 CPU 비용을 신뢰할 만큼 측정하지 못했다.
-  #   부하 결과에서 이 앱의 성능%가 낮으면 request 를 올리고(파드당 처리량↑),
-  #   그래도 부족하면 max_replicas 를 올린다.
+  # 요청당 CPU 소모가 큰 앱. SLO 는 1s 로 느슨하지만 30% 게이트는 넘겨야 한다.
+  # limit 이 없으므로 request 를 크게 잡아 파드당 처리 여력을 확보한다.
   stress = {
     needs_db       = false
-    cpu_request_m  = 500
-    hpa_target_cpu = 65
+    cpu_request_m  = 700
+    hpa_target_cpu = 60
     min_replicas   = 2
-    max_replicas   = 8
+    max_replicas   = 10
   }
 }
 

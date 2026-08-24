@@ -60,6 +60,43 @@ resource "aws_db_parameter_group" "mysql8" {
     name  = "long_query_time"
     value = "1"
   }
+
+  # ---------- 성능 우선 튜닝 ----------
+  # 전제(실측): DB 는 병목이 아니었다. QueryDatabaseResponseLatency 6.9ms,
+  # ReadLatency 0.5~1.3ms, WriteLatency 1.3ms, DB CPU 14%, slow query log 비어 있음.
+  # 따라서 여기서 짜낼 수 있는 건 '쿼리 시간'이 아니라 커밋 지연과 커넥션 비용이다.
+
+  # 커밋 지연: 기본값 1 은 매 커밋마다 redo 로그를 디스크에 flush 한다(fsync).
+  # 2 는 1초에 한 번 flush → POST /v1/user 같은 쓰기의 응답시간이 줄어든다.
+  # ⚠ 내구성 트레이드오프: 인스턴스가 죽으면 최대 1초 분량의 커밋이 유실될 수 있다.
+  #    Multi-AZ 동기 복제는 그대로라 스탠바이 전환 자체는 안전하다.
+  #    성능 최우선 요청에 따라 켠다. 되돌리려면 값을 "1" 로 바꾼다.
+  parameter {
+    name  = "innodb_flush_log_at_trx_commit"
+    value = "2"
+  }
+
+  # binlog fsync 를 매 트랜잭션마다 하지 않는다(같은 계열의 커밋 지연 절감).
+  # 이 과제는 binlog 를 복제/복구에 쓰지 않으므로 손실 위험이 실질적으로 없다.
+  parameter {
+    name  = "sync_binlog"
+    value = "0"
+  }
+
+  # 앱이 커넥션을 자주 열고 닫으면(go-sql-driver 기본 MaxIdleConns=2) 커넥션 생성
+  # 비용이 지연으로 나타난다. 스레드를 캐시해 재사용한다.
+  # 실측: ClientConnections 27 -> 208 로 급증했다(커넥션 처닝 근거).
+  parameter {
+    name  = "thread_cache_size"
+    value = "64"
+  }
+
+  # 조회는 PK/인덱스 단건 위주다. 테이블/인덱스 핸들 캐시를 넉넉히 둬서
+  # 동시 커넥션이 늘어도 open table 경합이 생기지 않게 한다.
+  parameter {
+    name  = "table_open_cache"
+    value = "2000"
+  }
 }
 
 resource "aws_db_instance" "this" {

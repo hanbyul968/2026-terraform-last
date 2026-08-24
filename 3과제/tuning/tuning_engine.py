@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import bisect
+import base64
 import csv
 import json
 import math
@@ -1213,33 +1214,103 @@ def _optimal_request_target(snapshot: TuningSnapshot, app: AppSnapshot, current:
     return max(options, key=lambda row: row[0])
 
 
+def _tf_dir():
+    """terraform 디렉터리 경로. WSI_TF_DIR 로 덮어쓸 수 있다."""
+    override = os.environ.get("WSI_TF_DIR")
+    if override:
+        return os.path.abspath(override)
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "terraform"))
+
+
+TUNING_TFVARS_NAME = "tuning.auto.tfvars.json"
+
+
+def render_app_tuning_tfvars(merged: Dict[str, dict]) -> str:
+    """app_tuning 을 tfvars JSON 으로 직렬화한다.
+
+    HCL 이 아니라 JSON 을 쓰는 이유: Terraform 은 *.auto.tfvars.json 을 자동 로드하고,
+    JSON 은 PowerShell/Python 이 안전하게 '읽어서 병합' 할 수 있다. HCL 로 쓰면
+    회차마다 파일을 다시 파싱해야 해서 이전 튜닝값을 잃을 위험이 생긴다.
+
+    merged: {앱: {"request": m, "target": %, "min": n, "max": n}}
+    """
+    # 주석 키를 넣지 않는다: tfvars JSON 의 최상위 키는 모두 '선언된 변수'여야 하고,
+    # 아니면 terraform 이 "Value for undeclared variable" 경고를 뱉는다.
+    # 이 파일의 성격은 파일명(auto)과 tuning/README.md 로 설명한다.
+    body = {
+        "app_tuning": {
+            name: {
+                "cpu_request_m": int(round(float(v["request"]))),
+                "hpa_target_cpu": int(round(float(v["target"]))),
+                "min_replicas": int(v["min"]),
+                "max_replicas": int(v["max"]),
+            }
+            for name, v in sorted(merged.items())
+        },
+    }
+    return json.dumps(body, indent=2, ensure_ascii=False) + "\n"
+
+
+def _merged_tuning(snapshot, knobs):
+    """모든 앱의 '현재 라이브 값' 위에 knobs 를 얹은 완전한 목표 상태.
+
+    전체를 기록하는 이유: 되돌리기(rollback)가 정확해야 하고, 파일 하나만 보면
+    지금 클러스터가 어떤 수치로 돌아가는지 알 수 있어야 한다.
+    """
+    merged = {}
+    for name, app in snapshot.apps.items():
+        merged[name] = _current_dict(app)
+    for name, values in (knobs or {}).items():
+        merged[name] = dict(values)
+    return merged
+
+
+def _write_tfvars_ps(text: str) -> List[str]:
+    """tfvars 를 기록하는 PowerShell 1줄. base64 로 감싸 인용/인코딩 문제를 없앤다."""
+    payload = base64.b64encode(text.encode("utf-8")).decode("ascii")
+    path = os.path.join(_tf_dir(), TUNING_TFVARS_NAME)
+    return [
+        f'[IO.File]::WriteAllText("{path}", '
+        f'[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("{payload}")))'
+    ]
+
+
+def _terraform_apply_ps() -> List[str]:
+    """terraform apply — 앱 워크로드만 좁혀서 적용해 부하 중 리스크를 줄인다.
+
+    -target 을 쓰는 이유: 전체 apply 는 CloudFront/WAF/RDS 까지 diff 를 계산해
+    느리고, 부하 중에 의도치 않은 리소스를 건드릴 위험이 있다. 튜닝은 Deployment 와
+    HPA 만 바꾸므로 그 둘만 지정한다.
+    """
+    tf = _tf_dir()
+    return [
+        f'Push-Location "{tf}"',
+        'try {',
+        '  terraform apply -auto-approve -input=false '
+        '-target=kubernetes_deployment.app -target=kubernetes_horizontal_pod_autoscaler_v2.app',
+        '  if ($LASTEXITCODE -ne 0) { throw "terraform apply 실패" }',
+        '} finally { Pop-Location }',
+    ]
+
+
 def _commands(namespace, snapshot, knobs):
-    """knobs: {앱: proposed}. 여러 앱을 한 회차에 적용할 수 있게 전부 만든다."""
-    apply, rollback = [], []
-    for name in sorted(knobs):
-        app = snapshot.apps[name]
-        proposed = knobs[name]
-        current = _current_dict(app)
-        deployment = app.deployment_name or name
-        hpa = app.hpa_name or name
-        safe_hpa = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in hpa)
+    """튜닝 반영/되돌리기 명령을 만든다.
 
-        def patch(values, suffix):
-            body = {"spec": {"minReplicas": values["min"], "maxReplicas": values["max"],
-                             "metrics": [{"type": "Resource", "resource": {"name": "cpu",
-                             "target": {"type": "Utilization", "averageUtilization": values["target"]}}}]}}
-            text = json.dumps(body, separators=(",", ":"))
-            path = f'$env:TEMP\\hpa-{safe_hpa}-{suffix}.json'
-            return [f"'{text}' | Set-Content -Path \"{path}\" -Encoding ascii",
-                    f'kubectl -n {namespace} patch hpa {hpa} --type=merge --patch-file \"{path}\"']
+    ⚠ 설계 원칙: 클러스터를 kubectl 로 직접 고치지 않는다.
+       이전 버전은 `kubectl patch hpa` / `kubectl set resources` 를 실행했다. 그러면
+       라이브 상태가 Terraform state 와 어긋나고(드리프트), 이후 누군가
+       `terraform apply` 를 하는 순간 튜닝값이 조용히 원복된다. 실제로 채점 회차에서
+       라이브 값(user 425m / product 50m / stress 25%,min3)이 .tf 파일값과 전부
+       달랐고, 무엇이 채점된 구성인지 사후에 알 수 없는 상태였다.
 
-        apply += patch(proposed, "apply")
-        if proposed["request"] != current["request"]:
-            apply += [f"kubectl -n {namespace} set resources deploy/{deployment} --requests=cpu={proposed['request']}m",
-                      f"kubectl -n {namespace} rollout status deploy/{deployment} --timeout=120s"]
-            rollback += [f"kubectl -n {namespace} set resources deploy/{deployment} --requests=cpu={current['request']}m",
-                         f"kubectl -n {namespace} rollout status deploy/{deployment} --timeout=120s"]
-        rollback += patch(current, "rollback")
+       그래서 이제 튜너는 tuning.auto.tfvars 에 목표값을 쓰고 terraform apply 만 한다.
+       Terraform 이 항상 단일 진실 공급원(single source of truth)이 된다.
+    """
+    proposed_text = render_app_tuning_tfvars(_merged_tuning(snapshot, knobs))
+    current_text = render_app_tuning_tfvars(_merged_tuning(snapshot, None))
+
+    apply = _write_tfvars_ps(proposed_text) + _terraform_apply_ps()
+    rollback = _write_tfvars_ps(current_text) + _terraform_apply_ps()
     return apply, rollback
 
 
@@ -1534,7 +1605,13 @@ def generate_candidates(snapshot: TuningSnapshot, rejected=None, namespace="app"
             # 멤버 delta 합으로 최상위 보장
             bundle.predicted_delta = round(sum(c.predicted_delta for c in per_app_best.values()), 2)
             candidates.insert(0, bundle)
-    candidates.sort(key=lambda c: (c.predicted_delta, -max(c.cpu_supply_ratio, 1.0),
+    # gate-recovery 를 무조건 최상위로 둔다.
+    # 이유: 채점표 4-1~4-12 는 모두 "모든 앱 성능 >= 30%" 를 함께 요구한다. 한 앱이 그
+    # 아래로 떨어지면 비용 12점이 통째로 0 이 되므로, 다른 어떤 개선보다 먼저 복구해야 한다.
+    # bundle 은 멤버 delta 의 '합'을 받기 때문에 predicted_delta 만으로 정렬하면 항상
+    # bundle 이 이겨 게이트 복구가 뒤로 밀렸다(실측된 순위 역전).
+    candidates.sort(key=lambda c: (c.kind == "gate-recovery",
+                                   c.predicted_delta, -max(c.cpu_supply_ratio, 1.0),
                                    kind_rank.get(c.kind, 0),
                                    -int(c.disruptive), -c.predicted_nodes), reverse=True)
     # (B) 한 앱이 시험 3회를 독식하지 못하게 앱별 1개씩 우선 배치한다.

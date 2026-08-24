@@ -17,12 +17,18 @@ locals {
   eks_host = var.k8s_provider_ready ? aws_eks_cluster.this.endpoint : "https://localhost"
   eks_ca   = var.k8s_provider_ready ? base64decode(aws_eks_cluster.this.certificate_authority[0].data) : ""
 
+  # 앱이 붙을 DB 주소 = RDS Proxy 엔드포인트.
+  # 엔진명이 아닌 DNS 엔드포인트라 문제지 요구("엔진명 삽입금지")를 만족한다.
+  # db_init 는 스키마/시드를 RDS 직결로 수행한다(프록시 인증 ALTER 치킨-에그 때문).
+  db_host = aws_db_proxy.this.endpoint
+
   # ---------- 유효 API 경로 (단일 소스: WAF scope-down + ALB deny_direct 가 공용) ----------
-  # 기본: <api_prefix>/<앱이름> (앱 목록 = alb.tf local.node_ports 의 키).
-  # 경로가 앱 이름과 달라지면 var.api_paths_override 로 통째로 교체.
-  api_paths = length(var.api_paths_override) > 0 ? var.api_paths_override : [
-    for k in sort(keys(local.node_ports)) : "${var.api_prefix}/${k}"
-  ]
+  # 앱별 path (apps.tf 의 local.apps) 에서 만든다. 앱이 추가/이름변경/경로변경 되어도
+  # WAF scope-down 과 ALB 403/404 규칙이 자동으로 따라간다.
+  # var.api_paths_override 를 주면 그 목록으로 통째로 교체.
+  api_paths = length(var.api_paths_override) > 0 ? var.api_paths_override : sort([
+    for k, a in local.apps : a.path
+  ])
   # 관리형 룰 scope-down: 유효 API 경로만 정확히 매칭 (미정의 경로는 WAF 통과 → ALB 404)
   api_path_regex = "^(${join("|", local.api_paths)})$"
   # 커스텀 차단 룰 적용 범위: 제공하는 모든 유효 엔드포인트 (API + healthcheck + images).

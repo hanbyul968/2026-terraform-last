@@ -52,13 +52,18 @@ data "aws_iam_policy_document" "images" {
       values   = [aws_cloudfront_distribution.this.arn]
     }
   }
-  statement {
-    sid       = "AllowProductAppWrite"
-    actions   = ["s3:PutObject", "s3:PutObjectAcl", "s3:GetObject", "s3:DeleteObject"]
-    resources = ["${aws_s3_bucket.images.arn}/*"]
-    principals {
-      type        = "AWS"
-      identifiers = [aws_iam_role.product_app.arn]
+  # S3 쓰기가 필요한 모든 앱의 IRSA 역할에 권한을 준다 (앱 이름 하드코딩 제거).
+  # needs_s3 인 앱이 없으면 이 statement 는 생성되지 않는다.
+  dynamic "statement" {
+    for_each = length(local.s3_apps) > 0 ? [1] : []
+    content {
+      sid       = "AllowAppWrite"
+      actions   = ["s3:PutObject", "s3:PutObjectAcl", "s3:GetObject", "s3:DeleteObject"]
+      resources = ["${aws_s3_bucket.images.arn}/*"]
+      principals {
+        type        = "AWS"
+        identifiers = [for n, _ in local.s3_apps : aws_iam_role.app_s3[n].arn]
+      }
     }
   }
 }

@@ -5,12 +5,14 @@
 #>
 [CmdletBinding()]
 param(
-  [int]$BudgetMinutes = 18,
-  [string]$Duration = '120s',
-  [int]$WarmupSeconds = 60,
+  # 20분 하드 예산. 각 비싼 단계 앞에서 남은 시간을 확인하고, 모자라면 그 단계를 건너뛴다.
+  # terraform apply 가 kubectl patch 보다 느리므로(회당 약 60~90s) 그만큼을 예산에 반영했다.
+  [int]$BudgetMinutes = 20,
+  [string]$Duration = '90s',
+  [int]$WarmupSeconds = 30,
   [int]$Iterations = 3,
   [int]$SettleSeconds = 25,
-  [int]$CostSettleSeconds = 105,
+  [int]$CostSettleSeconds = 75,
   [ValidateSet('cost','balanced')][string]$Objective = 'cost',
   [double]$AvailFloor = 90,
   [double]$PerfFloor = 80,
@@ -60,24 +62,80 @@ function Get-LiveRequest { param([string]$App)
   if("$v" -match '^\d+(\.\d+)?$'){return [int]([double]$v*1000)}
   return 0
 }
-function Set-Tuning { param([string]$App,$Knob)
-  $hpa=if($Knob.hpa_name){[string]$Knob.hpa_name}else{$App}
-  $deployment=if($Knob.deployment_name){[string]$Knob.deployment_name}else{$App}
-  $body=@{spec=@{minReplicas=[int]$Knob.min;maxReplicas=[int]$Knob.max;metrics=@(@{type='Resource';resource=@{name='cpu';target=@{type='Utilization';averageUtilization=[int]$Knob.target}}})}}
-  $f=Join-Path $env:TEMP "hpa-$App.json"; ($body|ConvertTo-Json -Depth 10 -Compress)|Set-Content $f -Encoding ascii
-  & kubectl -n $NS patch hpa $hpa --type=merge --patch-file $f | Out-Null
-  $wanted=[int]$Knob.request; $live=Get-LiveRequest $deployment
-  if($wanted -gt 0 -and $wanted -ne $live){
-    & kubectl -n $NS set resources "deploy/$deployment" "--requests=cpu=$($wanted)m" | Out-Null
-    # rollout이 120s 안에 안 끝나도(파드 Pending/노드 증설 대기) 전체 실행을 죽이지 않는다.
-    # $ErrorActionPreference='Stop'라 kubectl 실패가 예외가 되므로 여기서만 잡는다.
-    try { & kubectl -n $NS rollout status "deploy/$deployment" --timeout=150s 2>&1 | Out-Null }
-    catch { Write-Warning "rollout 대기 초과: $deployment (계속 진행)" }
-  }
+function Get-TuningFile { return (Join-Path $TF_DIR 'tuning.auto.tfvars.json') }
+
+function Read-Tuning {
+  # 누적 파일을 읽는다. 없으면 빈 맵. apps.tf 가 필드 단위로 fallback 하므로
+  # 부분 맵이어도 안전하다(적히지 않은 앱/필드는 terraform.tfvars 의 apps 값 사용).
+  $f = Get-TuningFile
+  if (-not (Test-Path $f)) { return @{} }
+  try {
+    $obj = Get-Content $f -Raw -Encoding UTF8 | ConvertFrom-Json
+    $out = @{}
+    if ($obj.app_tuning) {
+      foreach ($p in $obj.app_tuning.PSObject.Properties) {
+        $out[$p.Name] = @{
+          cpu_request_m  = [int]$p.Value.cpu_request_m
+          hpa_target_cpu = [int]$p.Value.hpa_target_cpu
+          min_replicas   = [int]$p.Value.min_replicas
+          max_replicas   = [int]$p.Value.max_replicas
+        }
+      }
+    }
+    return $out
+  } catch { Write-Warning 'tuning.auto.tfvars.json 파싱 실패 — 빈 값으로 시작합니다.'; return @{} }
+}
+function Write-Tuning { param($Map)
+  $f = Get-TuningFile
+  (@{ app_tuning = $Map } | ConvertTo-Json -Depth 10) | Set-Content $f -Encoding UTF8
+  return $f
+}
+function Invoke-TerraformApply {
+  # 튜닝은 Deployment 와 HPA 만 바꾼다 → 그 둘만 -target 으로 좁힌다.
+  # 전체 apply 는 느리고, 부하 중 CloudFront/RDS 까지 건드릴 위험이 있다.
+  Push-Location $TF_DIR
+  try {
+    & terraform apply -auto-approve -input=false -target=kubernetes_deployment.app -target=kubernetes_horizontal_pod_autoscaler_v2.app
+    if($LASTEXITCODE -ne 0){ throw "terraform apply 실패 (exit=$LASTEXITCODE)" }
+  } finally { Pop-Location }
 }
 function Set-TuningSet { param($Knobs)
-  # 후보 하나가 여러 앱을 담을 수 있다(회차 절약). 담긴 앱을 모두 적용한다.
-  foreach($name in $Knobs.PSObject.Properties.Name){ Set-Tuning $name $Knobs.$name }
+  # ⚠ 클러스터를 kubectl 로 직접 고치지 않는다.
+  #   이전 버전은 kubectl patch hpa / set resources 를 실행했고, 그 결과 라이브 상태가
+  #   Terraform state 와 어긋났다(드리프트). 실측: 채점 회차의 라이브 값
+  #   (user 425m / product 50m / stress target 25%,min 3)이 .tf 파일값과 전부 달랐고,
+  #   누군가 terraform apply 를 하면 튜닝이 조용히 원복되는 상태였다.
+  #   이제 목표값을 tuning.auto.tfvars.json 에 쓰고 terraform 이 반영한다.
+  $map = Read-Tuning
+  foreach($name in $Knobs.PSObject.Properties.Name){
+    $k = $Knobs.$name
+    $entry = @{
+      hpa_target_cpu = [int]$k.target
+      min_replicas   = [int]$k.min
+      max_replicas   = [int]$k.max
+    }
+    # -hpa-only 모드에서는 request 가 0 으로 올 수 있다. 0m 을 쓰면 파드가 CPU 를
+    # 전혀 요청하지 않아 스케줄링/HPA 계산이 망가지므로 기존 값을 유지한다.
+    $req = [int]$k.request
+    if($req -gt 0){ $entry.cpu_request_m = $req }
+    elseif($map[$name] -and $map[$name].cpu_request_m){ $entry.cpu_request_m = [int]$map[$name].cpu_request_m }
+    $map[$name] = $entry
+  }
+  $f = Write-Tuning $map
+  Write-Host "  튜닝값 기록 -> $f" -ForegroundColor DarkGray
+  Invoke-TerraformApply
+}
+function Set-TuningOne { param([string]$App,$Knob)
+  # 단일 앱을 Set-TuningSet 형태로 감싼다(terraform apply 는 1회만 수행됨).
+  $o = New-Object psobject
+  $o | Add-Member -MemberType NoteProperty -Name $App -Value $Knob
+  Set-TuningSet $o
+}
+function Set-TuningMany { param($Names,$Knobs)
+  # 여러 앱을 한 번의 terraform apply 로 되돌린다(앱마다 apply 하면 예산을 다 태운다).
+  $o = New-Object psobject
+  foreach($n in $Names){ if($Knobs.$n){ $o | Add-Member -MemberType NoteProperty -Name $n -Value $Knobs.$n } }
+  if($o.PSObject.Properties.Name.Count -gt 0){ Set-TuningSet $o }
 }
 function Write-Rejected { param($Rows,[string]$Path)
   $items=@($Rows|ForEach-Object{$_|ConvertTo-Json -Compress}); ('['+($items -join ',')+']')|Set-Content $Path -Encoding ascii
@@ -109,6 +167,28 @@ function ConvertTo-DurationSeconds { param([string]$Value)
 }
 
 $sw=[Diagnostics.Stopwatch]::StartNew();$deadline=[TimeSpan]::FromMinutes($BudgetMinutes)
+
+# ---------------------------------------------------------------------------
+# 20분 예산 강제.
+# terraform apply 는 회당 60~90초가 걸리므로(kubectl patch 대비 느림) 남은 시간을
+# 확인하지 않고 다음 단계에 들어가면 예산을 넘긴다. 각 비싼 단계 앞에서 필요한
+# 시간을 미리 계산해 모자라면 건너뛰고, 지금까지 채택된 값으로 마무리한다.
+# 실측된 apply 시간을 누적 평균으로 갱신해 갈수록 예측이 정확해진다.
+# ---------------------------------------------------------------------------
+$script:ApplyCostSeconds = 90   # 초기 추정. 실제 apply 후 실측으로 대체된다.
+function Get-SecondsLeft { return [Math]::Max(0, $deadline.TotalSeconds - $sw.Elapsed.TotalSeconds) }
+function Test-TimeFor { param([int]$NeedSeconds,[string]$What)
+  $left = Get-SecondsLeft
+  if($left -ge $NeedSeconds){ return $true }
+  Write-Warning ("예산 부족으로 '{0}' 생략 (필요 {1}s / 남음 {2:N0}s)" -f $What,$NeedSeconds,$left)
+  return $false
+}
+function Measure-Apply { param([scriptblock]$Body)
+  $t=[Diagnostics.Stopwatch]::StartNew(); & $Body; $t.Stop()
+  # 누적 평균으로 갱신(첫 실측은 그대로 채택)
+  $script:ApplyCostSeconds = [int][Math]::Ceiling($t.Elapsed.TotalSeconds)
+  Write-Host ("  apply {0:N0}s (남은 예산 {1:N0}s)" -f $t.Elapsed.TotalSeconds,(Get-SecondsLeft)) -ForegroundColor DarkGray
+}
 $candidateLimit=[Math]::Min([Math]::Max($Iterations,0),3)
 $rejFile=Join-Path $env:TEMP 'optimize-rejected.json';'[]'|Set-Content $rejFile -Encoding ascii
 $rejected=@();$pending=$null;$bestKnobs=$null
@@ -151,17 +231,22 @@ try {
   # 트래픽 전 1회: request 사이징(rollout 동반). 유휴 노드를 baseline로 맞추고 과소/과대 예약 교정.
   # 이 단계만 request를 바꾼다. 이후 시행은 HPA-only라 rollout이 없다.
   if($first.presize){
-    Write-Host ("--- 부하 전 request 사이징: 유휴 {0}->{1}대" -f $first.idle_nodes,$first.idle_nodes_after_presize) -ForegroundColor Cyan
-    Set-TuningSet $first.presize
-    foreach($n in $first.presize.PSObject.Properties.Name){ if($bestKnobs.$n){ $bestKnobs.$n.request=$first.presize.$n.request; $bestKnobs.$n.target=$first.presize.$n.target } }
-    Start-Sleep -Seconds $CostSettleSeconds
-    & $loadtest @ltArgs | Out-Null
-    $bestScore=Get-Score $out; Save-Snapshot $out $bestOut
-    Write-Host ("사이징 후 {0:N1}/36 ratio={1:N2}" -f $bestScore.total,$bestScore.cost_ratio)
+    $needPresize = $script:ApplyCostSeconds + $CostSettleSeconds + (ConvertTo-DurationSeconds $Duration) + 30
+    if(Test-TimeFor $needPresize 'request 사이징'){
+      Write-Host ("--- 부하 전 request 사이징: 유휴 {0}->{1}대" -f $first.idle_nodes,$first.idle_nodes_after_presize) -ForegroundColor Cyan
+      Measure-Apply { Set-TuningSet $first.presize }
+      foreach($n in $first.presize.PSObject.Properties.Name){ if($bestKnobs.$n){ $bestKnobs.$n.request=$first.presize.$n.request; $bestKnobs.$n.target=$first.presize.$n.target } }
+      Start-Sleep -Seconds $CostSettleSeconds
+      & $loadtest @ltArgs | Out-Null
+      $bestScore=Get-Score $out; Save-Snapshot $out $bestOut
+      Write-Host ("사이징 후 {0:N1}/36 ratio={1:N2}" -f $bestScore.total,$bestScore.cost_ratio)
+    }
   }
   # 반복 측정 루프 없음: 한 번 계산한 '전 앱 HPA 묶음'을 1회 적용하고 1회만 확인한다.
-  # (회차당 120초 측정을 3번 도는 게 시간의 주범이었다. 값은 baseline 측정 한 번으로 다 나온다.)
-  $step=Get-NextStep $bestOut $rejFile
+  # (회차당 측정을 여러 번 도는 게 시간의 주범이었다. 값은 baseline 측정 한 번으로 다 나온다.)
+  # 후보 1회에 필요한 시간 = apply + settle + 측정 + 롤백 여유(apply 1회 더)
+  $needCand = ($script:ApplyCostSeconds * 2) + $SettleSeconds + (ConvertTo-DurationSeconds $Duration) + 30
+  $step = if(Test-TimeFor $needCand 'HPA 후보 검증'){ Get-NextStep $bestOut $rejFile } else { @{ done=$true; reason='예산 부족 — baseline 값으로 종료' } }
   if($step.done){
     Write-Host "조정할 HPA 없음: $($step.reason)" -ForegroundColor Green
   } else {
@@ -171,8 +256,8 @@ try {
     Write-Host ("--- 전 앱 HPA 한 번에 적용: {0}" -f ($touched -join '+')) -ForegroundColor Cyan
     if($knobSet){
       foreach($n in $touched){$k=$knobSet.$n;Write-Host ("    {0}: target={1}% min={2} max={3}" -f $n,$k.target,$k.min,$k.max)}
-      Set-TuningSet $knobSet
-    } else { Set-Tuning $step.app $step.knob }
+      Measure-Apply { Set-TuningSet $knobSet }
+    } else { Measure-Apply { Set-TuningOne $step.app $step.knob } }
     Start-Sleep -Seconds $SettleSeconds
     & $loadtest @ltArgs | Out-Null
     $score=Get-Score $out
@@ -187,7 +272,7 @@ try {
       $pending=$null; Save-Snapshot $out $bestOut
     } else {
       Write-Host ("거절 score={0:N1} gate={1}; 롤백" -f $score.total,$gate) -ForegroundColor Yellow
-      foreach($name in $touched){ if($bestKnobs.$name){ Set-Tuning $name $bestKnobs.$name } }
+      Set-TuningMany $touched $bestKnobs
       $pending=$null
     }
   }
@@ -196,11 +281,11 @@ try {
     Write-Warning ("안전선 미달: min availability={0:N1}% (>={1}%) / min performance={2:N1}% (>={3}%)" -f $bestScore.min_avail,$AvailFloor,$bestScore.min_perf,$PerfFloor)
   }
   foreach($name in $bestKnobs.PSObject.Properties.Name|Sort-Object){$k=$bestKnobs.$name;Write-Host ('{0}: requests.cpu="{1}m", min_replicas={2}, max_replicas={3}, average_utilization={4}' -f $name,$k.request,$k.min,$k.max,$k.target)}
-  Write-Host '현재 값은 라이브 적용 상태입니다. Terraform apply는 튜닝 흐름에 필요하지 않습니다.'
+  Write-Host ('위 값은 {0} 에 기록되어 terraform 으로 적용된 상태입니다(드리프트 없음).' -f (Get-TuningFile))
 }
 finally {
   if($pending -and $bestKnobs -and $bestKnobs.$pending){
     Write-Warning "중단 감지: $pending 을 마지막 채택 snapshot으로 롤백"
-    try{Set-Tuning $pending $bestKnobs.$pending}catch{Write-Warning "자동 롤백 실패: $_"}
+    try{Set-TuningOne $pending $bestKnobs.$pending}catch{Write-Warning "자동 롤백 실패: $_"}
   }
 }

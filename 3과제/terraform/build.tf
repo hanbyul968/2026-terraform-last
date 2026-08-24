@@ -10,12 +10,12 @@ locals {
 
   # 앱 바이너리 hash → 이미지 태그 자동 파생. 바이너리가 바뀌면 태그가 바뀌어
   # 자동 롤링 업데이트. -var app_image_tag 로 강제 override 가능.
+  # 앱 목록은 local.apps (apps.tf) 에서 오므로 앱이 바뀌어도 이 파일은 그대로 둔다.
   app_bins = {
-    user    = filesha256("${path.module}/../application/binary/user")
-    product = filesha256("${path.module}/../application/binary/product")
-    stress  = filesha256("${path.module}/../application/binary/stress")
+    for name, _ in local.apps :
+    name => filesha256("${local.binary_dir}/${name}")
   }
-  dockerfile_hash = filesha256("${path.module}/../application/binary/Dockerfile")
+  dockerfile_hash = filesha256("${local.binary_dir}/Dockerfile")
   app_image_tags = {
     for app, h in local.app_bins :
     app => var.app_image_tag != "latest" ? var.app_image_tag : substr(sha256("${h}${local.dockerfile_hash}"), 0, 12)
@@ -23,7 +23,7 @@ locals {
 
   # one "build + push" pair per app, fully interpolated (no shell vars)
   build_lines = join("\n", flatten([
-    for app in ["user", "product", "stress"] : [
+    for app in sort(keys(local.apps)) : [
       "docker build --platform linux/amd64 --build-arg APP=${app} -t ${local.ecr_registry}/${local.name}/${app}:${local.app_image_tags[app]} .",
       "docker push ${local.ecr_registry}/${local.name}/${app}:${local.app_image_tags[app]}",
     ]
@@ -50,11 +50,10 @@ locals {
 
 resource "null_resource" "build_push" {
   triggers = {
-    user_bin    = local.app_bins["user"]
-    product_bin = local.app_bins["product"]
-    stress_bin  = local.app_bins["stress"]
-    dockerfile  = local.dockerfile_hash
-    tags        = join(",", values(local.app_image_tags))
+    # 앱 목록/바이너리가 바뀌면 재빌드. 앱 개수가 달라져도 트리거가 따라간다.
+    bins       = jsonencode(local.app_bins)
+    dockerfile = local.dockerfile_hash
+    tags       = join(",", values(local.app_image_tags))
     # 매 apply 마다 재실행 → ECR 이 비어있거나(외부 삭제/repo 재생성) state 와
     # 어긋나도 항상 이미지를 다시 push 하여 ImagePullBackOff 를 원천 차단.
     # docker 레이어 캐시로 재실행은 빠르고, 이미지 태그는 hash 기반이라

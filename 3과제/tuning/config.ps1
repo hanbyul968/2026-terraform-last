@@ -98,6 +98,20 @@ if (-not $COST_BASELINE_NODES) { $COST_BASELINE_NODES = 2 }
 # 쿠버네티스 네임스페이스.
 if (-not $NS) { $NS = 'app' }
 
+# ---------------------------------------------------------------------------
+# Terraform 디렉터리 — 튜닝 결과를 반영하는 곳.
+#
+# 튜닝 툴은 클러스터를 kubectl 로 직접 고치지 않는다. tuning.auto.tfvars.json 에
+# 목표값을 쓰고 terraform apply 로 반영한다. 그래야 라이브 상태와 Terraform state 가
+# 항상 일치하고(드리프트 없음), 누가 terraform apply 를 해도 튜닝이 날아가지 않는다.
+# WSI_TF_DIR 환경변수로 덮어쓸 수 있다.
+# ---------------------------------------------------------------------------
+if (-not $TF_DIR) {
+  $TF_DIR = if ($env:WSI_TF_DIR) { $env:WSI_TF_DIR }
+            else { Join-Path (Split-Path -Parent $PSScriptRoot) 'terraform' }
+}
+if (-not (Test-Path $TF_DIR)) { throw "terraform 디렉터리를 찾을 수 없습니다: $TF_DIR (WSI_TF_DIR 로 지정하세요)" }
+
 # score.py / advise.py 가 읽는다 (인자 순서를 건드리지 않기 위해 환경변수로 전달).
 $env:TUNE_BASELINE_NODES = "$COST_BASELINE_NODES"
 

@@ -14,7 +14,7 @@
 # ⚠ PDB 는 자발적 중단(drain/consolidation)만 막는다. 노드 강제 종료·하드웨어 장애 같은
 #   비자발적 중단은 막지 못하므로, 그 방어는 replica 수 + 노드 분산이 담당한다.
 resource "kubernetes_pod_disruption_budget_v1" "app" {
-  for_each = toset(["user", "product", "stress"])
+  for_each = local.apps
 
   metadata {
     name      = each.key

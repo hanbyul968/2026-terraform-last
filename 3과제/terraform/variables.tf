@@ -70,11 +70,49 @@ variable "karpenter_instance_types" {
 }
 
 # Karpenter가 띄울 수 있는 총 vCPU 상한. 비용 폭주 방지선이다.
-# 인스턴스 타입을 키우면 같은 vCPU로 뜨는 노드 수가 줄어드니 함께 검토한다.
+# 0 으로 두면 karpenter_max_nodes x (타입 vCPU) 로 자동 계산된다 → 인스턴스 타입이
+# 바뀌어도 "최대 몇 대" 라는 의도가 그대로 유지된다. (sizing.tf 참조)
+# 직접 vCPU 수를 박고 싶을 때만 0 이 아닌 값을 준다.
 variable "karpenter_cpu_limit" {
   type        = number
-  default     = 16
-  description = "Karpenter NodePool의 총 vCPU 상한 (노드 수 x 타입 vCPU)."
+  default     = 0
+  description = "Karpenter NodePool의 총 vCPU 상한. 0이면 karpenter_max_nodes x 타입 vCPU로 자동 계산."
+}
+
+# 비용 채점은 "평균 EC2 대수 / 기준 2대" 이므로 노드 수가 곧 점수다.
+# vCPU 대신 '노드 수'로 상한을 표현하면 인스턴스 타입이 바뀌어도 의도가 보존된다.
+variable "karpenter_max_nodes" {
+  type        = number
+  default     = 6
+  description = "Karpenter가 추가로 띄울 수 있는 최대 노드 수. karpenter_cpu_limit=0 일 때 vCPU 상한으로 환산된다."
+
+  validation {
+    condition     = var.karpenter_max_nodes >= 0 && var.karpenter_max_nodes <= 50
+    error_message = "karpenter_max_nodes must be between 0 and 50."
+  }
+}
+
+# 노드당 시스템 예약 CPU(m) — kubelet/kube-reserved/DaemonSet 몫.
+# -1 이면 인스턴스 타입 크기에서 자동 근사한다 (sizing.tf).
+variable "system_reserved_cpu_m" {
+  type        = number
+  default     = -1
+  description = "노드당 시스템 예약 CPU(millicore). -1이면 인스턴스 타입에서 자동 계산."
+}
+
+# 격리 노드풀(isolate=true 앱 전용)의 최대 노드 수.
+# 비용(12점) vs 폭식 앱 성능(4점) 트레이드오프 조절 지점.
+# 채점 규칙상 비용 12점은 "모든 앱 성능 >= 30%" 게이트를 통과해야 받을 수 있으므로,
+# 폭식 앱을 30% 아래로 떨어뜨릴 만큼 조이면 오히려 12점을 잃는다.
+variable "karpenter_isolated_max_nodes" {
+  type        = number
+  default     = 3
+  description = "격리 노드풀 최대 노드 수. 비용과 CPU 폭식 앱 성능의 균형점."
+
+  validation {
+    condition     = var.karpenter_isolated_max_nodes >= 1 && var.karpenter_isolated_max_nodes <= 20
+    error_message = "karpenter_isolated_max_nodes must be between 1 and 20."
+  }
 }
 
 # 관리형 NG 를 2 노드로 고정한다. 1 로 두면 안 되는 이유:

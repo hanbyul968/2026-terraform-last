@@ -15,12 +15,11 @@ resource "kubernetes_secret" "db" {
   data = {
     MYSQL_USER     = var.db_username
     MYSQL_PASSWORD = random_password.db.result
-    # 앱은 RDS Proxy 경유(rds_proxy.tf). 파드가 HPA 로 늘어도 프록시가 백엔드 커넥션을
-    # 소수로 멀티플렉싱해 db.t3.micro(1GB)의 max_connections 를 지킨다.
-    # 엔진명이 아닌 DNS 엔드포인트라 문제지 요구("엔진명 삽입금지")에 맞는다.
-    # db_init 는 아래에서 MYSQL_HOST 를 직결 RDS 로 override 하여 ALTER/스키마/시드를 수행한다
-    # (프록시 인증을 고치는 ALTER 를 프록시 경유로는 실행할 수 없으므로 — 치킨-에그).
-    MYSQL_HOST   = aws_db_proxy.this.endpoint
+    # 앱은 RDS Proxy 경유(local.db_host). 파드가 HPA 로 늘어도 프록시가 백엔드 커넥션을
+    # 소수로 멀티플렉싱해 db.t3.micro 의 max_connections 를 지킨다.
+    # 엔진명이 아닌 DNS 엔드포인트라 문제지 요구("엔진명 삽입금지")를 만족한다.
+    # db_init 는 아래에서 MYSQL_HOST 를 직결 RDS 로 override 하여 스키마/시드를 수행한다.
+    MYSQL_HOST   = local.db_host
     MYSQL_PORT   = "3306"
     MYSQL_DBNAME = var.db_name
   }
@@ -37,7 +36,35 @@ resource "kubernetes_config_map" "s3" {
   }
 }
 
-# Init job: create tables + add email index (spec lets us redesign schema for traffic patterns)
+# 스키마 SQL 을 ConfigMap 으로 넘긴다 (셸 heredoc 인라인 대신).
+# 이유: 대회날 스키마가 바뀌어도 var.db_schema_sql 만 교체하면 되고, 셸 인용/들여쓰기
+# 문제로 SQL 이 깨질 위험이 없다.
+locals {
+  # 조회 컬럼 인덱스 보장 — 테이블이 이미 있어 CREATE TABLE 이 no-op 인 경우에도
+  # 인덱스를 확실히 추가한다. information_schema 를 확인하므로 멱등하다.
+  # 인덱스가 없으면 풀스캔이 되어 0.2s SLO 를 절대 만족할 수 없다.
+  db_index_sql = join("\n", [
+    for i in var.db_required_indexes : join("\n", [
+      "SET @s = (SELECT IF((SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name='${i.table}' AND index_name='${i.index}')=0,",
+      "  'ALTER TABLE `${i.table}` ADD INDEX `${i.index}` (`${i.column}`)', 'SELECT 1'));",
+      "PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;",
+    ])
+  ])
+
+  db_init_sql = "${var.db_schema_sql}\n${local.db_index_sql}\n"
+}
+
+resource "kubernetes_config_map" "db_schema" {
+  metadata {
+    name      = "db-schema"
+    namespace = kubernetes_namespace.app.metadata[0].name
+  }
+  data = {
+    "schema.sql" = local.db_init_sql
+  }
+}
+
+# Init job: create tables + ensure lookup indexes + load seed dump
 resource "kubernetes_job" "db_init" {
   metadata {
     name      = "db-init"
@@ -87,35 +114,12 @@ resource "kubernetes_job" "db_init" {
             # RDS Proxy는 caching_sha2_password + require_tls=false 조합에서 1045로 거부한다.
             # 앱 유저를 native password로 바꿔 프록시 경유 인증이 되게 한다(비밀번호는 그대로 유지 → idempotent).
             mysql -h"$MYSQL_HOST" -P"$MYSQL_PORT" -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" -e "ALTER USER '$MYSQL_USER'@'%' IDENTIFIED WITH mysql_native_password BY '$MYSQL_PASSWORD';"
-            mysql -h"$MYSQL_HOST" -P"$MYSQL_PORT" -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DBNAME" <<'SQL'
-            CREATE TABLE IF NOT EXISTS user (
-              id VARCHAR(255) NOT NULL,
-              username VARCHAR(255) NOT NULL,
-              email VARCHAR(255) NOT NULL,
-              PRIMARY KEY (id),
-              UNIQUE KEY uk_username (username),
-              KEY idx_email (email)
-            );
-            CREATE TABLE IF NOT EXISTS product (
-              id VARCHAR(255) NOT NULL,
-              name VARCHAR(255) NOT NULL,
-              price FLOAT(8) NOT NULL,
-              image_path VARCHAR(500) DEFAULT NULL,
-              PRIMARY KEY (id)
-            );
-            -- add email index if table preexisted without it (safe no-op if already exists)
-            SET @sql = (SELECT IF(
-              (SELECT COUNT(*) FROM information_schema.statistics
-                WHERE table_schema=DATABASE() AND table_name='user' AND index_name='idx_email')=0,
-              'ALTER TABLE user ADD INDEX idx_email (email)',
-              'SELECT 1'));
-            PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
-            SQL
+            mysql -h"$MYSQL_HOST" -P"$MYSQL_PORT" -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DBNAME" < /sql/schema.sql
 
             # Seed the user table once. Idempotent: only load when the table is
             # empty, so job retries / re-applies never hit PRIMARY KEY conflicts.
             CNT=$(mysql -h"$MYSQL_HOST" -P"$MYSQL_PORT" -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" -N -B \
-              -e "SELECT COUNT(*) FROM \`$MYSQL_DBNAME\`.user")
+              -e "SELECT COUNT(*) FROM \`$MYSQL_DBNAME\`.\`${var.db_seed_table}\`")
             if [ "$CNT" = "0" ]; then
               echo "loading user seed dump..."
               # 덤프에 잘못된 대상 DB(USE `apdev`)가 박혀 있어도 무시하고,
@@ -126,23 +130,23 @@ resource "kubernetes_job" "db_init" {
               echo "user table already has $CNT rows; skipping seed"
             fi
 
-            # ---- RDS Proxy 가 실제로 쓸 수 있게 될 때까지 대기 ----
-            # aws_db_proxy_target 은 terraform 상 생성이 끝나도 타깃 상태가 수분간
-            # PENDING_PROXY_CAPACITY 로 남는다. 앱 Deployment 는 이 Job 에 depends_on 이므로
-            # 여기서 막아두면, 앱이 프록시로 붙는 시점에는 항상 준비가 끝나 있다.
-            # (헬스체크 /healthcheck 는 DB 를 보지 않아 앱이 Ready 로 뜨고 500 을 쏟는 걸 방지)
+            # ---- 앱이 쓸 DB 주소가 실제로 응답할 때까지 대기 ----
+            # RDS 직결이면 이미 준비된 상태라 즉시 통과한다.
+            # RDS Proxy 를 켠 경우, terraform 상 생성이 끝나도 타깃이 수분간
+            # PENDING_PROXY_CAPACITY 로 남으므로 여기서 막아둔다. 앱 Deployment 는 이 Job 에
+            # depends_on 이라, 앱이 붙는 시점에는 항상 준비가 끝나 있다.
+            # (헬스체크는 DB 를 보지 않아, 앱이 Ready 로 뜨고 500 을 쏟는 것을 방지)
             i=0
-            until mysql -h"$PROXY_HOST" -P"$MYSQL_PORT" -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" -e "SELECT 1" >/dev/null 2>&1; do
+            until mysql -h"$APP_DB_HOST" -P"$MYSQL_PORT" -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" -e "SELECT 1" >/dev/null 2>&1; do
               i=$((i+1))
               if [ "$i" -gt 120 ]; then
-                echo "ERROR: RDS Proxy($PROXY_HOST) 로 접속하지 못했습니다 (10분 초과)." >&2
-                echo "  aws rds describe-db-proxy-targets --db-proxy-name <proxy> 로 TargetHealth 확인" >&2
+                echo "ERROR: DB($APP_DB_HOST) 로 접속하지 못했습니다 (10분 초과)." >&2
                 exit 1
               fi
-              echo "waiting for RDS Proxy ($PROXY_HOST) ... $i"
+              echo "waiting for app DB endpoint ($APP_DB_HOST) ... $i"
               sleep 5
             done
-            echo "RDS Proxy ready"
+            echo "app DB endpoint ready"
             EOT
           ]
           # db_init는 프록시가 아니라 RDS에 직접 접속한다: 프록시 인증을 고치는 ALTER를
@@ -151,10 +155,10 @@ resource "kubernetes_job" "db_init" {
             name  = "MYSQL_HOST"
             value = aws_db_instance.this.address
           }
-          # 위 대기 루프에서 프록시 준비 확인에 사용 (앱이 쓰는 엔드포인트와 동일).
+          # 위 대기 루프에서 앱이 쓸 엔드포인트 준비 확인에 사용.
           env {
-            name  = "PROXY_HOST"
-            value = aws_db_proxy.this.endpoint
+            name  = "APP_DB_HOST"
+            value = local.db_host
           }
           env_from {
             secret_ref { name = kubernetes_secret.db.metadata[0].name }
@@ -164,10 +168,21 @@ resource "kubernetes_job" "db_init" {
             mount_path = "/seed"
             read_only  = true
           }
+          volume_mount {
+            name       = "sql"
+            mount_path = "/sql"
+            read_only  = true
+          }
         }
         volume {
           name = "seed"
           empty_dir {}
+        }
+        volume {
+          name = "sql"
+          config_map {
+            name = kubernetes_config_map.db_schema.metadata[0].name
+          }
         }
       }
     }

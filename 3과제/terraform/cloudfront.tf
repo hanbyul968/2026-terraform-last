@@ -71,17 +71,23 @@ resource "aws_cloudfront_distribution" "this" {
     origin_request_policy_id = data.aws_cloudfront_origin_request_policy.all_viewer.id
   }
 
-  # product GET — cache by querystring id for 10s. Same id repeated → hit cache.
-  ordered_cache_behavior {
-    path_pattern           = "${var.api_prefix}/product*"
-    target_origin_id       = "alb"
-    viewer_protocol_policy = "allow-all"
-    allowed_methods        = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
-    cached_methods         = ["GET", "HEAD"]
-    compress               = true
+  # 캐시 대상 앱마다 동작을 생성한다 (apps.tf 의 cache_ttl > 0).
+  # 이전에는 product 경로가 하드코딩되어 있었다. 지금은 tfvars 에서
+  # apps = { <앱> = { cache_ttl = 10, cache_query_keys = ["id"] } } 만 주면 된다.
+  # 조회형 API 캐시는 오리진 부하와 응답시간을 동시에 줄여 성능/비용에 함께 기여한다.
+  dynamic "ordered_cache_behavior" {
+    for_each = local.cached_apps
+    content {
+      path_pattern           = "${ordered_cache_behavior.value.path}*"
+      target_origin_id       = "alb"
+      viewer_protocol_policy = "allow-all"
+      allowed_methods        = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
+      cached_methods         = ["GET", "HEAD"]
+      compress               = true
 
-    cache_policy_id          = aws_cloudfront_cache_policy.product_get.id
-    origin_request_policy_id = data.aws_cloudfront_origin_request_policy.all_viewer.id
+      cache_policy_id          = aws_cloudfront_cache_policy.app_get[ordered_cache_behavior.key].id
+      origin_request_policy_id = data.aws_cloudfront_origin_request_policy.all_viewer.id
+    }
   }
 
   # <images_prefix>/* → S3
@@ -143,12 +149,15 @@ data "aws_cloudfront_origin_request_policy" "all_viewer" {
   name = "Managed-AllViewer"
 }
 
-# Cache key = path + ?id query param. TTL short to absorb bursts but keep freshness.
-resource "aws_cloudfront_cache_policy" "product_get" {
-  name        = "${local.name}-product-get"
+# 캐시 정책 — 캐시 대상 앱마다 생성. 캐시 키에 포함할 쿼리 파라미터는 앱별 지정.
+# cache_query_keys 가 비어 있으면 쿼리스트링을 캐시 키에서 제외한다(경로만으로 캐싱).
+resource "aws_cloudfront_cache_policy" "app_get" {
+  for_each = local.cached_apps
+
+  name        = "${local.name}-${each.key}-get"
   min_ttl     = 0
-  default_ttl = 10
-  max_ttl     = 60
+  default_ttl = each.value.cache_ttl
+  max_ttl     = max(each.value.cache_ttl * 6, each.value.cache_ttl)
 
   parameters_in_cache_key_and_forwarded_to_origin {
     enable_accept_encoding_brotli = true
@@ -156,8 +165,11 @@ resource "aws_cloudfront_cache_policy" "product_get" {
     cookies_config { cookie_behavior = "none" }
     headers_config { header_behavior = "none" }
     query_strings_config {
-      query_string_behavior = "whitelist"
-      query_strings { items = ["id"] }
+      query_string_behavior = length(each.value.cache_query_keys) > 0 ? "whitelist" : "none"
+      dynamic "query_strings" {
+        for_each = length(each.value.cache_query_keys) > 0 ? [1] : []
+        content { items = each.value.cache_query_keys }
+      }
     }
   }
 }

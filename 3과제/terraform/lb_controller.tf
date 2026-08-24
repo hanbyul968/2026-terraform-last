@@ -107,8 +107,6 @@ resource "kubectl_manifest" "tgb" {
 
   depends_on = [
     helm_release.alb_controller,
-    kubernetes_service.user,
-    kubernetes_service.product,
-    kubernetes_service.stress,
+    kubernetes_service.app,
   ]
 }

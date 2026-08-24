@@ -11,6 +11,23 @@ import tuning_engine as engine
 import optimize
 
 
+def _tfvars_payload(commands):
+    """튜너가 만든 PowerShell 명령에서 tfvars JSON 을 되꺼낸다.
+
+    엔진은 인용/인코딩 사고를 피하려고 base64 로 감싼 WriteAllText 한 줄을 낸다.
+    테스트는 그 payload 를 디코딩해 '무엇을 쓰려 했는지' 검증한다.
+    """
+    import base64
+    import json
+    import re
+
+    for command in commands:
+        m = re.search(r'FromBase64String\("([A-Za-z0-9+/=]+)"\)', command)
+        if m:
+            return json.loads(base64.b64decode(m.group(1)).decode("utf-8"))
+    raise AssertionError(f"tfvars 기록 명령을 찾지 못했습니다: {commands}")
+
+
 class OfficialRubricTests(unittest.TestCase):
     def test_every_rate_boundary(self):
         for index, threshold in enumerate(rubric.RATE_BANDS, 1):
@@ -311,10 +328,14 @@ class SharedEngineTests(unittest.TestCase):
         bundle = next(c for c in candidates if c.kind == "bundle")
         self.assertEqual(candidates[0].kind, "bundle")
         self.assertEqual(set(bundle.knobs), {"a", "b"})
-        # 두 앱의 적용/롤백 명령이 모두 들어 있다.
+        # 두 앱의 목표값이 tfvars(app_tuning)에 모두 들어 있다.
+        # kubectl 명령이 아니라 terraform 경유여야 한다(드리프트 방지).
         joined = " ".join(bundle.apply_commands + bundle.rollback_commands)
-        self.assertIn("patch hpa a", joined)
-        self.assertIn("patch hpa b", joined)
+        self.assertNotIn("kubectl", joined)
+        self.assertIn("terraform apply", joined)
+        payload = _tfvars_payload(bundle.apply_commands)
+        self.assertIn("a", payload["app_tuning"])
+        self.assertIn("b", payload["app_tuning"])
         # 한 앱이 상위 후보를 독식하지 않는다.
         top_apps = [tuple(sorted(c.knobs)) for c in candidates[:3]]
         self.assertGreater(len({a for group in top_apps for a in group}), 1)
@@ -459,8 +480,10 @@ class SharedEngineTests(unittest.TestCase):
         app = self.app(latencies=self.latencies())
         optimal = next(c for c in engine.generate_candidates(self.snapshot(app))
                        if c.kind == "request-optimal")
-        self.assertTrue(any("requests=cpu=750m" in command for command in optimal.rollback_commands))
-        self.assertTrue(any("patch hpa worker" in command for command in optimal.rollback_commands))
+        # 되돌리기는 '현재 값'을 tfvars 에 다시 쓰는 형태여야 한다(kubectl 금지).
+        self.assertNotIn("kubectl", " ".join(optimal.rollback_commands))
+        rollback_payload = _tfvars_payload(optimal.rollback_commands)
+        self.assertEqual(rollback_payload["app_tuning"]["worker"]["cpu_request_m"], 750)
         self.assertTrue(optimal.disruptive)
 
     def test_dashboard_adapter_uses_arbitrary_apps(self):
@@ -477,15 +500,22 @@ class SharedEngineTests(unittest.TestCase):
         self.assertEqual(snapshot.apps["api-x"].min_replicas, 3)
         self.assertEqual(snapshot.apps["api-x"].cpu_samples, 20)
 
-    def test_commands_use_exact_live_resource_names(self):
+    def test_tfvars_is_keyed_by_app_name(self):
+        """Terraform 의 for_each 키가 앱 이름이므로 tfvars 도 앱 이름으로 적어야 한다.
+
+        이전에는 라이브 Deployment/HPA 이름(checkout-api / checkout-scaler)으로
+        kubectl 명령을 만들었다. 지금은 Terraform 이 리소스 이름을 소유하므로
+        (kubernetes_deployment.app["checkout"]) 튜너는 앱 키만 알면 된다.
+        """
         app = self.app(name="checkout", deployment_name="checkout-api",
                        hpa_name="checkout-scaler",
                        latencies=self.latencies())
         optimal = next(c for c in engine.generate_candidates(self.snapshot(app))
                        if c.kind == "request-optimal")
         all_commands = optimal.apply_commands + optimal.rollback_commands
-        self.assertTrue(any("patch hpa checkout-scaler" in command for command in all_commands))
-        self.assertTrue(any("deploy/checkout-api" in command for command in all_commands))
+        self.assertNotIn("kubectl", " ".join(all_commands))
+        payload = _tfvars_payload(optimal.apply_commands)
+        self.assertIn("checkout", payload["app_tuning"])
 
     def test_cpu_not_root_classification(self):
         app = self.app(performance=80, request_m=500, per_pod_p90=100)
@@ -513,16 +543,25 @@ class PowerShellRunnerContractTests(unittest.TestCase):
     def setUpClass(cls):
         cls.script = (ROOT / "optimize.ps1").read_text(encoding="utf-8-sig")
 
-    def test_default_search_budget_and_hard_candidate_cap(self):
-        self.assertIn("[int]$BudgetMinutes = 18", self.script)
-        self.assertIn("[string]$Duration = '120s'", self.script)
-        self.assertIn("[int]$WarmupSeconds = 60", self.script)
-        self.assertIn("$candidateLimit=[Math]::Min([Math]::Max($Iterations,0),3)", self.script)
-        self.assertIn("for($i=1;$i -le $candidateLimit;$i++)", self.script)
-        self.assertIn("$safetyImproved -or ($gate -and $score.total -gt $bestScore.total)", self.script)
+    def test_hard_20_minute_budget_is_enforced(self):
+        """20분 예산을 넘기지 않도록, 비싼 단계마다 남은 시간을 확인해야 한다.
+
+        terraform apply 는 kubectl patch 보다 느려(회당 60~90s) 예산 초과가 실제 위험이다.
+        옛 설계의 후보 반복 루프(for $i -le $candidateLimit)는 제거됐고, 지금은
+        단발 검증 + 예산 가드 구조다.
+        """
+        self.assertIn("[int]$BudgetMinutes = 20", self.script)
+        self.assertIn("[string]$Duration = '90s'", self.script)
+        self.assertIn("[int]$WarmupSeconds = 30", self.script)
+        # 남은 시간 계산과 단계별 가드
+        self.assertIn("function Get-SecondsLeft", self.script)
+        self.assertIn("function Test-TimeFor", self.script)
+        self.assertIn("Test-TimeFor $needPresize", self.script)
+        self.assertIn("Test-TimeFor $needCand", self.script)
+        # apply 실측으로 예측을 갱신
+        self.assertIn("function Measure-Apply", self.script)
+        self.assertIn("$script:ApplyCostSeconds", self.script)
         self.assertIn("안전선 미달", self.script)
-        self.assertIn("$durationSec=ConvertTo-DurationSeconds $Duration", self.script)
-        self.assertIn("$settle*2+$durationSec+150", self.script)
 
     def test_accepts_on_official_band_floors_not_a_stricter_gate(self):
         self.assertIn("[ValidateSet('cost','balanced')][string]$Objective = 'cost'", self.script)
@@ -534,8 +573,9 @@ class PowerShellRunnerContractTests(unittest.TestCase):
 
     def test_plans_from_accepted_snapshot_and_settles_after_rollback(self):
         self.assertIn("Save-Snapshot $out $bestOut", self.script)
-        self.assertIn("$step=Get-NextStep $bestOut $rejFile", self.script)
-        self.assertIn("nodes=[int]$candidate.predicted_nodes", self.script)
+        self.assertIn("Get-NextStep $bestOut $rejFile", self.script)
+        # 롤백은 여러 앱을 한 번의 apply 로 되돌린다(앱마다 apply 하면 예산을 태운다).
+        self.assertIn("Set-TuningMany $touched $bestKnobs", self.script)
         self.assertIn("robocopy", self.script)  # 잠긴 CSV에 견디는 복사
         self.assertNotIn("CPU하한", self.script)
 
@@ -544,27 +584,40 @@ class PowerShellRunnerContractTests(unittest.TestCase):
         self.assertIn("if($first.presize){", self.script)
         self.assertIn("Set-TuningSet $first.presize", self.script)
 
-    def test_live_loop_is_hpa_only_and_rollout_is_non_fatal(self):
+    def test_live_loop_is_hpa_only_and_applies_via_terraform(self):
         self.assertIn("[switch]$AllowRequestChange", self.script)
         self.assertIn("if(-not $AllowRequestChange){$a+=@('--hpa-only')}", self.script)
-        self.assertIn("catch { Write-Warning \"rollout 대기 초과", self.script)
+        # rollout 대기는 더 이상 필요 없다: terraform 이 apply 완료까지 블로킹한다.
+        # 대신 클러스터를 직접 변형하지 않는지를 검증한다.
+        self.assertNotIn("kubectl -n $NS patch", self.script)
+        self.assertNotIn("kubectl -n $NS set resources", self.script)
 
-    def test_does_not_spend_every_trial_on_one_app(self):
-        self.assertIn("$triedApps=New-Object 'System.Collections.Generic.HashSet[string]'",
-                      self.script)
-        self.assertIn("function Test-Untried", self.script)
-        self.assertIn("이미 시도한 앱 대신 다른 앱 후보로 전환", self.script)
-        self.assertIn("foreach($n in $touched){ [void]$triedApps.Add($n) }", self.script)
+    def test_does_not_spend_budget_on_a_single_app(self):
+        """한 앱만 붙잡고 예산을 태우지 않아야 한다.
 
-    def test_transactional_rollback_and_no_terraform_mutation(self):
+        옛 설계는 회차를 돌며 앱을 로테이션했다(triedApps / Test-Untried). 지금은
+        엔진이 전 앱을 한 묶음(knob_set)으로 계산해 1회 apply 로 끝내므로, 애초에
+        한 앱에 회차가 몰릴 구조가 아니다. 20분 예산에도 이 쪽이 유리하다.
+        """
+        self.assertIn("$knobSet=if($step.knob_set){$step.knob_set}else{$null}", self.script)
+        self.assertIn("전 앱 HPA 한 번에 적용", self.script)
+        self.assertIn("Measure-Apply { Set-TuningSet $knobSet }", self.script)
+
+    def test_applies_through_terraform_never_mutates_cluster_directly(self):
+        """튜닝은 반드시 Terraform 경유. kubectl 직접 변형은 드리프트를 만든다.
+
+        이전 정책은 정반대였다("Terraform은 건드리지 않는다"). 그 결과 채점 회차의
+        라이브 값이 .tf 파일값과 전부 달라져, 무엇이 채점된 구성인지 알 수 없었고
+        누군가 terraform apply 를 하면 튜닝이 조용히 원복되는 상태였다.
+        """
         self.assertIn("finally {", self.script)
-        self.assertIn("Set-Tuning $pending $bestKnobs.$pending", self.script)
         self.assertIn("function Set-TuningSet", self.script)
-        self.assertIn("if($knobSet){Set-TuningSet $knobSet}else{Set-Tuning $app $step.knob}",
-                      self.script)
-        self.assertIn("foreach($name in $touched){ if($bestKnobs.$name){ Set-Tuning $name $bestKnobs.$name } }",
-                      self.script)
-        self.assertNotIn("& terraform", self.script.lower())
+        # tfvars 에 쓰고 terraform 이 반영한다.
+        self.assertIn("tuning.auto.tfvars.json", self.script)
+        self.assertIn("terraform apply", self.script)
+        # 클러스터를 직접 고치는 경로가 남아 있으면 안 된다.
+        self.assertNotIn("kubectl -n $NS patch", self.script)
+        self.assertNotIn("kubectl -n $NS set resources", self.script)
 
 
 

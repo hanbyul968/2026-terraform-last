@@ -185,7 +185,7 @@ resource "kubectl_manifest" "karpenter_nodeclass" {
     spec = {
       amiSelectorTerms = [{ alias = "al2023@latest" }]
       instanceProfile  = aws_iam_instance_profile.karpenter_node.name
-      kubelet          = { maxPods = var.node_max_pods }
+      kubelet          = { maxPods = local.node_max_pods_effective }
       subnetSelectorTerms = [{
         tags = { "karpenter.sh/discovery" = aws_eks_cluster.this.name }
       }]
@@ -229,28 +229,93 @@ resource "kubectl_manifest" "karpenter_nodepool" {
           expireAfter = "720h"
         }
       }
-      limits = { cpu = tostring(var.karpenter_cpu_limit) }
+      limits = { cpu = tostring(local.karpenter_cpu_limit_effective) }
+      disruption = {
+        # 성능 우선: WhenEmpty 만 회수한다.
+        # WhenEmptyOrUnderutilized 는 파드가 올라가 있는 노드도 "덜 찼다"고 판단해 비우는데,
+        # 그 과정에서 파드가 evict -> 재스케줄 -> 새 노드 부팅(60~90s) 되는 동안 지연이 튄다.
+        # 실측: user p50 이 126ms -> 369ms 로 진동했고, Karpenter 로그에 회수/재프로비저닝이
+        # 반복됐다. WhenEmpty 는 '파드가 하나도 없는 노드'만 지우므로 부하 중 중단이 없다.
+        consolidationPolicy = "WhenEmpty"
+        consolidateAfter    = "1m"
+        budgets = [
+          # 빈 노드는 지워도 중단이 없으므로 한꺼번에 회수한다.
+          { nodes = "100%", reasons = ["Empty"] },
+          # 파드가 실린 노드는 건드리지 않는다(WhenEmpty 라 사실상 발생 안 함).
+          { nodes = "0", reasons = ["Underutilized"] },
+          { nodes = "1", reasons = ["Drifted"] },
+        ]
+      }
+    }
+  })
+
+  depends_on = [kubectl_manifest.karpenter_nodeclass]
+}
+
+
+# ---------------------------------------------------------------------------
+# 격리 노드풀 — isolate=true 인 앱 전용 (apps.tf 의 local.isolated_apps)
+#
+# 왜 필요한가 (실측 근거):
+#   전체 트래픽의 4% 밖에 안 되는 CPU 폭식 앱이 클러스터 CPU 를 거의 다 소비해,
+#   트래픽 75% 를 받는 지연 민감 앱의 p50 이 27ms -> 330ms 로 악화됐다.
+#   지연 민감 앱은 CPU 를 거의 안 쓰는데도(request 의 9%) 응답이 느려진 이유는
+#   CPU 를 기다리는 런큐 대기였다. 같은 노드에 두면 cgroup share 비율로만 나뉘어
+#   폭식 앱이 항상 이긴다.
+#
+# 해결: taint 를 걸어 폭식 앱만 이 노드풀에 격리한다. 지연 민감 앱은 toleration 이
+# 없으므로 커널/스케줄러 수준에서 절대 같은 노드에 앉지 않는다.
+#
+# 노드 수는 karpenter_isolated_max_nodes 로 따로 제한한다 — 폭식 앱이 비용을
+# 무한히 밀어 올리지 못하게 하는 상한이다. 비용(12점)과 폭식 앱 성능(4점) 사이의
+# 트레이드오프를 이 값 하나로 조절한다.
+# ---------------------------------------------------------------------------
+resource "kubectl_manifest" "karpenter_nodepool_isolated" {
+  count = local.need_isolated_pool ? 1 : 0
+
+  yaml_body = yamlencode({
+    apiVersion = "karpenter.sh/v1"
+    kind       = "NodePool"
+    metadata   = { name = "isolated" }
+    spec = {
+      template = {
+        metadata = {
+          labels = { (local.isolated_label_key) = local.isolated_label_val }
+        }
+        spec = {
+          nodeClassRef = {
+            group = "karpenter.k8s.aws"
+            kind  = "EC2NodeClass"
+            name  = "default"
+          }
+          # toleration 이 있는 파드만 여기 올 수 있다.
+          taints = [{
+            key    = local.isolated_taint_key
+            value  = "true"
+            effect = "NoSchedule"
+          }]
+          requirements = [
+            {
+              key      = "node.kubernetes.io/instance-type"
+              operator = "In"
+              values   = local.karpenter_instance_types
+            },
+            {
+              key      = "karpenter.sh/capacity-type"
+              operator = "In"
+              values   = ["on-demand"]
+            }
+          ]
+          expireAfter = "720h"
+        }
+      }
+      limits = { cpu = tostring(local.karpenter_isolated_cpu_limit) }
       disruption = {
         consolidationPolicy = "WhenEmptyOrUnderutilized"
-        # 30s 는 너무 공격적이었다. 실측: 부하가 잠깐 내려가면 파드가 올라가 있는 노드까지
-        # 30초 만에 회수하고("Underutilized ... pod-count:2 ... delete"), 곧바로 HPA 가
-        # 파드를 늘리면 새 노드 부팅(60~90s) 동안 "Insufficient cpu" 로 스케줄이 막혀
-        # 요청이 실패했다(가용성·성능 동시 손실).
-        # 2분: 5분은 저부하 구간에도 노드를 오래 붙잡아 평균 노드 수(=비용 ratio)를 키웠다
-        # (측정 2.1배, 비용 7/12). 가용성 여유(99.5~100%)가 크므로 회수를 앞당겨 비용을
-        # 회수한다. 30s만큼 공격적이지 않아 재프로비저닝 중 "Insufficient cpu" 위험은 억제.
-        consolidateAfter = "2m"
-        # 회수 사유별로 속도를 다르게 둔다.
-        #  - Empty: 파드가 아예 없는 노드 → 지워도 중단이 없으므로 한꺼번에 회수(비용↓).
-        #  - Underutilized/Drifted: 파드가 올라가 있는 노드 → 한 번에 1대만.
-        #    (기본값 10% 는 노드가 늘면 여러 대를 동시에 빼서 재스케줄이 몰린다)
-        # 이렇게 하면 부하가 끝난 뒤 빈 노드가 1대씩 5분 간격으로 빠지는 대신
-        # 한 번에 정리되어 평균 노드 수(비용 ratio)가 줄어든다.
+        consolidateAfter    = "2m"
         budgets = [
           { nodes = "100%", reasons = ["Empty"] },
-          # 1 -> 2: 부하가 빠질 때 파드 실린 노드를 회당 2대까지 회수해 평균 노드 수를 더
-          # 빨리 줄인다(비용). 가용성 여유가 커서 재스케줄 몰림 리스크를 감수할 만하다.
-          { nodes = "2", reasons = ["Underutilized", "Drifted"] },
+          { nodes = "1", reasons = ["Underutilized", "Drifted"] },
         ]
       }
     }

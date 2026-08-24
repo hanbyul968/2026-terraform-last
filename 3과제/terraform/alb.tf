@@ -4,18 +4,8 @@
 # This decouples CloudFront from the EKS provisioning chain — ALB exists ~2min in,
 # so CloudFront distribution deploys in parallel with the cluster.
 
-locals {
-  tg_prefix = {
-    user    = "u-"
-    product = "p-"
-    stress  = "s-"
-  }
-  node_ports = {
-    user    = 30080
-    product = 30081
-    stress  = 30082
-  }
-}
+// 앱 목록/포트/TG prefix 는 모두 apps.tf 의 local.apps 에서 온다.
+// (local.node_ports 는 apps.tf 에서 파생되어 하위 호환용으로 유지)
 
 resource "aws_security_group" "alb" {
   name        = "${local.name}-alb-sg"
@@ -47,12 +37,13 @@ resource "aws_lb" "this" {
 }
 
 resource "aws_lb_target_group" "app" {
-  for_each = local.node_ports
+  for_each = local.apps
 
   # name_prefix (not name): with create_before_destroy, a future replacement
   # must coexist briefly with the old TG — a fixed name would collide.
-  name_prefix = local.tg_prefix[each.key]
-  port        = var.container_port
+  # prefix 는 앱 이름 앞 5자에서 자동 생성 (apps.tf) → 앱이 바뀌어도 충돌 없음.
+  name_prefix = each.value.tg_prefix
+  port        = each.value.container_port
   protocol    = "HTTP"
   vpc_id      = aws_vpc.this.id
   target_type = "ip"
@@ -67,7 +58,7 @@ resource "aws_lb_target_group" "app" {
   }
 
   health_check {
-    path                = var.healthcheck_path
+    path                = each.value.healthcheck_path
     port                = "traffic-port"
     healthy_threshold   = 2
     unhealthy_threshold = 2
@@ -94,21 +85,21 @@ resource "aws_lb_listener" "http" {
 }
 
 resource "aws_lb_listener_rule" "app" {
-  for_each = aws_lb_target_group.app
+  for_each = local.apps
 
   listener_arn = aws_lb_listener.http.arn
-  priority     = index(keys(local.node_ports), each.key) + 10
+  priority     = index(sort(keys(local.apps)), each.key) + 10
 
   action {
     type             = "forward"
-    target_group_arn = each.value.arn
+    target_group_arn = aws_lb_target_group.app[each.key].arn
   }
 
   # path AND origin-verify header (set by CloudFront) — both must match to forward.
-  # 경로가 바뀌면 var.api_prefix (또는 api_paths_override) 만 수정.
+  # 경로는 앱별 path (apps.tf) — api_prefix 변경이나 앱별 커스텀 경로 모두 대응.
   condition {
     path_pattern {
-      values = ["${var.api_prefix}/${each.key}", "${var.api_prefix}/${each.key}/*"]
+      values = [each.value.path, "${each.value.path}/*"]
     }
   }
   condition {
@@ -149,8 +140,10 @@ resource "aws_lb_listener_rule" "healthcheck" {
   priority     = 5
 
   action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.app["user"].arn
+    type = "forward"
+    # 아무 앱이나 하나로 보내면 된다(헬스체크는 DB 를 보지 않는다).
+    # 앱 이름을 하드코딩하지 않고 정렬된 첫 앱을 쓴다 → 앱이 바뀌어도 동작.
+    target_group_arn = aws_lb_target_group.app[local.first_app].arn
   }
 
   condition {

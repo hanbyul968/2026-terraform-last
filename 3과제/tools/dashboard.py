@@ -540,19 +540,15 @@ function tuneCmds(f){
     if(x.max!=null)a.push("-Max "+x.max);
     return a.join(' ');
   }
-  items.forEach(function(x){
-    var n=x.app;
-    var fields=[];
-    if(x.cpu!=null)fields.push('request='+x.cpu);
-    if(x.util!=null)fields.push('target='+x.util+'%');
-    if(x.min!=null)fields.push('min='+x.min);
-    if(x.max!=null)fields.push('max='+x.max);
-    out+='<div class=card style="margin-bottom:12px"><div class=lbl>'+n+' <span class=mut>('+fields.join(', ')+')</span></div>'
-      +tuneCmdBlock('① 값 기록 (tuning/ 에서 실행)',[applyCmd(n,x)])+'</div>';
-  });
-  out+='<div class="tip dim"><h3>반영</h3><div class=why>위 명령을 <code>tuning/</code> 에서 실행하면 tuning.auto.tfvars.json 에 기록된다. '
-    +'모아서 <code>.\\apply.ps1 -Show</code> 로 확인 후 <code>cd ..\\terraform ; terraform apply</code> 로 반영. '
-    +'되돌리기는 <code>.\\rollback.ps1</code>. Terraform 이 단일 진실 공급원이라 드리프트가 없다.</div></div>';
+  // 한 덩어리로: tuning 에서 값 기록 → terraform 으로 반영까지 그대로 붙여넣어 실행.
+  var lines=['cd ..\\tuning'];
+  items.forEach(function(x){ lines.push(applyCmd(x.app,x)); });
+  lines.push('cd ..\\terraform ; terraform apply -target kubernetes_deployment.app -target kubernetes_horizontal_pod_autoscaler_v2.app');
+  out+=tuneCmdBlock('복사해서 그대로 실행 (기록 → 반영)', lines);
+  out+='<div class="tip dim"><h3>참고</h3><div class=why>'
+    +'apply.ps1 은 tuning.auto.tfvars.json 에 값을 기록만 하고, 실제 반영은 마지막 terraform apply 가 한다. '
+    +'되돌리기는 <code>.\\rollback.ps1</code> (기록 제거 → apps 기본값 복귀). '
+    +'Terraform 이 단일 진실 공급원이라 드리프트가 없다.</div></div>';
   return out;
 }
 function tuneRun(){

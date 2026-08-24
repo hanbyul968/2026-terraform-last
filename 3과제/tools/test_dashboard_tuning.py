@@ -53,6 +53,7 @@ user: requests.cpu="200m", min_replicas=3, max_replicas=17, average_utilization=
         self.assertNotIn("kubectl", result["html"])
         self.assertIn(".\\apply.ps1 -App stress -Request 375 -Target 52 -Min 3 -Max 17", result["html"])
         self.assertIn(".\\apply.ps1 -App user -Request 200 -Target 50 -Min 3 -Max 17", result["html"])
+        # 한 덩어리 블록: 마지막에 terraform apply 로 반영까지.
         self.assertIn("terraform apply", result["html"])
         self.assertNotIn("k8s_apps.tf", result["html"])
 
@@ -98,7 +99,9 @@ user: requests.cpu="200m", min_replicas=3, max_replicas=17, average_utilization=
         html = run_parser(text, with_html=True)["html"]
         self.assertNotIn("kubectl", html)
         self.assertIn(".\\apply.ps1 -App product -Request 100 -Target 90", html)
-        self.assertNotIn("-Min", html.split("product")[1].split("stress")[0])  # min/max 없으면 안 붙음
+        # min/max 가 없으면 -Min/-Max 플래그가 붙지 않는다(apps/app_defaults 유지).
+        self.assertNotIn("-Min", html)
+        self.assertNotIn("-Max", html)
 
     def test_unscoped_single_value_is_not_copied_to_all_apps(self):
         text = 'requests.cpu="375m", min_replicas=3, max_replicas=17, average_utilization=52'

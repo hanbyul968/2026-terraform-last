@@ -1,5 +1,22 @@
 # tools/ — 모니터링 대시보드
 
+## 🚨 먼저: PowerShell 실행 정책
+
+`.\dashboard.ps1` 이 아래 오류로 막히면 실행 정책 때문이다. **한 번만 실행하면 끝(관리자 권한 불필요).**
+
+```
+.\dashboard.ps1 : 이 시스템에서 스크립트를 실행할 수 없으므로 ... 파일을 로드할 수 없습니다.
+    + FullyQualifiedErrorId : UnauthorizedAccess
+```
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+바꾸고 싶지 않으면 그때만 우회: `powershell -ExecutionPolicy Bypass -File .\dashboard.ps1 -Demo`
+
+---
+
 트래픽이 들어오는 동안 **어디가 깨졌고 무엇을 고쳐야 하는지** 한 화면에서 보는 도구.
 클러스터·앱·WAF 상태를 모아 4xx/5xx의 원인과 해결 명령까지 뽑아준다.
 

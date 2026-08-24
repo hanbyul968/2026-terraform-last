@@ -1,5 +1,41 @@
 # tuning/ — 공식 채점 · 라이브 Kubernetes 자동 튜닝
 
+## 🚨 0단계: PowerShell 실행 정책 (이거 안 하면 모든 .ps1 이 안 돈다)
+
+`.\setup.ps1` · `.\loadtest.ps1` · `.\optimize.ps1` · `..\tools\dashboard.ps1` 이 아래 오류로
+전부 막히면 실행 정책 때문이다.
+
+```
+.\dashboard.ps1 : 이 시스템에서 스크립트를 실행할 수 없으므로 ... 파일을 로드할 수 없습니다.
+    + FullyQualifiedErrorId : UnauthorizedAccess
+```
+
+**한 번만 실행하면 끝. 관리자 권한 필요 없다.**
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+`RemoteSigned` 는 로컬 스크립트는 서명 없이 허용하고 인터넷에서 받은 것만 서명을 요구한다.
+`Bypass`/`Unrestricted` 보다 안전하므로 이걸 쓴다.
+
+적용했는데도 같은 오류가 나면 ZIP 으로 받아 파일에 차단 표시가 붙은 경우다:
+
+```powershell
+Get-ChildItem ..\.. -Recurse -Filter *.ps1 | Unblock-File
+```
+
+정책을 바꾸고 싶지 않으면 그때만 우회한다:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\setup.ps1 -Cluster wsi2026-cluster -Region ap-northeast-2
+```
+
+> `npm` 도 같은 이유로 막힌다(`npm.ps1` 로드 실패). 그때는 `npm.cmd run dev` 처럼 `.cmd` 를
+> 직접 부르면 정책과 무관하게 실행된다.
+
+---
+
 ## ⚠ 먼저: `hey` 설치 (setup.ps1 이 403 으로 실패할 때)
 
 `setup.ps1` 이 아래처럼 실패하면 **Go 로 직접 빌드**해야 한다.

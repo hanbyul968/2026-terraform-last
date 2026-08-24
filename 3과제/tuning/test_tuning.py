@@ -603,18 +603,37 @@ class PowerShellRunnerContractTests(unittest.TestCase):
         self.assertIn("전 앱 HPA 한 번에 적용", self.script)
         self.assertIn("Measure-Apply { Set-TuningSet $knobSet }", self.script)
 
+    def test_tfvars_written_without_bom(self):
+        """tfvars JSON 은 BOM 없이 써야 한다.
+
+        PowerShell 5.1 의 Set-Content -Encoding UTF8 은 BOM 을 붙이는데, Terraform 의
+        JSON 파서는 BOM 을 거부한다("Invalid start of value: A JSON value must start
+        with a brace..."). 그러면 그 디렉터리의 모든 terraform 명령이 실패한다(실측).
+        """
+        for name in ("optimize.ps1", "apply.ps1", "rollback.ps1"):
+            text = (ROOT / name).read_text(encoding="utf-8-sig")
+            self.assertIn("UTF8Encoding($false)", text, f"{name}: BOM 없는 쓰기 필요")
+            self.assertNotIn("| Set-Content $TuningFile -Encoding UTF8", text, name)
+            self.assertNotIn("| Set-Content $f -Encoding UTF8", text, name)
+
     def test_applies_through_terraform_never_mutates_cluster_directly(self):
         """튜닝은 반드시 Terraform 경유. kubectl 직접 변형은 드리프트를 만든다.
 
         이전 정책은 정반대였다("Terraform은 건드리지 않는다"). 그 결과 채점 회차의
         라이브 값이 .tf 파일값과 전부 달라져, 무엇이 채점된 구성인지 알 수 없었고
         누군가 terraform apply 를 하면 튜닝이 조용히 원복되는 상태였다.
+
+        또한 기본 동작은 '기록만' 이다. apply 는 -RunTerraform 을 줄 때만 수행한다.
         """
         self.assertIn("finally {", self.script)
         self.assertIn("function Set-TuningSet", self.script)
-        # tfvars 에 쓰고 terraform 이 반영한다.
+        # tfvars 에 쓰고, 반영은 선택적으로 terraform 이 수행한다.
         self.assertIn("tuning.auto.tfvars.json", self.script)
-        self.assertIn("terraform apply", self.script)
+        self.assertIn("[switch]$RunTerraform", self.script)
+        self.assertIn("if(-not $RunTerraform)", self.script)
+        # -target 은 값과 분리해 배열로 넘겨야 한다(문자열 하나로 주면 토큰이 쪼개진다).
+        self.assertIn("'-target', 'kubernetes_deployment.app'", self.script)
+        self.assertNotIn("-target=kubernetes_deployment.app", self.script)
         # 클러스터를 직접 고치는 경로가 남아 있으면 안 된다.
         self.assertNotIn("kubectl -n $NS patch", self.script)
         self.assertNotIn("kubectl -n $NS set resources", self.script)

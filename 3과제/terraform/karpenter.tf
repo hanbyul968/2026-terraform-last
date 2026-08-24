@@ -195,9 +195,21 @@ resource "kubectl_manifest" "karpenter_nodeclass" {
     }
   })
 
+  # 서브넷/라우팅이 완성된 뒤에 NodeClass 를 만든다.
+  #
+  # 이유(실측): 초기 apply 중 Karpenter 로그에 아래 에러가 반복됐다.
+  #   "failed listing instance types ... nodepool=default/isolated, error: no subnets found"
+  # 서브넷 태그(karpenter.sh/discovery, vpc.tf 의 aws_subnet.public)는 정상이었고
+  # 잠시 뒤 스스로 해소됐다(=일시적 레이스). 그래도 이 에러가 지속되면 스케일아웃이
+  # 아예 막히므로(부하 중이면 치명적), 순서를 명시해 발생 창을 없앤다.
+  #
+  # ⚠ 태그를 aws_ec2_tag 로 따로 또 붙이지 않는다. aws_subnet.public 이 tags 를
+  #   인라인으로 소유하므로 이중 관리가 되어 매 apply 마다 서로 덮어쓰는 drift 가 난다.
   depends_on = [
     helm_release.karpenter,
     aws_eks_access_entry.karpenter_node,
+    aws_subnet.public,
+    aws_route_table_association.public,
   ]
 }
 
@@ -311,9 +323,22 @@ resource "kubectl_manifest" "karpenter_nodepool_isolated" {
       }
       limits = { cpu = tostring(local.karpenter_isolated_cpu_limit) }
       disruption = {
+        # 격리 풀은 general 풀과 정책이 다르다.
+        #
+        # general 풀(user/product, SLO 0.2s)은 WhenEmpty 다 — 부하 중 파드를 옮기면
+        # 지연이 튀므로 파드가 실린 노드는 건드리지 않는다.
+        #
+        # 격리 풀(stress)은 WhenEmptyOrUnderutilized 여야 한다. 이유(실측):
+        #   stress min_replicas=2 + hostname topology spread 로 파드가 노드마다 1개씩
+        #   흩어져서, WhenEmpty 기준으로는 어느 노드도 '비어 있지' 않아 2대가 영구히
+        #   남았다(각 노드에 stress 파드 1개). 한 노드에 2개를 모으면 1대로 충분하다.
+        #   stress 는 SLO 가 1s 로 느슨하고 재스케줄 지연을 감당할 수 있으므로,
+        #   여기서는 회수를 허용해 유휴 노드를 없앤다.
+        #   (hostname maxSkew=2 라 노드당 2개까지 허용되어 통합 계획이 성립한다)
         consolidationPolicy = "WhenEmptyOrUnderutilized"
         consolidateAfter    = "2m"
         budgets = [
+          # 빈 노드는 즉시, 파드가 실린 노드는 한 번에 1대만(재스케줄 몰림 방지).
           { nodes = "100%", reasons = ["Empty"] },
           { nodes = "1", reasons = ["Underutilized", "Drifted"] },
         ]

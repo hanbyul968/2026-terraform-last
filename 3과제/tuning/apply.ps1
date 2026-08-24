@@ -24,7 +24,7 @@ param(
   [int]$Max = 0,
   [switch]$Show,
   [switch]$Clear,
-  [switch]$NoApply
+  [switch]$RunTerraform
 )
 $ErrorActionPreference = 'Stop'
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -47,10 +47,19 @@ function Read-TuningMap {
 }
 
 function Invoke-Apply {
-  if ($NoApply) { Write-Host 'NoApply 지정 — terraform apply 생략' -ForegroundColor Yellow; return }
+  # 기본은 apply 하지 않는다(tfvars 기록만). 반영까지 원하면 -RunTerraform 을 준다.
+  if (-not $RunTerraform) {
+    Write-Host "기록만 완료 — 반영은 직접: cd $TF_DIR ; terraform apply" -ForegroundColor Yellow
+    return
+  }
+  # 인수는 배열로 넘긴다. "-target=a.b" 를 한 문자열로 주면 PowerShell 이 토큰을 쪼개
+  # terraform 이 'Invalid target' / 'Too many command line arguments' 로 죽는다(실측).
+  $tfArgs = @('apply', '-auto-approve', '-input=false',
+    '-target', 'kubernetes_deployment.app',
+    '-target', 'kubernetes_horizontal_pod_autoscaler_v2.app')
   Push-Location $TF_DIR
   try {
-    & terraform apply -auto-approve -input=false -target=kubernetes_deployment.app -target=kubernetes_horizontal_pod_autoscaler_v2.app
+    & terraform @tfArgs
     if ($LASTEXITCODE -ne 0) { throw "terraform apply 실패 (exit=$LASTEXITCODE)" }
   } finally { Pop-Location }
 }
@@ -85,7 +94,10 @@ if ($Max -gt 0) { $entry.max_replicas = $Max }
 if ($entry.Count -eq 0) { throw '변경할 값이 없습니다 (-Request/-Target/-Min/-Max 중 하나 이상 지정).' }
 
 $map[$App] = $entry
-(@{ app_tuning = $map } | ConvertTo-Json -Depth 10) | Set-Content $TuningFile -Encoding UTF8
+# ⚠ BOM 금지: Terraform JSON 파서가 BOM 을 거부한다("Invalid start of value").
+#   Set-Content -Encoding UTF8 은 PowerShell 5.1 에서 BOM 을 붙이므로 쓰지 않는다.
+$json = (@{ app_tuning = $map } | ConvertTo-Json -Depth 10)
+[IO.File]::WriteAllText($TuningFile, $json, (New-Object Text.UTF8Encoding($false)))
 
 Write-Host "기록: $App -> $($entry | ConvertTo-Json -Compress)" -ForegroundColor Cyan
 Write-Host "파일: $TuningFile" -ForegroundColor DarkGray

@@ -115,12 +115,23 @@ resource "kubernetes_deployment" "app" {
         # AZ 분산은 '선호'로 둔다. DoNotSchedule 로 강제하면 한쪽 AZ 가 꽉 찰 때
         # 반대쪽으로 못 가고 Pending 이 되어 가용성을 깎는다. 채점은 AZ 장애를
         # 측정하지 않으므로 Pending 위험을 감수할 이유가 없다.
-        topology_spread_constraint {
-          max_skew           = 1
-          topology_key       = "topology.kubernetes.io/zone"
-          when_unsatisfiable = "ScheduleAnyway"
-          match_label_keys   = ["pod-template-hash"]
-          label_selector { match_labels = { app = each.key } }
+        #
+        # ⚠ 격리 앱(isolate=true)에는 이 제약을 걸지 않는다. Karpenter 는 선호(ScheduleAnyway)
+        #   제약조차 통합을 막는 요소로 취급한다. 실측 로그:
+        #     "pod(s) have a preferred TopologySpreadConstraint which can prevent consolidation"
+        #   stress 파드 2개가 AZ 2곳에 1개씩 흩어진 상태에서, 한 노드로 모으면 둘 다 같은
+        #   AZ 가 되어 zone maxSkew=1 을 위반하므로 통합 계획이 세워지지 않았다.
+        #   그 결과 t3.medium 2대가 파드 1개씩만 얹고 계속 남았다.
+        #   격리 앱은 지연 민감하지 않고 가용성은 레플리카 수로 확보되므로 AZ 분산을 포기한다.
+        dynamic "topology_spread_constraint" {
+          for_each = each.value.isolate ? [] : [1]
+          content {
+            max_skew           = 1
+            topology_key       = "topology.kubernetes.io/zone"
+            when_unsatisfiable = "ScheduleAnyway"
+            match_label_keys   = ["pod-template-hash"]
+            label_selector { match_labels = { app = each.key } }
+          }
         }
 
         # 노드 단위 분산. maxSkew=2 인 이유: 1 로 두면 Karpenter 가 노드를 통합할 수

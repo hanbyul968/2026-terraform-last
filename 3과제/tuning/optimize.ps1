@@ -25,6 +25,10 @@ param(
   # 일으켜 회차 시간을 잡아먹고 가용성을 깎으므로, 켜려면 -AllowRequestChange 를 명시한다.
   [switch]$AllowRequestChange,
   [switch]$Apply,
+  # 기본은 클러스터를 바꾸지 않는다(권장값 기록만). 실제 반영까지 원하면 지정한다.
+  # ⚠ -Apply 를 줘도 이 스위치가 없으면 후보 '검증'은 불가능하다(값이 반영되지 않으므로
+  #   측정해도 baseline 과 같다). 그 경우 권장값 산출까지만 수행한다.
+  [switch]$RunTerraform,
   [string]$Url = ''
 )
 $ErrorActionPreference = 'Stop'
@@ -87,15 +91,34 @@ function Read-Tuning {
 }
 function Write-Tuning { param($Map)
   $f = Get-TuningFile
-  (@{ app_tuning = $Map } | ConvertTo-Json -Depth 10) | Set-Content $f -Encoding UTF8
+  # ⚠ Set-Content -Encoding UTF8 을 쓰면 안 된다. PowerShell 5.1 은 BOM 을 붙이고,
+  #   Terraform 의 JSON 파서는 BOM 을 거부한다("Invalid start of value").
+  #   그러면 그 디렉터리의 모든 terraform 명령이 실패한다(실측).
+  #   WriteAllText + UTF8Encoding($false) 로 BOM 없이 쓴다.
+  $json = (@{ app_tuning = $Map } | ConvertTo-Json -Depth 10)
+  [IO.File]::WriteAllText($f, $json, (New-Object Text.UTF8Encoding($false)))
   return $f
 }
 function Invoke-TerraformApply {
-  # 튜닝은 Deployment 와 HPA 만 바꾼다 → 그 둘만 -target 으로 좁힌다.
-  # 전체 apply 는 느리고, 부하 중 CloudFront/RDS 까지 건드릴 위험이 있다.
+  # 기본은 apply 하지 않는다. 튜너는 '권장값을 tuning.auto.tfvars.json 에 기록'까지만 하고,
+  # 반영은 사용자가 판단해서 수행한다(대시보드에 붙여넣거나 직접 terraform apply).
+  # -RunTerraform 을 명시하면 실제로 적용한다.
+  if(-not $RunTerraform){
+    Write-Host ("  [기록만] apply 생략 — 반영은 직접: cd $TF_DIR ; terraform apply") -ForegroundColor Yellow
+    return
+  }
+  # ⚠ 인수는 배열로 넘긴다. "-target=a.b" 형태를 한 문자열로 주면 PowerShell 이
+  #   토큰을 쪼개 terraform 이 "-target=kubernetes_deployment" 와 ".app" 을 따로 받고
+  #   'Invalid target' + 'Too many command line arguments' 로 죽는다(실측).
+  #   -target 과 값을 분리하고 값을 따옴표로 감싸는 형태가 안전하다.
+  $tfArgs = @(
+    'apply', '-auto-approve', '-input=false',
+    '-target', 'kubernetes_deployment.app',
+    '-target', 'kubernetes_horizontal_pod_autoscaler_v2.app'
+  )
   Push-Location $TF_DIR
   try {
-    & terraform apply -auto-approve -input=false -target=kubernetes_deployment.app -target=kubernetes_horizontal_pod_autoscaler_v2.app
+    & terraform @tfArgs
     if($LASTEXITCODE -ne 0){ throw "terraform apply 실패 (exit=$LASTEXITCODE)" }
   } finally { Pop-Location }
 }
@@ -167,6 +190,15 @@ function ConvertTo-DurationSeconds { param([string]$Value)
 }
 
 $sw=[Diagnostics.Stopwatch]::StartNew();$deadline=[TimeSpan]::FromMinutes($BudgetMinutes)
+
+# -Apply 는 '측정하며 채택/롤백'을 뜻한다. 그런데 -RunTerraform 없이는 값이 클러스터에
+# 반영되지 않으므로 측정해도 baseline 과 동일하고, 채택 판정이 무의미해진다.
+# 그래서 이 조합은 권장값 산출 모드로 내린다(오해로 인한 잘못된 결론 방지).
+if($Apply -and -not $RunTerraform){
+  Write-Warning '-Apply 는 -RunTerraform 없이는 값이 반영되지 않아 후보 검증이 불가능합니다.'
+  Write-Warning '권장값 산출 모드로 진행합니다. 실제 반영까지 원하면 -RunTerraform 을 함께 주세요.'
+  $Apply = $false
+}
 
 # ---------------------------------------------------------------------------
 # 20분 예산 강제.
